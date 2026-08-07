@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Papergod</title>
+  <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="app">
+    <header id="header">
+      <span class="logo">Papergod</span>
+      <button id="library-open" class="header-button">Writing libraries</button>
+      <button id="focus-annotation-open" class="header-button">Focus annotation</button>
+      <button id="review-open" class="header-button">Review &amp; revise</button>
+      <button id="peer-review-open" class="header-button">Peer review panel</button>
+      <span id="status"></span>
+      <span id="engine-status"></span>
+    </header>
+    <aside id="sidebar">
+      <div class="sidebar-heading"><h3>Files</h3></div>
+      <ul id="file-tree"></ul>
+      <div class="sidebar-heading outline-heading">
+        <h3>Document outline</h3>
+        <button id="sync-outline" title="Synchronize outline">↻</button>
+      </div>
+      <div id="outline-tree"><div class="outline-empty">Open a TeX document</div></div>
+    </aside>
+    <main id="editor-panel">
+      <div id="editor-toolbar">
+        <span id="current-file">main.tex</span>
+        <div id="workspace-view-switch" role="tablist" aria-label="Document view">
+          <button id="source-view-btn" class="view-tab active" type="button" role="tab" aria-selected="true" aria-controls="source-view">Source</button>
+          <button id="preview-view-btn" class="view-tab" type="button" role="tab" aria-selected="false" aria-controls="preview-panel" disabled>PDF Preview</button>
+        </div>
+        <button id="save-btn" title="Save (Ctrl+S)">Save</button>
+        <button id="compile-btn" title="Compile LaTeX">Compile</button>
+      </div>
+      <div id="workspace-view">
+        <section id="source-view" class="workspace-pane" role="tabpanel" aria-labelledby="source-view-btn">
+          <textarea id="editor"></textarea>
+        </section>
+        <section id="preview-panel" class="workspace-pane hidden" role="tabpanel" aria-labelledby="preview-view-btn">
+          <div id="pdf-preview" aria-label="Rendered PDF pages"></div>
+          <div id="preview-placeholder">Compile to render the paper</div>
+        </section>
+      </div>
+    </main>
+    <div id="right-panel">
+      <div id="ai-panel">
+        <div id="ai-header"><span>AI Assistant</span><span id="agent-provider">mock</span></div>
+        <div id="ai-module-list">
+          <section class="ai-module" id="agent-config-module">
+            <div class="ai-module-head"><div><span class="module-index">1</span><strong>Agent Configuration</strong></div><button id="agent-config-open" type="button">Configure</button></div>
+            <div id="agent-config-summary">Detecting local Agents…</div>
+          </section>
+          <section class="ai-module" id="prompt-context-module">
+            <div class="ai-module-head"><div><span class="module-index">2</span><strong>Prompt Context</strong></div><button id="prompt-preview-open" type="button">Preview full</button></div>
+            <div id="context-title">Whole document</div>
+            <div id="prompt-context-meta">Waiting for document structure…</div>
+            <pre id="prompt-context-excerpt">The prompt will be assembled from project, document, element, and writing-library context.</pre>
+            <details id="context-definition-editor">
+              <summary>Edit current element definitions</summary>
+              <label for="context-summary">Summary</label>
+              <textarea id="context-summary" rows="2" placeholder="What this element contributes..."></textarea>
+              <label for="context-prompt">Writing prompt</label>
+              <textarea id="context-prompt" rows="2" placeholder="Goals and constraints for this element..."></textarea>
+              <div id="intent-field" class="hidden">
+                <label for="context-intent">Sentence intent</label>
+                <textarea id="context-intent" rows="2" placeholder="What this sentence is doing..."></textarea>
+              </div>
+              <div class="context-actions">
+                <button id="save-context">Save context</button>
+                <button id="clear-context">Use whole document</button>
+                <span id="library-selection-status">Resources: auto</span>
+              </div>
+            </details>
+          </section>
+          <section class="ai-module" id="temporary-prompt-module">
+            <div class="ai-module-head"><div><span class="module-index">3</span><strong>Temporary Prompt</strong></div><span>This run only</span></div>
+            <textarea id="ai-prompt" rows="3" placeholder="Add a one-time goal, constraint, or instruction…"></textarea>
+          </section>
+          <section class="ai-module invoke-module">
+            <button id="ai-invoke" type="button">请神</button>
+          </section>
+        </div>
+        <div id="library-usage" class="hidden"></div>
+        <div id="paragraph-draft" class="hidden"></div>
+        <div id="ai-suggestions"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="agent-config-overlay" class="hidden compact-overlay" role="dialog" aria-modal="true" aria-labelledby="agent-config-title">
+    <section class="compact-dialog">
+      <div class="library-header"><div><h2 id="agent-config-title">Agent Configuration</h2><p>Configure local CLI Agents; unavailable adapters retain the same interface shape</p></div><button id="agent-config-close" aria-label="Close">×</button></div>
+      <div class="compact-dialog-body">
+        <div id="agent-provider-list"></div>
+        <form id="agent-config-form">
+          <label for="agent-config-provider">Provider</label>
+          <select id="agent-config-provider"></select>
+          <label for="agent-config-command">CLI command</label>
+          <input id="agent-config-command" placeholder="codex">
+          <label for="agent-config-model">Model (reserved)</label>
+          <input id="agent-config-model" placeholder="Use the CLI default">
+          <label for="agent-config-args">Prefix args (one per line)</label>
+          <textarea id="agent-config-args" rows="3"></textarea>
+          <p id="agent-config-note"></p>
+          <button type="submit" class="primary">Save and use for this server</button>
+        </form>
+      </div>
+    </section>
+  </div>
+
+  <div id="prompt-preview-overlay" class="hidden compact-overlay" role="dialog" aria-modal="true" aria-labelledby="prompt-preview-title">
+    <section class="compact-dialog prompt-dialog">
+      <div class="library-header"><div><h2 id="prompt-preview-title">Full Prompt Context</h2><p id="prompt-preview-meta">Not generated yet</p></div><button id="prompt-preview-close" aria-label="Close">×</button></div>
+      <pre id="prompt-preview-content">Prompt not generated yet.</pre>
+    </section>
+  </div>
+
+  <div id="invoke-confirm-overlay" class="hidden compact-overlay" role="dialog" aria-modal="true" aria-labelledby="invoke-confirm-title">
+    <section class="compact-dialog confirm-dialog">
+      <div class="library-header"><div><h2 id="invoke-confirm-title">Confirm Agent Invocation</h2><p>The Prompt Context and Temporary Prompt will be merged and sent to the active Agent.</p></div><button id="invoke-confirm-close" aria-label="Close">×</button></div>
+      <div class="confirm-dialog-body">
+        <p id="invoke-confirm-summary">Preparing prompt…</p>
+        <div class="confirm-actions"><button id="invoke-cancel" type="button">Cancel</button><button id="invoke-confirm" class="primary" type="button">Confirm</button></div>
+      </div>
+    </section>
+  </div>
+
+  <div id="focus-annotation-overlay" class="hidden" role="dialog" aria-modal="true" aria-labelledby="focus-annotation-title">
+    <section id="focus-annotation-dialog">
+      <div class="library-header">
+        <div><h2 id="focus-annotation-title">Focus Annotation</h2><p>Read one paragraph and one sentence at a time, then prepare precise prompts for later Agent revisions</p></div>
+        <div class="focus-header-status"><span id="focus-annotation-progress">No document loaded</span><button id="focus-annotation-close" aria-label="Close">×</button></div>
+      </div>
+      <div id="focus-annotation-body">
+        <aside id="focus-outline-column">
+          <div class="focus-column-heading"><span>Paper structure</span><small>Sections and paragraphs</small></div>
+          <div id="focus-section-tree"><div class="outline-empty">No structure available</div></div>
+        </aside>
+        <main id="focus-paragraph-column">
+          <div class="focus-column-heading"><span>Paragraph reading</span><small id="focus-paragraph-position">No paragraph selected</small></div>
+          <div class="focus-navigation">
+            <button id="focus-prev-paragraph" type="button">← Previous</button>
+            <button id="focus-locate-paragraph" type="button">Open in editor</button>
+            <button id="focus-next-paragraph" type="button">Next →</button>
+          </div>
+          <article id="focus-paragraph-text" class="focus-reading-text">Select a paragraph from the paper structure.</article>
+          <div class="focus-prompt-editor paragraph-prompt-editor">
+            <label for="focus-paragraph-prompt">Paragraph revision prompt</label>
+            <p>Describe the paragraph's purpose, required evidence, constraints, and intended revision.</p>
+            <textarea id="focus-paragraph-prompt" rows="8" placeholder="Example: Establish the research gap, retain the quantitative evidence, and end with the study question."></textarea>
+            <button id="focus-save-paragraph" class="primary" type="button">Save paragraph prompt</button>
+          </div>
+        </main>
+        <aside id="focus-sentence-column">
+          <div class="focus-column-heading"><span>Sentence reading</span><small id="focus-sentence-position">No sentence selected</small></div>
+          <div id="focus-sentence-list"><div class="outline-empty">Select a paragraph first</div></div>
+          <article id="focus-sentence-text" class="focus-reading-text sentence-reading-text">Select a sentence to inspect it closely.</article>
+          <div class="focus-prompt-editor sentence-prompt-editor">
+            <label for="focus-sentence-intent">Sentence intent</label>
+            <input id="focus-sentence-intent" placeholder="What rhetorical job does this sentence perform?">
+            <label for="focus-sentence-prompt">Sentence revision prompt</label>
+            <textarea id="focus-sentence-prompt" rows="5" placeholder="Example: Replace vague emphasis with a measurable claim; do not alter the reported values."></textarea>
+            <button id="focus-save-sentence" class="primary" type="button">Save sentence annotation</button>
+          </div>
+        </aside>
+      </div>
+    </section>
+  </div>
+
+  <div id="library-overlay" class="hidden" role="dialog" aria-modal="true" aria-labelledby="library-title">
+    <section id="library-drawer">
+      <div class="library-header">
+        <div><h2 id="library-title">Writing libraries</h2><p>Corpora, reusable sentence patterns, and collaboration vocabulary</p></div>
+        <button id="library-close" aria-label="Close">×</button>
+      </div>
+      <div class="library-toolbar">
+        <select id="library-kind">
+          <option value="corpora">Corpora</option>
+          <option value="sentence-patterns">Sentence patterns</option>
+          <option value="vocabulary">Vocabulary</option>
+        </select>
+        <select id="library-scope" class="hidden">
+          <option value="global">Global vocabulary</option>
+          <option value="session">This writing session</option>
+        </select>
+        <input id="library-search" type="search" placeholder="Search this library...">
+        <button id="library-extract">Extract from paper</button>
+      </div>
+      <div class="library-body">
+        <form id="library-form">
+          <h3>Add resource</h3>
+          <label id="resource-name-label" for="resource-name">Name</label>
+          <input id="resource-name" required>
+          <label id="resource-content-label" for="resource-content">Content</label>
+          <textarea id="resource-content" rows="5" required></textarea>
+          <label id="resource-description-label" for="resource-description">Description</label>
+          <textarea id="resource-description" rows="2"></textarea>
+          <label for="resource-tags">Tags (comma separated)</label>
+          <input id="resource-tags">
+          <div id="resource-extra-field">
+            <label id="resource-extra-label" for="resource-extra">Applicable sections</label>
+            <input id="resource-extra">
+          </div>
+          <div id="resource-examples-field" class="hidden">
+            <label for="resource-examples">Examples (one per line)</label>
+            <textarea id="resource-examples" rows="2"></textarea>
+          </div>
+          <label for="resource-source">Source / citation</label>
+          <input id="resource-source">
+          <button type="submit" class="primary">Add to library</button>
+        </form>
+        <div class="library-results-column">
+          <div id="library-candidates" class="hidden"></div>
+          <div id="library-list"></div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <div id="review-overlay" class="hidden" role="dialog" aria-modal="true" aria-labelledby="review-title">
+    <section id="review-drawer">
+      <div class="library-header">
+        <div><h2 id="review-title">Review &amp; Revise</h2><p>From feedback and revision plans to response letters, verification, and delivery</p></div>
+        <button id="review-close" aria-label="Close">×</button>
+      </div>
+      <nav id="review-workflow-tabs" role="tablist" aria-label="Review and revision workflow">
+        <button id="review-plan-tab" class="active" type="button" role="tab" aria-selected="true" aria-controls="review-planning-view">1. Opinions &amp; plans</button>
+        <button id="review-delivery-tab" type="button" role="tab" aria-selected="false" aria-controls="review-delivery-view">2. Responses &amp; delivery</button>
+      </nav>
+      <div id="review-planning-view" class="review-body" role="tabpanel" aria-labelledby="review-plan-tab">
+        <aside class="review-inputs">
+          <form id="selection-comment-form">
+            <h3>Comment on selection</h3>
+            <p class="helper">Select text in the editor, then anchor a comment to that exact range.</p>
+            <textarea id="selection-comment" rows="3" placeholder="What should change, and why?" required></textarea>
+            <input id="selection-fix" placeholder="Optional replacement text">
+            <div class="review-row">
+              <select id="selection-category"><option>content</option><option>style</option><option>grammar</option><option>structure</option><option>method</option><option>evidence</option><option>citation</option></select>
+              <select id="selection-severity"><option>info</option><option>minor</option><option>major</option><option>critical</option></select>
+            </div>
+            <button type="submit" class="primary">Add anchored comment</button>
+          </form>
+          <form id="review-import-form">
+            <h3>Import reviewer feedback</h3>
+            <input id="review-actor" placeholder="Reviewer / source">
+            <textarea id="review-import-text" rows="8" placeholder="1. Replace “old text” with “new text”.&#10;2. Explain the evidence for..." required></textarea>
+            <button type="submit" class="primary">Extract atomic opinions</button>
+          </form>
+        </aside>
+        <main class="review-workspace">
+          <section class="review-section">
+            <div class="review-section-head">
+              <div><h3>Opinions</h3><span id="annotation-count">0 selected</span></div>
+              <div class="review-row"><input id="revision-title-input" value="Guided revision" aria-label="Revision title"><button id="plan-selected" class="primary">Plan selected</button></div>
+            </div>
+            <div id="annotation-list"><div class="outline-empty">No comments yet</div></div>
+          </section>
+          <section class="review-section revision-section">
+            <div class="review-section-head"><div><h3>Revision plans</h3><span>Every write is previewed and user-approved</span></div></div>
+            <div id="revision-list"><div class="outline-empty">No revision plans yet</div></div>
+          </section>
+        </main>
+      </div>
+      <div id="review-delivery-view" class="self-revise-body hidden" role="tabpanel" aria-labelledby="review-delivery-tab">
+        <aside class="self-revise-actions">
+          <section>
+            <h3>Additional review</h3>
+            <p>Run an independent specialist panel, then send its prioritized concerns back into the opinions and plans stage.</p>
+            <button id="self-open-panel" type="button">Run peer review panel</button>
+          </section>
+          <section>
+            <h3>Generate a full-paper draft</h3>
+            <p>Uses project/document prompts, outline prompts, paragraph goals, and selected writing-library resources.</p>
+            <textarea id="paper-generation-instruction" rows="5" placeholder="Describe the intended paper, contribution, evidence, and constraints..."></textarea>
+            <div id="generation-resource-status">Writing resources: automatic</div>
+            <button id="generate-paper" class="primary" type="button">Generate reviewable draft</button>
+            <div id="paper-generation-preview" class="hidden"></div>
+          </section>
+          <section>
+            <h3>Portable export</h3>
+            <p>Download source, annotations, reviews, revisions, response letters, change lists, run history, and recovery metadata.</p>
+            <button id="download-workflow-export" type="button">Download JSON bundle</button>
+          </section>
+        </aside>
+        <main class="self-revise-workspace">
+          <div class="review-section-head"><div><h3>Responses &amp; verification</h3><span id="self-revise-summary">Loading...</span></div><button id="refresh-self-revise">Refresh</button></div>
+          <div id="self-revision-list"><div class="outline-empty">No revision plans yet</div></div>
+          <div class="review-section-head history-heading"><div><h3>Workflow history</h3><span>Agent runs, reviews, and revisions</span></div></div>
+          <div id="workflow-history"><div class="outline-empty">No history yet</div></div>
+        </main>
+      </div>
+    </section>
+  </div>
+
+  <div id="peer-review-overlay" class="hidden" role="dialog" aria-modal="true" aria-labelledby="peer-review-title">
+    <section id="peer-review-drawer">
+      <div class="library-header">
+        <div><h2 id="peer-review-title">Peer review panel</h2><p>Independent specialist reviews, followed by explicit consensus and conflict synthesis</p></div>
+        <button id="peer-review-close" aria-label="Close">×</button>
+      </div>
+      <div class="peer-review-body">
+        <aside class="panel-builder">
+          <h3>Configure a review round</h3>
+          <label for="panel-name">Round name</label>
+          <input id="panel-name" value="Independent peer review">
+          <label for="panel-provider">Agent provider</label>
+          <select id="panel-provider"><option value="mock">Mock</option><option value="codex">Codex</option><option value="opencode">OpenCode</option></select>
+          <div class="builder-heading"><h3>Reviewers</h3><span>Select 1–8</span></div>
+          <div id="reviewer-builder"><div class="outline-empty">Loading profiles...</div></div>
+          <details class="custom-builder"><summary>Add custom reviewer</summary>
+            <input id="custom-reviewer-name" placeholder="Reviewer name">
+            <select id="custom-reviewer-role"><option value="methodology">Methodology</option><option value="statistics">Statistics</option><option value="writing">Writing</option><option value="domain">Domain</option><option value="reproducibility">Reproducibility</option></select>
+            <textarea id="custom-reviewer-focus" rows="2" placeholder="Independent review focus"></textarea>
+            <textarea id="custom-reviewer-prompt" rows="2" placeholder="Additional instruction"></textarea>
+            <button id="add-custom-reviewer" type="button">Add reviewer</button>
+          </details>
+          <div class="builder-heading"><h3>Rubric</h3><button id="add-rubric" type="button">+ criterion</button></div>
+          <div id="rubric-builder"></div>
+          <button id="create-panel" class="primary" type="button">Create review round</button>
+        </aside>
+        <main class="panel-results">
+          <div class="review-section-head"><div><h3>Review rounds</h3><span id="peer-review-count">0 rounds</span></div><button id="refresh-peer-reviews">Refresh</button></div>
+          <div id="peer-review-list"><div class="outline-empty">No review rounds yet</div></div>
+        </main>
+      </div>
+    </section>
+  </div>
+
+  <script src="/vendor/codemirror/lib/codemirror.js"></script>
+  <script src="/vendor/codemirror/mode/stex/stex.js"></script>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
