@@ -57,6 +57,22 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
   app.use('/vendor/pdfjs-dist', express.static(join(PROJECT_ROOT, 'node_modules', 'pdfjs-dist'), { dotfiles: 'deny' }));
   app.use(express.static(join(PROJECT_ROOT, 'public')));
 
+  async function hydrateAgentCommands(projectData = null) {
+    const project = projectData || await loadProject(workspaceRoot);
+    const profiles = project.project.agentProfiles || {};
+    for (const id of ['codex', 'claude-code', 'opencode']) {
+      const profile = profiles[id];
+      if (profile?.command?.trim()) {
+        agentCommands[id] = {
+          command: profile.command.trim(),
+          args: Array.isArray(profile.args) ? profile.args : [],
+          model: typeof profile.model === 'string' ? profile.model.trim() : '',
+        };
+      }
+    }
+    return project;
+  }
+
   async function requestSuggestions(content, prompt, req, context = {}) {
     const libraryContext = context.libraryContext || { prompt: '', resources: [], resourceIds: [], mode: 'automatic' };
     if (provider === 'mock') {
@@ -73,6 +89,7 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
         library: { mode: libraryContext.mode, providedResources: libraryContext.resources, usedResourceIds: [] },
       };
     }
+    await hydrateAgentCommands();
     const startedAt = new Date().toISOString();
     const run = await createAgentRun(workspaceRoot, {
       provider, operation: 'suggest', status: 'running', prompt,
@@ -132,14 +149,14 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
 
   app.get('/api/agents', async (_req, res) => {
     await resourceResponse(res, async () => {
+      const project = await hydrateAgentCommands();
       const detected = await detectAgentProviders({ commands: agentCommands });
       const detectedById = new Map(detected.map((item) => [item.provider, item]));
-      const project = await loadProject(workspaceRoot);
       const saved = project.project.agentProfiles || {};
       const definitions = [
         { id: 'mock', label: 'Mock', adapter: 'built-in', command: '', capabilities: ['revise', 'paragraph', 'review', 'generation'], integration: 'ready' },
         { id: 'codex', label: 'Codex CLI', adapter: 'structured-cli', command: 'codex', capabilities: ['revise', 'paragraph', 'review', 'generation'], integration: 'ready' },
-        { id: 'claude-code', label: 'Claude Code', adapter: 'reserved', command: 'claude', capabilities: [], integration: 'planned' },
+        { id: 'claude-code', label: 'Claude Code', adapter: 'structured-cli', command: 'claude', capabilities: ['revise', 'paragraph', 'review', 'generation'], integration: 'ready' },
         { id: 'opencode', label: 'OpenCode CLI', adapter: 'structured-cli', command: 'opencode', capabilities: ['revise', 'paragraph', 'review', 'generation'], integration: 'ready' },
       ];
       return {
@@ -149,7 +166,7 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
           command: saved[definition.id]?.command || definition.command,
           args: saved[definition.id]?.args || [],
           model: saved[definition.id]?.model || '',
-          ...(detectedById.get(definition.id) || { available: false, version: null }),
+          ...(detectedById.get(definition.id) || { available: false, authenticated: false, authStatus: 'CLI unavailable', version: null }),
         })),
       };
     });
@@ -166,10 +183,12 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
         project.project.agentProfiles ||= {};
         project.project.agentProfiles[id] = { command, args, model };
       });
-      if (id !== 'mock' && command.trim()) agentCommands[id] = { command: command.trim(), args };
+      if (id !== 'mock' && command.trim()) agentCommands[id] = { command: command.trim(), args, model: model.trim() };
       if (activate) {
-        if (id === 'claude-code') {
-          const error = new Error('Claude Code adapter is reserved for a future integration');
+        const detected = await detectAgentProviders({ commands: agentCommands, providers: [id] });
+        const selected = detected.find((item) => item.provider === id);
+        if (!selected?.available) {
+          const error = new Error(`${id} CLI is not available with the saved command`);
           error.status = 409;
           throw error;
         }
@@ -177,6 +196,20 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
         app.locals.config.provider = provider;
       }
       return { ok: true, selected: provider };
+    });
+  });
+
+  app.post('/api/agents/probe', async (req, res) => {
+    const { id, command = '', args = [], model = '' } = req.body || {};
+    if (!['mock', 'codex', 'claude-code', 'opencode'].includes(id)) return res.status(400).json({ error: 'Unknown Agent provider' });
+    if (typeof command !== 'string' || !Array.isArray(args) || args.some((item) => typeof item !== 'string') || typeof model !== 'string') {
+      return res.status(400).json({ error: 'Invalid Agent probe configuration' });
+    }
+    await resourceResponse(res, async () => {
+      const commands = { ...agentCommands };
+      if (id !== 'mock' && command.trim()) commands[id] = { command: command.trim(), args, model: model.trim() };
+      const detected = await detectAgentProviders({ commands, providers: [id] });
+      return { agent: detected.find((item) => item.provider === id) };
     });
   });
 
@@ -380,9 +413,10 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
   app.post('/api/reviews/:id/run', async (req, res) => {
     const controller = new AbortController();
     req.once('aborted', () => controller.abort());
-    await resourceResponse(res, async () => ({
-      review: await runReviewRound(workspaceRoot, req.params.id, { commands: agentCommands, signal: controller.signal }),
-    }));
+    await resourceResponse(res, async () => {
+      await hydrateAgentCommands();
+      return { review: await runReviewRound(workspaceRoot, req.params.id, { commands: agentCommands, signal: controller.signal }) };
+    });
   });
 
   app.post('/api/reviews/:id/to-revision', async (req, res) => {
@@ -400,9 +434,12 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
   app.post('/api/review/orchestrate', async (req, res) => {
     const controller = new AbortController();
     req.once('aborted', () => controller.abort());
-    await resourceResponse(res, async () => await orchestrateReviewOpinions(workspaceRoot, req.body || {}, {
-      provider, commands: agentCommands, signal: controller.signal,
-    }), 201);
+    await resourceResponse(res, async () => {
+      await hydrateAgentCommands();
+      return await orchestrateReviewOpinions(workspaceRoot, req.body || {}, {
+        provider, commands: agentCommands, signal: controller.signal,
+      });
+    }, 201);
   });
 
   app.post('/api/annotations', async (req, res) => {
@@ -427,9 +464,12 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
   app.post('/api/generate/paper', async (req, res) => {
     const controller = new AbortController();
     req.once('aborted', () => controller.abort());
-    await resourceResponse(res, async () => await generatePaperRevision(workspaceRoot, req.body || {}, {
-      provider, commands: agentCommands, signal: controller.signal,
-    }), 201);
+    await resourceResponse(res, async () => {
+      await hydrateAgentCommands();
+      return await generatePaperRevision(workspaceRoot, req.body || {}, {
+        provider, commands: agentCommands, signal: controller.signal,
+      });
+    }, 201);
   });
 
   app.get('/api/workflow/history', async (req, res) => {

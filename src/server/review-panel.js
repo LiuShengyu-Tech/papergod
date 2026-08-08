@@ -77,7 +77,7 @@ export async function createReviewRound(workspaceRoot, input = {}) {
     reports: [], items: [], synthesis: { summary: '', verdict: '', consensus: [], conflicts: [], priorities: [] },
     createdAt: timestamp, updatedAt: timestamp,
   };
-  if (!['mock', 'codex', 'opencode'].includes(review.provider)) throw problem('provider must be mock, codex, or opencode');
+  if (!['mock', 'codex', 'claude-code', 'opencode'].includes(review.provider)) throw problem('provider must be mock, codex, claude-code, or opencode');
   await updateProject(workspaceRoot, (draft) => draft.reviews.push(review));
   return review;
 }

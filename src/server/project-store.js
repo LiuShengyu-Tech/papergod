@@ -129,7 +129,7 @@ function migrateReview(review = {}) {
     documentId: typeof review.documentId === 'string' ? review.documentId : '',
     name: typeof review.name === 'string' && review.name ? review.name : 'Migrated review round',
     status: ['draft', 'running', 'complete', 'failed'].includes(review.status) ? review.status : 'draft',
-    provider: ['mock', 'codex', 'opencode'].includes(review.provider) ? review.provider : 'mock',
+    provider: ['mock', 'codex', 'claude-code', 'opencode'].includes(review.provider) ? review.provider : 'mock',
     reviewers, rubric, reports: Array.isArray(review.reports) ? review.reports : [], items,
     synthesis: isObject(review.synthesis) ? review.synthesis : { summary: '', verdict: '', consensus: [], conflicts: [], priorities: [] },
     createdAt: typeof review.createdAt === 'string' && review.createdAt ? review.createdAt : timestamp,
@@ -336,7 +336,7 @@ function validateReview(item, path, errors) {
   validateString(item.documentId, `${path}.documentId`, errors, { allowEmpty: false });
   validateString(item.name, `${path}.name`, errors, { allowEmpty: false });
   validateEnum(item.status, ['draft', 'running', 'complete', 'failed'], `${path}.status`, errors);
-  validateEnum(item.provider, ['mock', 'codex', 'opencode'], `${path}.provider`, errors);
+  validateEnum(item.provider, ['mock', 'codex', 'claude-code', 'opencode'], `${path}.provider`, errors);
   if (!Array.isArray(item.reviewers)) errors.push(`${path}.reviewers must be an array`);
   else item.reviewers.forEach((reviewer, index) => {
     const reviewerPath = `${path}.reviewers[${index}]`;
@@ -388,7 +388,7 @@ function validateReview(item, path, errors) {
 
 function validateAgentRun(item, path, errors) {
   if (!validateRecordBase(item, path, errors)) return;
-  validateEnum(item.provider, ['mock', 'codex', 'opencode'], `${path}.provider`, errors);
+  validateEnum(item.provider, ['mock', 'codex', 'claude-code', 'opencode'], `${path}.provider`, errors);
   validateString(item.operation, `${path}.operation`, errors, { allowEmpty: false });
   validateEnum(item.status, ['queued', 'running', 'complete', 'failed', 'cancelled'], `${path}.status`, errors);
   validateString(item.prompt, `${path}.prompt`, errors);

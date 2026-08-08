@@ -9,7 +9,7 @@ import { initializeWorkspace } from './server/workspace.js';
 import { startServer } from './server/index.js';
 
 const PACKAGE_FILE = fileURLToPath(new URL('../package.json', import.meta.url));
-const AGENT_PROVIDERS = ['mock', 'codex', 'opencode'];
+const AGENT_PROVIDERS = ['mock', 'codex', 'claude-code', 'opencode'];
 
 export function parseCliArgs(argv, cwd = process.cwd()) {
   const options = { workspaceRoot: null, port: 3000, provider: 'mock', demo: false, help: false, version: false };
@@ -52,7 +52,7 @@ Usage:
 Options:
   -w, --workspace <path>  Paper workspace (default: current directory)
   -p, --port <number>     Local HTTP port (default: 3000; 0 selects a free port)
-      --agent <provider>  mock, codex, or opencode (default: mock)
+      --agent <provider>  mock, codex, claude-code, or opencode (default: mock)
       --demo              Seed built-in prompts, libraries, vocabulary, and demo paper
   -h, --help              Show help
   -v, --version           Show version

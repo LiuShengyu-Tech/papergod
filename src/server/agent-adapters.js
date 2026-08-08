@@ -6,7 +6,7 @@ import { tmpdir } from 'os';
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT_BYTES = 5 * 1024 * 1024;
 const MAX_INPUT_CHARS = 500_000;
-const PROVIDERS = ['mock', 'codex', 'opencode'];
+const PROVIDERS = ['mock', 'codex', 'claude-code', 'opencode'];
 
 export const SUGGESTION_OUTPUT_SCHEMA = {
   type: 'object',
@@ -93,12 +93,21 @@ function safeEnvironment() {
 
 function commandSpec(provider, overrides = {}) {
   const override = overrides[provider];
-  if (!override) return { command: provider, prefixArgs: [] };
-  if (typeof override === 'string') return { command: override, prefixArgs: [] };
-  return { command: override.command, prefixArgs: Array.isArray(override.args) ? override.args : [] };
+  const defaultCommand = provider === 'claude-code' ? 'claude' : provider;
+  if (!override) return { command: defaultCommand, prefixArgs: [], model: '' };
+  if (typeof override === 'string') return { command: override, prefixArgs: [], model: '' };
+  return {
+    command: override.command || defaultCommand,
+    prefixArgs: Array.isArray(override.args) ? override.args : [],
+    model: typeof override.model === 'string' ? override.model.trim() : '',
+  };
 }
 
-export function runProcess(command, args, { cwd, input = '', timeoutMs = DEFAULT_TIMEOUT_MS, signal } = {}) {
+function modelArgs(spec) {
+  return spec.model ? ['--model', spec.model] : [];
+}
+
+export function runProcess(command, args, { cwd, input = '', timeoutMs = DEFAULT_TIMEOUT_MS, signal, allowFailure = false } = {}) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       const error = new Error('Agent run cancelled');
@@ -147,6 +156,7 @@ export function runProcess(command, args, { cwd, input = '', timeoutMs = DEFAULT
     child.once('error', (error) => finish(error));
     child.once('close', (code, signal) => {
       if (code !== 0) {
+        if (allowFailure) return finish(null, { stdout, stderr, code, signal });
         const error = new Error((stderr || stdout || `Agent exited with code ${code}`).trim());
         error.code = 'AGENT_PROCESS_FAILED';
         error.exitCode = code;
@@ -207,9 +217,29 @@ export function parseAgentJson(output) {
 
 function parseStructuredAgentJson(output, predicate) {
   const trimmed = output.trim();
+  const locate = (value) => {
+    if (predicate(value)) return value;
+    if (!value || typeof value !== 'object') return null;
+    for (const key of ['structured_output', 'structuredOutput', 'result', 'message', 'content']) {
+      const nested = value[key];
+      if (predicate(nested)) return nested;
+      if (typeof nested === 'string') {
+        try {
+          const parsed = JSON.parse(nested);
+          const found = locate(parsed);
+          if (found) return found;
+        } catch {}
+      } else if (nested && typeof nested === 'object') {
+        const found = locate(nested);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
   try {
     const direct = JSON.parse(trimmed);
-    if (predicate(direct)) return direct;
+    const found = locate(direct);
+    if (found) return found;
   } catch {}
 
   const candidates = [];
@@ -237,7 +267,8 @@ function parseStructuredAgentJson(output, predicate) {
   for (const candidate of candidates) {
     try {
       const parsed = JSON.parse(candidate);
-      if (predicate(parsed)) return parsed;
+      const found = locate(parsed);
+      if (found) return found;
     } catch {}
   }
   const error = new Error('Agent did not return valid JSON');
@@ -386,6 +417,43 @@ ${content}
 </document>`;
 }
 
+async function runClaudeStructured(prompt, schema, parser, options) {
+  const spec = commandSpec('claude-code', options.commands);
+  const args = [
+    ...spec.prefixArgs,
+    '--print',
+    '--output-format', 'json',
+    '--json-schema', JSON.stringify(schema),
+    '--permission-mode', 'plan',
+    '--tools', '',
+    '--no-session-persistence',
+    ...modelArgs(spec),
+  ];
+  const result = await runProcess(spec.command, args, {
+    cwd: options.workspaceRoot,
+    input: prompt,
+    timeoutMs: options.timeoutMs,
+    signal: options.signal,
+  });
+  return parser(result.stdout);
+}
+
+async function runClaude(request, options) {
+  return runClaudeStructured(buildPrompt(request), SUGGESTION_OUTPUT_SCHEMA, parseAgentJson, options);
+}
+
+async function runClaudeReview(request, options) {
+  return runClaudeStructured(buildReviewPrompt(request), REVIEW_OUTPUT_SCHEMA, parseReviewAgentJson, options);
+}
+
+async function runClaudePaperGeneration(request, options) {
+  return runClaudeStructured(buildPaperGenerationPrompt(request), PAPER_GENERATION_OUTPUT_SCHEMA, parsePaperGenerationJson, options);
+}
+
+async function runClaudeReviewOrchestration(request, options) {
+  return runClaudeStructured(buildReviewOrchestrationPrompt(request), REVIEW_ORCHESTRATION_OUTPUT_SCHEMA, parseReviewOrchestrationJson, options);
+}
+
 async function runCodex(request, options) {
   const temporary = await mkdtemp(join(tmpdir(), 'papergod-codex-'));
   try {
@@ -393,7 +461,7 @@ async function runCodex(request, options) {
     const outputFile = join(temporary, 'last-message.json');
     await writeFile(schemaFile, JSON.stringify(SUGGESTION_OUTPUT_SCHEMA), 'utf-8');
     const spec = commandSpec('codex', options.commands);
-    const args = [...spec.prefixArgs, 'exec', '--sandbox', 'read-only', '--skip-git-repo-check', '--ephemeral', '--color', 'never', '--output-schema', schemaFile, '--output-last-message', outputFile, '-'];
+    const args = [...spec.prefixArgs, 'exec', ...modelArgs(spec), '--sandbox', 'read-only', '--skip-git-repo-check', '--ephemeral', '--color', 'never', '--output-schema', schemaFile, '--output-last-message', outputFile, '-'];
     await runProcess(spec.command, args, { cwd: options.workspaceRoot, input: buildPrompt(request), timeoutMs: options.timeoutMs, signal: options.signal });
     return parseAgentJson(await readFile(outputFile, 'utf-8'));
   } finally {
@@ -407,7 +475,7 @@ async function runOpenCode(request, options) {
     const requestFile = join(temporary, 'request.txt');
     await writeFile(requestFile, buildPrompt(request), 'utf-8');
     const spec = commandSpec('opencode', options.commands);
-    const args = [...spec.prefixArgs, 'run', '--pure', '--format', 'json', '--dir', options.workspaceRoot, '--file', requestFile, 'Follow the attached academic editing request and return only the required JSON.'];
+    const args = [...spec.prefixArgs, 'run', ...modelArgs(spec), '--pure', '--format', 'json', '--dir', options.workspaceRoot, '--file', requestFile, 'Follow the attached academic editing request and return only the required JSON.'];
     const result = await runProcess(spec.command, args, { cwd: options.workspaceRoot, timeoutMs: options.timeoutMs, signal: options.signal });
     return parseAgentJson(result.stdout);
   } finally {
@@ -422,7 +490,7 @@ async function runCodexReview(request, options) {
     const outputFile = join(temporary, 'last-message.json');
     await writeFile(schemaFile, JSON.stringify(REVIEW_OUTPUT_SCHEMA), 'utf-8');
     const spec = commandSpec('codex', options.commands);
-    const args = [...spec.prefixArgs, 'exec', '--sandbox', 'read-only', '--skip-git-repo-check', '--ephemeral', '--color', 'never', '--output-schema', schemaFile, '--output-last-message', outputFile, '-'];
+    const args = [...spec.prefixArgs, 'exec', ...modelArgs(spec), '--sandbox', 'read-only', '--skip-git-repo-check', '--ephemeral', '--color', 'never', '--output-schema', schemaFile, '--output-last-message', outputFile, '-'];
     await runProcess(spec.command, args, { cwd: options.workspaceRoot, input: buildReviewPrompt(request), timeoutMs: options.timeoutMs, signal: options.signal });
     return parseReviewAgentJson(await readFile(outputFile, 'utf-8'));
   } finally {
@@ -436,7 +504,7 @@ async function runOpenCodeReview(request, options) {
     const requestFile = join(temporary, 'review-request.txt');
     await writeFile(requestFile, buildReviewPrompt(request), 'utf-8');
     const spec = commandSpec('opencode', options.commands);
-    const args = [...spec.prefixArgs, 'run', '--pure', '--format', 'json', '--dir', options.workspaceRoot, '--file', requestFile, 'Perform the independent peer review and return only the required JSON.'];
+    const args = [...spec.prefixArgs, 'run', ...modelArgs(spec), '--pure', '--format', 'json', '--dir', options.workspaceRoot, '--file', requestFile, 'Perform the independent peer review and return only the required JSON.'];
     const result = await runProcess(spec.command, args, { cwd: options.workspaceRoot, timeoutMs: options.timeoutMs, signal: options.signal });
     return parseReviewAgentJson(result.stdout);
   } finally {
@@ -451,7 +519,7 @@ async function runCodexPaperGeneration(request, options) {
     const outputFile = join(temporary, 'last-message.json');
     await writeFile(schemaFile, JSON.stringify(PAPER_GENERATION_OUTPUT_SCHEMA), 'utf-8');
     const spec = commandSpec('codex', options.commands);
-    const args = [...spec.prefixArgs, 'exec', '--sandbox', 'read-only', '--skip-git-repo-check', '--ephemeral', '--color', 'never', '--output-schema', schemaFile, '--output-last-message', outputFile, '-'];
+    const args = [...spec.prefixArgs, 'exec', ...modelArgs(spec), '--sandbox', 'read-only', '--skip-git-repo-check', '--ephemeral', '--color', 'never', '--output-schema', schemaFile, '--output-last-message', outputFile, '-'];
     await runProcess(spec.command, args, { cwd: options.workspaceRoot, input: buildPaperGenerationPrompt(request), timeoutMs: options.timeoutMs, signal: options.signal });
     return parsePaperGenerationJson(await readFile(outputFile, 'utf-8'));
   } finally {
@@ -465,7 +533,7 @@ async function runOpenCodePaperGeneration(request, options) {
     const requestFile = join(temporary, 'paper-request.txt');
     await writeFile(requestFile, buildPaperGenerationPrompt(request), 'utf-8');
     const spec = commandSpec('opencode', options.commands);
-    const args = [...spec.prefixArgs, 'run', '--pure', '--format', 'json', '--dir', options.workspaceRoot, '--file', requestFile, 'Generate the complete LaTeX draft and return only the required JSON.'];
+    const args = [...spec.prefixArgs, 'run', ...modelArgs(spec), '--pure', '--format', 'json', '--dir', options.workspaceRoot, '--file', requestFile, 'Generate the complete LaTeX draft and return only the required JSON.'];
     const result = await runProcess(spec.command, args, { cwd: options.workspaceRoot, timeoutMs: options.timeoutMs, signal: options.signal });
     return parsePaperGenerationJson(result.stdout);
   } finally {
@@ -480,7 +548,7 @@ async function runCodexReviewOrchestration(request, options) {
     const outputFile = join(temporary, 'last-message.json');
     await writeFile(schemaFile, JSON.stringify(REVIEW_ORCHESTRATION_OUTPUT_SCHEMA), 'utf-8');
     const spec = commandSpec('codex', options.commands);
-    const args = [...spec.prefixArgs, 'exec', '--sandbox', 'read-only', '--skip-git-repo-check', '--ephemeral', '--color', 'never', '--output-schema', schemaFile, '--output-last-message', outputFile, '-'];
+    const args = [...spec.prefixArgs, 'exec', ...modelArgs(spec), '--sandbox', 'read-only', '--skip-git-repo-check', '--ephemeral', '--color', 'never', '--output-schema', schemaFile, '--output-last-message', outputFile, '-'];
     await runProcess(spec.command, args, { cwd: options.workspaceRoot, input: buildReviewOrchestrationPrompt(request), timeoutMs: options.timeoutMs, signal: options.signal });
     return parseReviewOrchestrationJson(await readFile(outputFile, 'utf-8'));
   } finally { await rm(temporary, { recursive: true, force: true }); }
@@ -492,24 +560,48 @@ async function runOpenCodeReviewOrchestration(request, options) {
     const requestFile = join(temporary, 'orchestration-request.txt');
     await writeFile(requestFile, buildReviewOrchestrationPrompt(request), 'utf-8');
     const spec = commandSpec('opencode', options.commands);
-    const args = [...spec.prefixArgs, 'run', '--pure', '--format', 'json', '--dir', options.workspaceRoot, '--file', requestFile, 'Orchestrate the review feedback and return only the required JSON.'];
+    const args = [...spec.prefixArgs, 'run', ...modelArgs(spec), '--pure', '--format', 'json', '--dir', options.workspaceRoot, '--file', requestFile, 'Orchestrate the review feedback and return only the required JSON.'];
     const result = await runProcess(spec.command, args, { cwd: options.workspaceRoot, timeoutMs: options.timeoutMs, signal: options.signal });
     return parseReviewOrchestrationJson(result.stdout);
   } finally { await rm(temporary, { recursive: true, force: true }); }
 }
 
-export async function detectAgentProviders({ commands = {} } = {}) {
+export async function detectAgentProviders({ commands = {}, providers = ['mock', 'codex', 'claude-code', 'opencode'] } = {}) {
   const result = [];
-  for (const provider of ['codex', 'opencode']) {
+  for (const provider of providers.filter((item) => item !== 'mock')) {
+    if (!PROVIDERS.includes(provider)) continue;
     const spec = commandSpec(provider, commands);
     try {
       const version = await runProcess(spec.command, [...spec.prefixArgs, '--version'], { timeoutMs: 5000 });
-      result.push({ provider, available: true, version: (version.stdout || version.stderr).trim() });
+      let authenticated = false;
+      let authStatus = 'Authentication not confirmed';
+      try {
+        if (provider === 'codex') {
+          const auth = await runProcess(spec.command, [...spec.prefixArgs, 'login', 'status'], { timeoutMs: 5000, allowFailure: true });
+          authenticated = auth.code === 0;
+          authStatus = authenticated ? 'Signed in' : 'Sign-in required';
+        } else if (provider === 'claude-code') {
+          const auth = await runProcess(spec.command, [...spec.prefixArgs, 'auth', 'status'], { timeoutMs: 5000, allowFailure: true });
+          const parsed = JSON.parse((auth.stdout || auth.stderr).trim());
+          authenticated = parsed.loggedIn === true;
+          authStatus = authenticated ? `Signed in${parsed.authMethod ? ` · ${parsed.authMethod}` : ''}` : 'Sign-in required';
+        } else {
+          const auth = await runProcess(spec.command, [...spec.prefixArgs, 'auth', 'list'], { timeoutMs: 5000 });
+          const clean = auth.stdout.replace(/\x1b\[[0-9;]*m/g, '');
+          const credentialCount = (clean.match(/●/g) || []).length;
+          authenticated = credentialCount > 0;
+          authStatus = authenticated ? `${credentialCount} credential source${credentialCount === 1 ? '' : 's'} detected` : 'Provider login required';
+        }
+      } catch {}
+      result.push({ provider, available: true, authenticated, authStatus, version: (version.stdout || version.stderr).trim() });
     } catch (error) {
-      result.push({ provider, available: false, version: null, error: error.code === 'ENOENT' ? 'Not installed' : error.message });
+      result.push({ provider, available: false, authenticated: false, authStatus: 'CLI unavailable', version: null, error: error.code === 'ENOENT' ? 'Not installed' : error.message });
     }
   }
-  return [{ provider: 'mock', available: true, version: 'built-in' }, ...result];
+  return [
+    ...(providers.includes('mock') ? [{ provider: 'mock', available: true, authenticated: true, authStatus: 'Built in', version: 'built-in' }] : []),
+    ...result,
+  ];
 }
 
 export async function runWritingAgent(provider, request, options = {}) {
@@ -517,7 +609,9 @@ export async function runWritingAgent(provider, request, options = {}) {
   if (typeof request?.prompt !== 'string' || typeof request?.content !== 'string') throw new Error('prompt and content must be strings');
   if (request.content.length + request.prompt.length > MAX_INPUT_CHARS) throw new Error('Agent input exceeds 500,000 characters');
   const runtime = { workspaceRoot: options.workspaceRoot, commands: options.commands || {}, timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS, signal: options.signal };
-  const response = provider === 'codex' ? await runCodex(request, runtime) : await runOpenCode(request, runtime);
+  const response = provider === 'codex' ? await runCodex(request, runtime)
+    : provider === 'claude-code' ? await runClaude(request, runtime)
+      : await runOpenCode(request, runtime);
   const validation = validateSuggestionResponse(response, request.content, request.resourceIds || []);
   if (!validation.ok) {
     const error = new Error('Agent response failed validation');
@@ -536,7 +630,9 @@ export async function runAcademicReviewAgent(provider, request, options = {}) {
   const promptSize = JSON.stringify({ reviewer: request.reviewer, rubric: request.rubric }).length;
   if (request.content.length + promptSize > MAX_INPUT_CHARS) throw new Error('Agent input exceeds 500,000 characters');
   const runtime = { workspaceRoot: options.workspaceRoot, commands: options.commands || {}, timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS, signal: options.signal };
-  const response = provider === 'codex' ? await runCodexReview(request, runtime) : await runOpenCodeReview(request, runtime);
+  const response = provider === 'codex' ? await runCodexReview(request, runtime)
+    : provider === 'claude-code' ? await runClaudeReview(request, runtime)
+      : await runOpenCodeReview(request, runtime);
   const validation = validateReviewResponse(response, request.content, request.rubric.map((item) => item.id));
   if (!validation.ok) {
     const error = new Error('Agent review response failed validation');
@@ -553,7 +649,9 @@ export async function runPaperGenerationAgent(provider, request, options = {}) {
   const inputSize = request.instruction.length + String(request.projectContext || '').length + String(request.outlineContext || '').length + String(request.resourceContext || '').length;
   if (inputSize > MAX_INPUT_CHARS) throw new Error('Agent input exceeds 500,000 characters');
   const runtime = { workspaceRoot: options.workspaceRoot, commands: options.commands || {}, timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS, signal: options.signal };
-  const response = provider === 'codex' ? await runCodexPaperGeneration(request, runtime) : await runOpenCodePaperGeneration(request, runtime);
+  const response = provider === 'codex' ? await runCodexPaperGeneration(request, runtime)
+    : provider === 'claude-code' ? await runClaudePaperGeneration(request, runtime)
+      : await runOpenCodePaperGeneration(request, runtime);
   const validation = validatePaperGenerationResponse(response, request.resourceIds || []);
   if (!validation.ok) {
     const error = new Error('Generated paper failed validation'); error.code = 'AGENT_INVALID_RESPONSE'; error.details = validation.errors; throw error;
@@ -566,7 +664,9 @@ export async function runReviewOrchestrationAgent(provider, request, options = {
   if (typeof request?.feedback !== 'string' || typeof request?.content !== 'string') throw new Error('feedback and content must be strings');
   if (request.feedback.length + request.content.length + String(request.outlineContext || '').length > MAX_INPUT_CHARS) throw new Error('Agent input exceeds 500,000 characters');
   const runtime = { workspaceRoot: options.workspaceRoot, commands: options.commands || {}, timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS, signal: options.signal };
-  const response = provider === 'codex' ? await runCodexReviewOrchestration(request, runtime) : await runOpenCodeReviewOrchestration(request, runtime);
+  const response = provider === 'codex' ? await runCodexReviewOrchestration(request, runtime)
+    : provider === 'claude-code' ? await runClaudeReviewOrchestration(request, runtime)
+      : await runOpenCodeReviewOrchestration(request, runtime);
   const validation = validateReviewOrchestrationResponse(response, request.content);
   if (!validation.ok) {
     const error = new Error('Review orchestration failed validation'); error.code = 'AGENT_INVALID_RESPONSE'; error.details = validation.errors; throw error;

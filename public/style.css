@@ -492,14 +492,16 @@ body {
 .agent-provider-card span { color: var(--text-dim); font-size: 8px; text-transform: uppercase; }
 .agent-provider-card p { color: var(--text-dim); font-size: 9px; line-height: 1.4; margin-top: 5px; }
 .agent-provider-card .available { color: var(--success); }
-.agent-provider-card .planned { color: var(--warn); }
+.agent-provider-card .attention { color: var(--warn); }
 #agent-config-form { padding: 14px; }
 #agent-config-form label { display: block; color: var(--text-dim); font-size: 8px; text-transform: uppercase; margin: 8px 0 3px; }
 #agent-config-form input, #agent-config-form select, #agent-config-form textarea {
   width: 100%; border: 1px solid var(--border); border-radius: 4px; background: var(--bg-input); color: var(--text); padding: 7px; font: 10px/1.4 inherit;
 }
 #agent-config-form p { min-height: 28px; color: var(--warn); font-size: 9px; line-height: 1.4; margin: 8px 0; }
-#agent-config-form button { width: 100%; border: 0; border-radius: 4px; padding: 8px; background: var(--accent); color: var(--bg-dark); font-weight: 700; cursor: pointer; }
+#agent-config-form button { border: 1px solid var(--border); border-radius: 4px; padding: 8px; background: var(--bg-input); color: var(--text); font-weight: 700; cursor: pointer; }
+.agent-config-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+#agent-config-form .agent-config-actions button.primary { border-color: var(--accent); background: var(--accent); color: var(--bg-dark); }
 .prompt-dialog { width: min(900px, 96vw); }
 #prompt-preview-content { overflow: auto; margin: 0; padding: 16px; color: var(--text); background: #171722; white-space: pre-wrap; font: 10px/1.55 'SF Mono', monospace; }
 .confirm-dialog { width: min(520px, 94vw); }

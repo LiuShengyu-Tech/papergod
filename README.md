@@ -1,6 +1,6 @@
 # Papergod
 
-AI-powered LaTeX writing platform — a local-first Overleaf-style editor with safe compilation, structured writing context, and Mock/Codex/OpenCode assistants.
+AI-powered LaTeX writing platform — a local-first Overleaf-style editor with safe compilation, structured writing context, and Mock/Codex/Claude Code/OpenCode assistants.
 
 ## Quick Start
 
@@ -20,7 +20,7 @@ npx papergod .
 npx papergod ./my-paper --port 4312 --agent codex
 ```
 
-The CLI initializes `main.tex` when the workspace contains no TeX files and stores Papergod metadata in `.papergod/project.json`. Agent choices are `mock`, `codex`, and `opencode`. External providers require an installed and authenticated CLI; Papergod invokes them non-interactively with structured output, timeouts, output limits, and read-only analysis permissions.
+The CLI initializes `main.tex` when the workspace contains no TeX files and stores Papergod metadata in `.papergod/project.json`. Agent choices are `mock`, `codex`, `claude-code`, and `opencode`. External providers require an installed and authenticated CLI; Papergod invokes them non-interactively with structured output, timeouts, output limits, and read-only analysis permissions.
 
 ![Papergod demo](./papergod-demo.png)
 
@@ -61,10 +61,12 @@ Express server (127.0.0.1 only)
 
 - The assistant is organized into Agent Configuration, assembled Prompt Context, a one-run Temporary Prompt, and the single **请神** invocation button
 - **请神** first shows a confirmation dialog, then submits one merged `Prompt Context + Temporary Prompt` instruction to the active Agent
-- Agent configuration uses a shared provider shape for Mock, Codex CLI, Claude Code, and OpenCode; Claude Code is visibly reserved for a future execution adapter
+- Agent configuration uses one shared provider shape for Mock, Codex CLI, Claude Code, and OpenCode; all three external adapters support revision, paragraph drafting, peer review, review orchestration, and full-paper generation
+- Papergod detects CLI versions and non-secret authentication readiness, offers a **Check connection** action, and reports installed, sign-in-needed, or ready states without exposing credentials
+- Custom CLI paths, prefix arguments, and model overrides are persisted in `.papergod/project.json`, reloaded on later runs, and passed to the real CLI invocation
 - Preview the complete invocation context assembled from project/document/element prompts, summaries, sentence intent, selected libraries, temporary instructions, and target source
 - **Mock agent**: deterministic suggestions based on pattern matching (passive voice, "very + adjective", short conclusions)
-- **CLI agents**: Codex and OpenCode run non-interactively with validated structured output, read-only analysis, timeouts, cancellation, and audit records
+- **CLI agents**: Codex, Claude Code, and OpenCode run non-interactively with validated structured output, read-only/plan execution, timeouts, cancellation, and audit records
 - **Structured workflows**: editing, review orchestration, peer review, and full-paper generation each use a dedicated validated JSON protocol
 - **Accept/Reject**: both decisions are persisted; accepted edits use atomic revisions and checksum recovery points
 - **Element scope**: select a section, paragraph, or sentence from the outline to constrain prompts and diffs to that exact source range
@@ -146,7 +148,7 @@ src/server/
   security.js   — Path sanitization + security headers
   latex.js      — Engine detection + compilation
   agent.js      — Suggestion store and deterministic Mock agent
-  agent-adapters.js — Codex/OpenCode non-interactive adapters
+  agent-adapters.js — Codex/Claude Code/OpenCode non-interactive adapters
   project-store.js — Versioned project metadata and validation
   project-resources.js — Corpus, vocabulary, annotation, and revision resources
   latex-structure.js — LaTeX structure/range parser

@@ -102,12 +102,15 @@
           <select id="agent-config-provider"></select>
           <label for="agent-config-command">CLI command</label>
           <input id="agent-config-command" placeholder="codex">
-          <label for="agent-config-model">Model (reserved)</label>
+          <label for="agent-config-model">Model override</label>
           <input id="agent-config-model" placeholder="Use the CLI default">
           <label for="agent-config-args">Prefix args (one per line)</label>
           <textarea id="agent-config-args" rows="3"></textarea>
           <p id="agent-config-note"></p>
-          <button type="submit" class="primary">Save and use for this server</button>
+          <div class="agent-config-actions">
+            <button id="agent-config-probe" type="button">Check connection</button>
+            <button type="submit" class="primary">Save and use</button>
+          </div>
         </form>
       </div>
     </section>
@@ -309,7 +312,7 @@
           <label for="panel-name">Round name</label>
           <input id="panel-name" value="Independent peer review">
           <label for="panel-provider">Agent provider</label>
-          <select id="panel-provider"><option value="mock">Mock</option><option value="codex">Codex</option><option value="opencode">OpenCode</option></select>
+          <select id="panel-provider"><option value="mock">Mock</option><option value="codex">Codex</option><option value="claude-code">Claude Code</option><option value="opencode">OpenCode</option></select>
           <div class="builder-heading"><h3>Reviewers</h3><span>Select 1–8</span></div>
           <div id="reviewer-builder"><div class="outline-empty">Loading profiles...</div></div>
           <details class="custom-builder"><summary>Add custom reviewer</summary>

@@ -184,13 +184,13 @@ test('GET /api/config exposes selected local provider', async () => {
   assert.equal(data.workspace, tmpWorkspace);
 });
 
-test('Agent configuration exposes ready adapters and the reserved Claude Code interface', async () => {
+test('Agent configuration exposes Codex, Claude Code, and OpenCode adapters', async () => {
   const listed = await api('/api/agents');
   assert.equal(listed.status, 200);
   assert.equal(listed.data.selected, 'mock');
   assert.ok(listed.data.providers.some((item) => item.id === 'codex' && item.integration === 'ready'));
   assert.ok(listed.data.providers.some((item) => item.id === 'opencode' && item.integration === 'ready'));
-  assert.ok(listed.data.providers.some((item) => item.id === 'claude-code' && item.integration === 'planned'));
+  assert.ok(listed.data.providers.some((item) => item.id === 'claude-code' && item.integration === 'ready'));
   const saved = await api('/api/agents/config', {
     method: 'PUT', body: { id: 'mock', command: '', args: [], model: '', activate: true },
   });
@@ -458,6 +458,8 @@ test('Frontend exposes outline and layered writing context controls', async () =
   assert.ok(html.includes('id="library-selection-status"'));
   assert.ok(html.includes('id="agent-config-module"'));
   assert.ok(html.includes('id="agent-config-overlay"'));
+  assert.ok(html.includes('id="agent-config-probe"'));
+  assert.ok(html.includes('<option value="claude-code">Claude Code</option>'));
   assert.ok(html.includes('id="prompt-context-module"'));
   assert.ok(html.includes('id="prompt-preview-overlay"'));
   assert.ok(html.includes('id="temporary-prompt-module"'));
@@ -603,6 +605,8 @@ test('Agent response parser accepts JSON and JSONL text events', () => {
   assert.deepEqual(parseAgentJson(JSON.stringify(payload)), payload);
   const event = JSON.stringify({ type: 'message', part: { text: JSON.stringify(payload) } });
   assert.deepEqual(parseAgentJson(event), payload);
+  const claudeResult = JSON.stringify({ type: 'result', structured_output: payload, result: '' });
+  assert.deepEqual(parseAgentJson(claudeResult), payload);
 });
 
 test('Agent response validation requires exact source text', () => {
@@ -626,7 +630,7 @@ test('Agent response validation rejects unprovided resource provenance', () => {
   assert.ok(validation.errors.some((error) => error.includes('was not provided')));
 });
 
-test('Codex and OpenCode adapters use structured output through fake CLIs', async () => {
+test('Codex, Claude Code, and OpenCode adapters use structured output through fake CLIs', async () => {
   const fakeCli = join(tmpWorkspace, 'fake-agent.mjs');
   await writeFile(fakeCli, `
 import { writeFileSync } from 'fs';
@@ -634,6 +638,10 @@ const args = process.argv.slice(2);
 if (args.includes('--version')) {
   process.stdout.write('fake-agent 1.0.0\\n');
   process.exit(0);
+}
+if (args.includes('--output-format') && (!args.includes('--json-schema') || args[args.indexOf('--model') + 1] !== 'test-model')) {
+  process.stderr.write('Claude structured output or model flag missing');
+  process.exit(2);
 }
 const response = JSON.stringify({
   summary: 'One precise edit.',
@@ -646,18 +654,21 @@ else process.stdout.write(JSON.stringify({ type: 'text', part: { text: response 
 `, 'utf-8');
   const commands = {
     codex: { command: process.execPath, args: [fakeCli] },
+    'claude-code': { command: process.execPath, args: [fakeCli], model: 'test-model' },
     opencode: { command: process.execPath, args: [fakeCli] },
   };
   const request = { prompt: 'Improve precision.', content: 'This result is very important.' };
   const codex = await runWritingAgent('codex', request, { workspaceRoot: tmpWorkspace, commands });
+  const claude = await runWritingAgent('claude-code', request, { workspaceRoot: tmpWorkspace, commands });
   const opencode = await runWritingAgent('opencode', request, { workspaceRoot: tmpWorkspace, commands });
   assert.equal(codex.suggestions[0].suggestedText, 'crucial');
+  assert.deepEqual(claude, codex);
   assert.deepEqual(opencode, codex);
   const providers = await detectAgentProviders({ commands });
   assert.ok(providers.every((provider) => provider.available));
 });
 
-test('Codex and OpenCode peer-review adapters enforce structured reports', async () => {
+test('Codex, Claude Code, and OpenCode peer-review adapters enforce structured reports', async () => {
   const fakeCli = join(tmpWorkspace, 'fake-review-agent.mjs');
   await writeFile(fakeCli, `
 import { writeFileSync } from 'fs';
@@ -672,6 +683,7 @@ else process.stdout.write(JSON.stringify({ type: 'text', part: { text: response 
 `, 'utf-8');
   const commands = {
     codex: { command: process.execPath, args: [fakeCli] },
+    'claude-code': { command: process.execPath, args: [fakeCli] },
     opencode: { command: process.execPath, args: [fakeCli] },
   };
   const request = {
@@ -680,12 +692,14 @@ else process.stdout.write(JSON.stringify({ type: 'text', part: { text: response 
     rubric: [{ id: 'rigor', title: 'Rigor', instruction: 'Check validity.', weight: 1 }],
   };
   const codex = await runAcademicReviewAgent('codex', request, { workspaceRoot: tmpWorkspace, commands });
+  const claude = await runAcademicReviewAgent('claude-code', request, { workspaceRoot: tmpWorkspace, commands });
   const opencode = await runAcademicReviewAgent('opencode', request, { workspaceRoot: tmpWorkspace, commands });
   assert.equal(codex.items[0].rubricId, 'rigor');
+  assert.deepEqual(claude, codex);
   assert.deepEqual(opencode, codex);
 });
 
-test('Codex and OpenCode full-paper adapters validate complete safe LaTeX', async () => {
+test('Codex, Claude Code, and OpenCode full-paper adapters validate complete safe LaTeX', async () => {
   const fakeCli = join(tmpWorkspace, 'fake-paper-agent.mjs');
   await writeFile(fakeCli, `
 import { writeFileSync } from 'fs';
@@ -697,18 +711,21 @@ else process.stdout.write(JSON.stringify({ type: 'text', part: { text: response 
 `, 'utf-8');
   const commands = {
     codex: { command: process.execPath, args: [fakeCli] },
+    'claude-code': { command: process.execPath, args: [fakeCli] },
     opencode: { command: process.execPath, args: [fakeCli] },
   };
   const request = { instruction: 'Draft.', projectContext: '', outlineContext: '', resourceContext: '', resourceIds: [] };
   const codex = await runPaperGenerationAgent('codex', request, { workspaceRoot: tmpWorkspace, commands });
+  const claude = await runPaperGenerationAgent('claude-code', request, { workspaceRoot: tmpWorkspace, commands });
   const opencode = await runPaperGenerationAgent('opencode', request, { workspaceRoot: tmpWorkspace, commands });
   assert.match(codex.latex, /documentclass/);
+  assert.deepEqual(claude, codex);
   assert.deepEqual(opencode, codex);
   assert.deepEqual(parsePaperGenerationJson(JSON.stringify(codex)), codex);
   assert.equal(validatePaperGenerationResponse({ ...codex, latex: '\\documentclass{article}\\begin{document}\\immediate\\write18{bad}\\end{document}' }, []).ok, false);
 });
 
-test('Codex and OpenCode review orchestrators return atomic anchored dependencies', async () => {
+test('Codex, Claude Code, and OpenCode review orchestrators return atomic anchored dependencies', async () => {
   const fakeCli = join(tmpWorkspace, 'fake-orchestrator-agent.mjs');
   await writeFile(fakeCli, `
 import { writeFileSync } from 'fs';
@@ -721,10 +738,12 @@ const outputIndex = args.indexOf('--output-last-message');
 if (outputIndex !== -1) writeFileSync(args[outputIndex + 1], response);
 else process.stdout.write(JSON.stringify({ type: 'text', part: { text: response } }) + '\\n');
 `, 'utf-8');
-  const commands = { codex: { command: process.execPath, args: [fakeCli] }, opencode: { command: process.execPath, args: [fakeCli] } };
+  const commands = { codex: { command: process.execPath, args: [fakeCli] }, 'claude-code': { command: process.execPath, args: [fakeCli] }, opencode: { command: process.execPath, args: [fakeCli] } };
   const request = { feedback: 'Improve wording and evidence.', content: 'This very important central claim needs support.', outlineContext: 'One paragraph.' };
   const codex = await runReviewOrchestrationAgent('codex', request, { workspaceRoot: tmpWorkspace, commands });
+  const claude = await runReviewOrchestrationAgent('claude-code', request, { workspaceRoot: tmpWorkspace, commands });
   const opencode = await runReviewOrchestrationAgent('opencode', request, { workspaceRoot: tmpWorkspace, commands });
+  assert.deepEqual(claude, codex);
   assert.deepEqual(opencode, codex);
   assert.deepEqual(parseReviewOrchestrationJson(JSON.stringify(codex)), codex);
   assert.equal(validateReviewOrchestrationResponse(codex, request.content).ok, true);
@@ -781,6 +800,53 @@ writeFileSync(args[outputIndex + 1], JSON.stringify({ summary: 'API edit.', used
     assert.ok(run.finishedAt);
   } finally {
     await new Promise((resolveClose) => agentServer.close(resolveClose));
+  }
+});
+
+test('Saved Claude Code configuration activates and reloads for real API runs', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'papergod-claude-config-'));
+  const fakeCli = join(workspace, 'fake-claude.mjs');
+  await writeFile(join(workspace, 'main.tex'), '\\documentclass{article}\\begin{document}This is very important.\\end{document}', 'utf-8');
+  await writeFile(fakeCli, `
+import process from 'process';
+const args = process.argv.slice(2);
+if (args.includes('--version')) { process.stdout.write('fake-claude 1.0\\n'); process.exit(0); }
+if (args.includes('auth') && args.includes('status')) { process.stdout.write(JSON.stringify({ loggedIn: true, authMethod: 'test' })); process.exit(0); }
+if (args[args.indexOf('--model') + 1] !== 'configured-model') { process.stderr.write('model override missing'); process.exit(2); }
+const payload = { summary: 'Claude edit.', usedResourceIds: [], suggestions: [{ category: 'style', description: 'Precise wording', originalText: 'very important', suggestedText: 'crucial', reason: 'Precision' }] };
+process.stdout.write(JSON.stringify({ type: 'result', structured_output: payload, result: '' }));
+`, 'utf-8');
+  await initializeWorkspace(workspace);
+  const claudeApp = createApp(workspace);
+  let claudeServer = await new Promise((resolveListen) => {
+    const instance = claudeApp.listen(0, '127.0.0.1', () => resolveListen(instance));
+  });
+  try {
+    let root = `http://127.0.0.1:${claudeServer.address().port}`;
+    const configured = await fetch(`${root}/api/agents/config`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: 'claude-code', command: process.execPath, args: [fakeCli], model: 'configured-model', activate: true }),
+    });
+    assert.equal(configured.status, 200);
+    await new Promise((resolveClose) => claudeServer.close(resolveClose));
+    const restartedApp = createApp(workspace, { provider: 'claude-code' });
+    claudeServer = await new Promise((resolveListen) => {
+      const instance = restartedApp.listen(0, '127.0.0.1', () => resolveListen(instance));
+    });
+    root = `http://127.0.0.1:${claudeServer.address().port}`;
+    const suggestion = await fetch(`${root}/api/agent/suggest`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: 'Improve.', content: 'This is very important.' }),
+    });
+    assert.equal(suggestion.status, 200);
+    const data = await suggestion.json();
+    assert.equal(data.provider, 'claude-code');
+    assert.equal(data.suggestions[0].suggestedText, 'crucial');
+    const project = JSON.parse(await readFile(join(workspace, '.papergod', 'project.json'), 'utf-8'));
+    assert.equal(project.project.agentProfiles['claude-code'].model, 'configured-model');
+  } finally {
+    await new Promise((resolveClose) => claudeServer.close(resolveClose));
+    await rm(workspace, { recursive: true, force: true });
   }
 });
 

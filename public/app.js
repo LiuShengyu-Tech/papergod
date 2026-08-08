@@ -159,26 +159,25 @@ function fillAgentConfigForm() {
   document.getElementById('agent-config-command').value = profile.command || '';
   document.getElementById('agent-config-model').value = profile.model || '';
   document.getElementById('agent-config-args').value = (profile.args || []).join('\n');
-  document.getElementById('agent-config-note').textContent = profile.integration === 'planned'
-    ? 'The Claude Code configuration shape is reserved, but its execution adapter is not connected yet. Saving will not activate it.'
-    : profile.id === 'mock' ? 'The built-in Mock provider runs the workflow without an external CLI.' : 'Changes apply to this server immediately. The CLI must be installed and authenticated.';
-  const submit = document.querySelector('#agent-config-form button[type="submit"]');
-  submit.textContent = profile.integration === 'planned' ? 'Save reserved configuration' : 'Save and use for this server';
+  document.getElementById('agent-config-note').textContent = profile.id === 'mock'
+    ? 'The built-in Mock provider runs locally without an external account.'
+    : `${profile.available ? 'CLI detected.' : 'CLI not detected.'} ${profile.authStatus || 'Authentication not checked.'}`;
 }
 
 function renderAgentConfiguration() {
   const current = agentProviders.find((item) => item.id === currentProvider);
   document.getElementById('agent-config-summary').textContent = current
-    ? `${current.label} · ${current.available ? current.version || 'available' : current.integration === 'planned' ? 'adapter reserved' : 'CLI not detected'}`
+    ? `${current.label} · ${current.available ? current.authenticated ? 'ready' : 'sign-in needed' : 'CLI not detected'}`
     : currentProvider;
   const list = document.getElementById('agent-provider-list');
   list.innerHTML = agentProviders.map((item) => {
-    const state = item.integration === 'planned' ? 'planned' : item.available ? 'available' : '';
-    const stateText = item.integration === 'planned' ? 'reserved' : item.available ? 'available' : 'not installed';
+    const state = item.available && item.authenticated ? 'available' : item.available ? 'attention' : '';
+    const stateText = item.available && item.authenticated ? 'ready' : item.available ? 'sign-in needed' : 'not installed';
     return '<article class="agent-provider-card ' + (item.id === currentProvider ? 'active' : '') + '"><div><strong>'
       + escapeHtml(item.label) + '</strong><span class="' + state + '">' + stateText + '</span></div><p>'
       + escapeHtml(item.adapter) + ' · ' + escapeHtml((item.capabilities || []).join(', ') || 'future adapter')
-      + (item.version ? '<br>' + escapeHtml(item.version) : '') + '</p></article>';
+      + (item.version ? '<br>' + escapeHtml(item.version) : '')
+      + (item.authStatus ? '<br>' + escapeHtml(item.authStatus) : '') + '</p></article>';
   }).join('');
   const select = document.getElementById('agent-config-provider');
   const selected = select.value || currentProvider;
@@ -210,7 +209,7 @@ async function saveAgentConfiguration(event) {
     command: document.getElementById('agent-config-command').value.trim(),
     model: document.getElementById('agent-config-model').value.trim(),
     args: document.getElementById('agent-config-args').value.split('\n').map((item) => item.trim()).filter(Boolean),
-    activate: profile.integration === 'ready',
+    activate: true,
   };
   try {
     const res = await fetch('/api/agents/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -218,9 +217,35 @@ async function saveAgentConfiguration(event) {
     if (!res.ok) throw new Error(data.error || 'Agent configuration save failed');
     currentProvider = data.selected;
     await loadAgentConfiguration();
-    document.getElementById('panel-provider').value = ['mock', 'codex', 'opencode'].includes(currentProvider) ? currentProvider : 'mock';
+    document.getElementById('panel-provider').value = ['mock', 'codex', 'claude-code', 'opencode'].includes(currentProvider) ? currentProvider : 'mock';
     showStatus('Agent configuration saved', 'success');
   } catch (error) { showStatus(error.message, 'error'); }
+}
+
+async function probeAgentConfiguration() {
+  const profile = selectedAgentProfile();
+  if (!profile) return;
+  const button = document.getElementById('agent-config-probe');
+  button.disabled = true;
+  button.textContent = 'Checking…';
+  try {
+    const body = {
+      id: profile.id,
+      command: document.getElementById('agent-config-command').value.trim(),
+      model: document.getElementById('agent-config-model').value.trim(),
+      args: document.getElementById('agent-config-args').value.split('\n').map((item) => item.trim()).filter(Boolean),
+    };
+    const res = await fetch('/api/agents/probe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Agent connection check failed');
+    Object.assign(profile, data.agent || {});
+    document.getElementById('agent-config-note').textContent = profile.available
+      ? `${profile.version || 'CLI detected'} · ${profile.authStatus || 'Authentication not confirmed'}`
+      : profile.error || 'CLI not detected';
+    renderAgentConfiguration();
+    showStatus(profile.available && profile.authenticated ? 'Agent is ready' : 'Agent needs attention', profile.available && profile.authenticated ? 'success' : 'error');
+  } catch (error) { showStatus(error.message, 'error'); }
+  finally { button.disabled = false; button.textContent = 'Check connection'; }
 }
 
 function schedulePromptContextPreview() {
@@ -1718,6 +1743,7 @@ function init() {
   });
   document.getElementById('agent-config-provider').addEventListener('change', fillAgentConfigForm);
   document.getElementById('agent-config-form').addEventListener('submit', saveAgentConfiguration);
+  document.getElementById('agent-config-probe').addEventListener('click', probeAgentConfiguration);
   document.getElementById('prompt-preview-open').addEventListener('click', async () => {
     await refreshPromptContextPreview();
     document.getElementById('prompt-preview-overlay').classList.remove('hidden');
