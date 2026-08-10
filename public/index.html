@@ -6,91 +6,10 @@
   <title>Papergod</title>
   <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css">
   <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/react/assets/main.css">
 </head>
 <body>
-  <div id="app">
-    <header id="header">
-      <span class="logo">Papergod</span>
-      <button id="library-open" class="header-button">Writing libraries</button>
-      <button id="focus-annotation-open" class="header-button">Focus annotation</button>
-      <button id="review-open" class="header-button">Review &amp; revise</button>
-      <button id="peer-review-open" class="header-button">Peer review panel</button>
-      <span id="status"></span>
-      <span id="engine-status"></span>
-    </header>
-    <aside id="sidebar">
-      <div class="sidebar-heading"><h3>Files</h3></div>
-      <ul id="file-tree"></ul>
-      <div class="sidebar-heading outline-heading">
-        <h3>Document outline</h3>
-        <button id="sync-outline" title="Synchronize outline">↻</button>
-      </div>
-      <div id="outline-tree"><div class="outline-empty">Open a TeX document</div></div>
-    </aside>
-    <main id="editor-panel">
-      <div id="editor-toolbar">
-        <span id="current-file">main.tex</span>
-        <div id="workspace-view-switch" role="tablist" aria-label="Document view">
-          <button id="source-view-btn" class="view-tab active" type="button" role="tab" aria-selected="true" aria-controls="source-view">Source</button>
-          <button id="preview-view-btn" class="view-tab" type="button" role="tab" aria-selected="false" aria-controls="preview-panel" disabled>PDF Preview</button>
-        </div>
-        <button id="save-btn" title="Save (Ctrl+S)">Save</button>
-        <button id="compile-btn" title="Compile LaTeX">Compile</button>
-      </div>
-      <div id="workspace-view">
-        <section id="source-view" class="workspace-pane" role="tabpanel" aria-labelledby="source-view-btn">
-          <textarea id="editor"></textarea>
-        </section>
-        <section id="preview-panel" class="workspace-pane hidden" role="tabpanel" aria-labelledby="preview-view-btn">
-          <div id="pdf-preview" aria-label="Rendered PDF pages"></div>
-          <div id="preview-placeholder">Compile to render the paper</div>
-        </section>
-      </div>
-    </main>
-    <div id="right-panel">
-      <div id="ai-panel">
-        <div id="ai-header"><span>AI Assistant</span><span id="agent-provider">mock</span></div>
-        <div id="ai-module-list">
-          <section class="ai-module" id="agent-config-module">
-            <div class="ai-module-head"><div><span class="module-index">1</span><strong>Agent Configuration</strong></div><button id="agent-config-open" type="button">Configure</button></div>
-            <div id="agent-config-summary">Detecting local Agents…</div>
-          </section>
-          <section class="ai-module" id="prompt-context-module">
-            <div class="ai-module-head"><div><span class="module-index">2</span><strong>Prompt Context</strong></div><button id="prompt-preview-open" type="button">Preview full</button></div>
-            <div id="context-title">Whole document</div>
-            <div id="prompt-context-meta">Waiting for document structure…</div>
-            <pre id="prompt-context-excerpt">The prompt will be assembled from project, document, element, and writing-library context.</pre>
-            <details id="context-definition-editor">
-              <summary>Edit current element definitions</summary>
-              <label for="context-summary">Summary</label>
-              <textarea id="context-summary" rows="2" placeholder="What this element contributes..."></textarea>
-              <label for="context-prompt">Writing prompt</label>
-              <textarea id="context-prompt" rows="2" placeholder="Goals and constraints for this element..."></textarea>
-              <div id="intent-field" class="hidden">
-                <label for="context-intent">Sentence intent</label>
-                <textarea id="context-intent" rows="2" placeholder="What this sentence is doing..."></textarea>
-              </div>
-              <div class="context-actions">
-                <button id="save-context">Save context</button>
-                <button id="clear-context">Use whole document</button>
-                <span id="library-selection-status">Resources: auto</span>
-              </div>
-            </details>
-          </section>
-          <section class="ai-module" id="temporary-prompt-module">
-            <div class="ai-module-head"><div><span class="module-index">3</span><strong>Temporary Prompt</strong></div><span>This run only</span></div>
-            <textarea id="ai-prompt" rows="3" placeholder="Add a one-time goal, constraint, or instruction…"></textarea>
-          </section>
-          <section class="ai-module invoke-module">
-            <button id="ai-invoke" type="button">请神</button>
-          </section>
-        </div>
-        <div id="library-usage" class="hidden"></div>
-        <div id="paragraph-draft" class="hidden"></div>
-        <div id="ai-suggestions"></div>
-      </div>
-    </div>
-  </div>
+  <div id="root"></div>
 
   <div id="agent-config-overlay" class="hidden compact-overlay" role="dialog" aria-modal="true" aria-labelledby="agent-config-title">
     <section class="compact-dialog">
@@ -336,6 +255,6 @@
 
   <script src="/vendor/codemirror/lib/codemirror.js"></script>
   <script src="/vendor/codemirror/mode/stex/stex.js"></script>
-  <script type="module" src="/app.js"></script>
+  <script type="module" src="/react/app.js"></script>
 </body>
 </html>

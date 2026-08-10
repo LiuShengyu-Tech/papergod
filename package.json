@@ -8,6 +8,7 @@
   },
   "files": [
     "src",
+    "frontend",
     "public",
     "papergod-demo.png",
     "README.md",
@@ -15,14 +16,26 @@
   ],
   "scripts": {
     "papergod": "node src/cli.js workspace --demo",
+    "build:web": "vite build --config frontend/vite.config.js",
+    "prepack": "npm run build:web",
     "test": "node --test tests/api.test.js"
   },
   "dependencies": {
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
     "codemirror": "^5.65.16",
     "express": "^4.21.0",
-    "pdfjs-dist": "^4.8.69"
+    "lucide-react": "^1.31.0",
+    "pdfjs-dist": "^4.8.69",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "tailwind-merge": "^3.6.0"
   },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.7.0",
+    "vite": "^6.4.3"
   }
 }
