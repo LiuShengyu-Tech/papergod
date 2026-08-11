@@ -1,0 +1,81 @@
+const STORAGE_KEY = 'papergod.locale';
+const DEFAULT_LOCALE = 'en';
+const SUPPORTED_LOCALES = new Set(['en', 'zh-CN']);
+
+const messages = {
+  en: {
+    'language.label': 'Language', 'language.english': 'English', 'language.chinese': '简体中文',
+    'header.libraries': 'Writing libraries', 'header.focus': 'Focus annotation', 'header.review': 'Review & revise', 'header.peerReview': 'Peer review',
+    'nav.outline': 'Outline', 'nav.tools': 'Tools', 'nav.paperOutline': 'Paper outline', 'nav.workspaceTools': 'Workspace tools', 'nav.openPaper': 'Open a paper',
+    'tools.openFolder': 'Open paper folder', 'tools.source': 'LaTeX source', 'tools.compile': 'Compile PDF', 'tools.changeHistory': 'Change history', 'tools.libraries': 'Writing libraries', 'tools.agentConfig': 'Agent configuration', 'tools.backendFiles': 'Backend files',
+    'editor.source': 'Source', 'editor.preview': 'PDF Preview', 'editor.save': 'Save', 'editor.compile': 'Compile',
+    'ai.title': 'AI Assistant', 'ai.agentConfig': 'Agent Configuration', 'ai.configure': 'Configure', 'ai.detecting': 'Detecting local Agents…', 'ai.promptManagement': 'Prompt Management',
+    'ai.intents': 'Modification intents', 'ai.intentsEmpty': 'Click PDF text to add revision comments.', 'ai.queued': '{count} queued', 'ai.tempPrompt': 'Temporary prompt', 'ai.thisRun': 'This run only', 'ai.tempPlaceholder': 'Add a one-time goal, constraint, or instruction…', 'ai.previewPrompt': 'Preview final prompt', 'ai.invoke': 'Invoke Agent',
+    'activity.idle': 'Agent idle', 'activity.none': 'No Agent task has run in this session.', 'activity.context': 'Context', 'activity.agent': 'Agent', 'activity.apply': 'Apply', 'activity.compile': 'Compile', 'activity.liveOutput': 'Live CLI output will appear here.', 'activity.cancel': 'Cancel', 'activity.undo': 'Undo this revision', 'activity.preparing': 'Preparing context', 'activity.running': 'Agent running', 'activity.applying': 'Applying revision', 'activity.compiling': 'Compiling PDF', 'activity.complete': 'Revision complete', 'activity.failed': 'Agent failed', 'activity.waiting': 'Waiting for Agent output…', 'activity.cliOutput': 'CLI output',
+    'pdf.word': 'Word', 'pdf.sentence': 'Sentence', 'pdf.paragraph': 'Paragraph', 'pdf.reader': 'Sentence reader', 'pdf.commentPlaceholder': 'What should the AI change?', 'pdf.cancel': 'Cancel', 'pdf.queue': 'Add to revision queue',
+    'reader.title': 'Sentence reader', 'reader.close': 'Close sentence reader', 'reader.help': 'Focus on one sentence at a time. Select a word to comment on that word; leave all words unselected to comment on the whole sentence.', 'reader.scopeSentence': 'Current scope: whole sentence', 'reader.scopeWord': 'Current scope: word “{word}”', 'reader.comment': 'Revision comment', 'reader.commentPlaceholder': 'Describe how this sentence should be revised…', 'reader.previous': '← Previous sentence', 'reader.next': 'Next sentence →', 'reader.queue': 'Add to revision queue', 'reader.position': '{section} · sentence {current} of {total}',
+    'agentConfig.title': 'Agent Configuration', 'agentConfig.subtitle': 'Configure local CLI Agents; unavailable adapters retain the same interface shape', 'agentConfig.provider': 'Provider', 'agentConfig.command': 'CLI command', 'agentConfig.model': 'Model override', 'agentConfig.args': 'Prefix args (one per line)', 'agentConfig.check': 'Check setup', 'agentConfig.save': 'Save and use',
+    'agent.unavailable': 'unavailable', 'agent.activeTitle': 'Active Agent: {name}', 'agent.selected': '{name} selected', 'agent.active': '{name} is now active', 'agent.mockNote': 'The built-in Mock provider runs locally without an external account.', 'agent.cliDetected': 'CLI detected.', 'agent.cliMissing': 'CLI not detected.', 'agent.authUnchecked': 'Authentication not checked.', 'agent.currentUse': 'This provider is currently in use.', 'agent.saveActivate': 'Save to make this the active provider.', 'agent.checkMock': 'Check Mock', 'agent.checkSetup': 'Check {name} setup', 'agent.saveSettings': 'Save settings', 'agent.use': 'Use {name}', 'agent.ready': 'ready', 'agent.signin': 'sign-in needed', 'agent.notInstalled': 'not installed', 'agent.future': 'future adapter', 'agent.currently': 'Currently in use', 'agent.clickUse': 'Click to use', 'agent.activating': 'Activating {name}…', 'agent.configSaved': 'Agent configuration saved', 'agent.checking': 'Checking setup…', 'agent.checkingCommand': 'Checking the {name} command and login status…',
+    'invoke.title': 'Confirm Agent Invocation', 'invoke.subtitle': 'The queued modification intents, temporary prompt, and managed context will be sent as one final prompt.', 'invoke.preparing': 'Preparing prompt…', 'invoke.cancel': 'Cancel', 'invoke.confirm': 'Confirm',
+    'promptPreview.title': 'Final Agent Prompt', 'promptPreview.empty': 'Not generated yet', 'promptPreview.bodyEmpty': 'Prompt not generated yet.',
+    'status.readerNoSentences': 'No readable sentences were detected', 'status.readerCommentRequired': 'Describe the revision you want first', 'status.readerQueued': 'Modification intent queued. You can continue reading.',
+    'status.intentRequired': 'Describe the change you want', 'status.intentQueued': 'Modification intent queued. Add more or invoke the Agent to process the batch.',
+    'history.title': 'Change history', 'history.subtitle': 'Preview and restore any of the five most recent paper versions.', 'history.refresh': 'Refresh', 'history.loading': 'Loading change history…', 'history.select': 'Select a version', 'history.selectHelp': 'Open a version to preview its compiled paper without altering the current version.', 'history.empty': 'No saved versions yet', 'history.emptyHelp': 'A version appears after an Agent or accepted revision changes the paper.', 'history.latest': 'Latest', 'history.applied': 'Applied', 'history.rolledBack': 'Rolled back', 'history.changes': '{count} changes', 'history.before': 'Before', 'history.after': 'After', 'history.reason': 'Reason', 'history.openSource': 'Open in source', 'history.rollback': 'Restore previous version', 'history.rollbackWarning': 'This restores the whole paper to the state before this revision. It is available only when no later edits would be lost.', 'history.rollbackConfirm': 'Restore the paper to the version before this revision?', 'history.restored': 'Previous version restored', 'history.currentMatch': 'This is the current paper version.', 'history.readOnly': 'Historical diff — read only', 'history.recentNotice': 'Showing the five most recent versions; complete audit data remains stored.',
+    'history.restoreThis': 'Restore this version', 'history.restoreConfirm': 'Restore this historical version? Your current paper will be saved as a new recovery point.', 'history.versionRestored': 'Historical version restored; the previous paper remains recoverable.', 'history.restoreSafe': 'Historical version. Restoring it creates a new version and preserves the current paper.', 'history.pdfPreview': 'Compiled PDF preview', 'history.previewHelp': 'This isolated preview does not change the current paper.', 'history.sourceChanges': 'Source changes ({count})',
+    'history.annotatedPreview': 'Annotated PDF', 'history.preparingMarks': 'Preparing revision markers…', 'history.rendering': 'Compiling and rendering this historical version…', 'history.renderFailed': 'Historical PDF could not be rendered', 'history.added': 'Added', 'history.modified': 'Modified', 'history.deleted': 'Deleted', 'history.hideMarks': 'Hide marks', 'history.showMarks': 'Show marks', 'history.previousChange': 'Previous change', 'history.nextChange': 'Next change', 'history.mappedSummary': '{mapped} of {total} changes located in the PDF', 'history.unmapped': 'Not safely located in the PDF; source diff remains available', 'history.confidence.exact': 'Exact PDF match', 'history.confidence.anchored': 'Located with surrounding text', 'history.confidence.approximate': 'Approximate location',
+    'history.openPaper': 'Open a paper first', 'history.saved': '{count} AI changes saved. Review them in Tools → Change history.',
+    'engine.missing': 'No LaTeX engine detected', 'engine.checkFailed': 'LaTeX engine check failed',
+    'common.close': 'Close', 'common.wholeDocument': 'Whole document',
+  },
+  'zh-CN': {
+    'language.label': '语言', 'language.english': 'English', 'language.chinese': '简体中文',
+    'header.libraries': '写作素材库', 'header.focus': '专注标注', 'header.review': '审阅与修改', 'header.peerReview': '同行评审',
+    'nav.outline': '目录', 'nav.tools': '工具', 'nav.paperOutline': '论文目录', 'nav.workspaceTools': '工作区工具', 'nav.openPaper': '打开一篇论文',
+    'tools.openFolder': '打开论文文件夹', 'tools.source': 'LaTeX 源文件', 'tools.compile': '编译 PDF', 'tools.changeHistory': '更改历史', 'tools.libraries': '写作素材库', 'tools.agentConfig': 'Agent 配置', 'tools.backendFiles': '后台文件',
+    'editor.source': '源文件', 'editor.preview': 'PDF 预览', 'editor.save': '保存', 'editor.compile': '编译',
+    'ai.title': 'AI 助手', 'ai.agentConfig': 'Agent 配置', 'ai.configure': '配置', 'ai.detecting': '正在检测本地 Agent…', 'ai.promptManagement': 'Prompt 管理',
+    'ai.intents': '修改意见', 'ai.intentsEmpty': '点击 PDF 文字添加修改意见。', 'ai.queued': '已排队 {count} 条', 'ai.tempPrompt': '临时 Prompt', 'ai.thisRun': '仅本次运行', 'ai.tempPlaceholder': '添加本次运行的目标、约束或指令……', 'ai.previewPrompt': '预览最终 Prompt', 'ai.invoke': '请神',
+    'activity.idle': 'Agent 空闲', 'activity.none': '本次会话尚未运行 Agent 任务。', 'activity.context': '上下文', 'activity.agent': 'Agent', 'activity.apply': '应用', 'activity.compile': '编译', 'activity.liveOutput': 'CLI 实时输出将显示在这里。', 'activity.cancel': '取消', 'activity.undo': '撤回本次修改', 'activity.preparing': '正在准备上下文', 'activity.running': 'Agent 运行中', 'activity.applying': '正在应用修改', 'activity.compiling': '正在编译 PDF', 'activity.complete': '修改完成', 'activity.failed': 'Agent 失败', 'activity.waiting': '等待 Agent 输出……', 'activity.cliOutput': 'CLI 输出',
+    'pdf.word': '词汇', 'pdf.sentence': '句子', 'pdf.paragraph': '段落', 'pdf.reader': '逐句阅读', 'pdf.commentPlaceholder': '希望 AI 如何修改？', 'pdf.cancel': '取消', 'pdf.queue': '加入修改队列',
+    'reader.title': '逐句阅读', 'reader.close': '关闭逐句阅读', 'reader.help': '一次专注一句。点击单词可只修改该词；不选择单词时，意见作用于整句。', 'reader.scopeSentence': '当前范围：整句', 'reader.scopeWord': '当前范围：单词“{word}”', 'reader.comment': '修改意见', 'reader.commentPlaceholder': '写下希望如何修改这句话……', 'reader.previous': '← 上一句', 'reader.next': '下一句 →', 'reader.queue': '加入修改队列', 'reader.position': '{section} · 第 {current} 句，共 {total} 句',
+    'agentConfig.title': 'Agent 配置', 'agentConfig.subtitle': '配置本地 CLI Agent；不可用的适配器仍保留相同接口', 'agentConfig.provider': '服务', 'agentConfig.command': 'CLI 命令', 'agentConfig.model': '指定模型', 'agentConfig.args': '前置参数（每行一个）', 'agentConfig.check': '检查配置', 'agentConfig.save': '保存并使用',
+    'agent.unavailable': '不可用', 'agent.activeTitle': '当前 Agent：{name}', 'agent.selected': '已选择 {name}', 'agent.active': '{name} 已启用', 'agent.mockNote': '内置 Mock 服务在本地运行，不需要外部账户。', 'agent.cliDetected': '已检测到 CLI。', 'agent.cliMissing': '未检测到 CLI。', 'agent.authUnchecked': '尚未检查登录状态。', 'agent.currentUse': '当前正在使用此服务。', 'agent.saveActivate': '保存后将启用此服务。', 'agent.checkMock': '检查 Mock', 'agent.checkSetup': '检查 {name} 配置', 'agent.saveSettings': '保存设置', 'agent.use': '使用 {name}', 'agent.ready': '可用', 'agent.signin': '需要登录', 'agent.notInstalled': '未安装', 'agent.future': '未来适配器', 'agent.currently': '正在使用', 'agent.clickUse': '点击使用', 'agent.activating': '正在启用 {name}…', 'agent.configSaved': 'Agent 配置已保存', 'agent.checking': '正在检查配置……', 'agent.checkingCommand': '正在检查 {name} 命令和登录状态……',
+    'invoke.title': '确认调用 Agent', 'invoke.subtitle': '队列中的修改意见、临时 Prompt 和上下文将组成一个最终 Prompt 后发送。', 'invoke.preparing': '正在准备 Prompt…', 'invoke.cancel': '取消', 'invoke.confirm': '确认',
+    'promptPreview.title': '最终 Agent Prompt', 'promptPreview.empty': '尚未生成', 'promptPreview.bodyEmpty': 'Prompt 尚未生成。',
+    'status.readerNoSentences': '未识别到可阅读的句子', 'status.readerCommentRequired': '请先填写修改意见', 'status.readerQueued': '修改意见已加入队列，可以继续阅读。',
+    'status.intentRequired': '请描述希望如何修改', 'status.intentQueued': '修改意见已加入队列。可以继续添加，最后统一请神。',
+    'history.title': '更改历史', 'history.subtitle': '预览并恢复论文最近五个版本中的任意一个。', 'history.refresh': '刷新', 'history.loading': '正在加载更改历史……', 'history.select': '选择一个版本', 'history.selectHelp': '打开版本可预览编译后的论文，不会改变当前版本。', 'history.empty': '尚无已保存版本', 'history.emptyHelp': 'Agent 或已接受的修改写入论文后，会在这里生成版本。', 'history.latest': '最新', 'history.applied': '已应用', 'history.rolledBack': '已撤回', 'history.changes': '{count} 处修改', 'history.before': '修改前', 'history.after': '修改后', 'history.reason': '原因', 'history.openSource': '在源文件中打开', 'history.rollback': '恢复上一个版本', 'history.rollbackWarning': '这会把整篇论文恢复到本次修改之前。只有不会覆盖后续编辑时才允许执行。', 'history.rollbackConfirm': '确定把论文恢复到本次修改之前吗？', 'history.restored': '已恢复上一个版本', 'history.currentMatch': '这是当前论文版本。', 'history.readOnly': '历史差异，只读', 'history.recentNotice': '仅显示最近五个版本；完整审计数据仍会保留。',
+    'history.restoreThis': '恢复此版本', 'history.restoreConfirm': '确定恢复这个历史版本吗？当前论文会先保存为新的恢复点。', 'history.versionRestored': '历史版本已恢复；恢复前的论文仍可找回。', 'history.restoreSafe': '这是历史版本。恢复后会生成一个新版本，并保留当前论文。', 'history.pdfPreview': '编译后的 PDF 预览', 'history.previewHelp': '预览在隔离副本中生成，不会改变当前论文。', 'history.sourceChanges': '源码修改（{count}）',
+    'history.annotatedPreview': '带修改标记的 PDF', 'history.preparingMarks': '正在准备修改标记……', 'history.rendering': '正在隔离编译并渲染此历史版本……', 'history.renderFailed': '无法渲染历史 PDF', 'history.added': '新增', 'history.modified': '修改', 'history.deleted': '删除', 'history.hideMarks': '隐藏标记', 'history.showMarks': '显示标记', 'history.previousChange': '上一处修改', 'history.nextChange': '下一处修改', 'history.mappedSummary': 'PDF 中已定位 {mapped}/{total} 处修改', 'history.unmapped': '无法安全定位到 PDF；仍可查看源码差异', 'history.confidence.exact': 'PDF 精确匹配', 'history.confidence.anchored': '根据上下文定位', 'history.confidence.approximate': '大致位置',
+    'history.openPaper': '请先打开一篇论文', 'history.saved': '已保存 {count} 处 AI 修改。可在“工具 → 更改历史”中检查。',
+    'engine.missing': '未检测到 LaTeX 编译器', 'engine.checkFailed': 'LaTeX 编译器检查失败',
+    'common.close': '关闭', 'common.wholeDocument': '整篇文档',
+  },
+};
+
+export function getLocale() {
+  const saved = globalThis.localStorage?.getItem(STORAGE_KEY);
+  return SUPPORTED_LOCALES.has(saved) ? saved : DEFAULT_LOCALE;
+}
+
+export function t(key, values = {}) {
+  const locale = getLocale();
+  const template = messages[locale]?.[key] ?? messages.en[key] ?? key;
+  return template.replace(/\{(\w+)\}/g, (_match, name) => values[name] ?? `{${name}}`);
+}
+
+export function translateDom(root = document) {
+  root.querySelectorAll('[data-i18n]').forEach((element) => { element.textContent = t(element.dataset.i18n); });
+  root.querySelectorAll('[data-i18n-placeholder]').forEach((element) => { element.placeholder = t(element.dataset.i18nPlaceholder); });
+  root.querySelectorAll('[data-i18n-aria-label]').forEach((element) => { element.setAttribute('aria-label', t(element.dataset.i18nAriaLabel)); });
+  document.documentElement.lang = getLocale();
+  const selector = document.getElementById('language-select');
+  if (selector) selector.value = getLocale();
+  document.dispatchEvent(new CustomEvent('papergod:locale-changed', { detail: { locale: getLocale() } }));
+}
+
+export function setLocale(locale) {
+  const next = SUPPORTED_LOCALES.has(locale) ? locale : DEFAULT_LOCALE;
+  globalThis.localStorage?.setItem(STORAGE_KEY, next);
+  translateDom();
+}

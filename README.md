@@ -1,6 +1,6 @@
 # Papergod
 
-AI-powered LaTeX writing platform — a local-first Overleaf-style editor with safe compilation, structured writing context, and Mock/Codex/Claude Code/OpenCode assistants.
+AI-powered LaTeX writing platform — a local-first Overleaf-style editor with safe compilation, structured writing context, and Mock/Codex/Claude Code/OpenCode/Pi Agent assistants.
 
 ## Quick Start
 
@@ -20,7 +20,7 @@ npx papergod .
 npx papergod ./my-paper --port 4312 --agent codex
 ```
 
-The CLI initializes `main.tex` when the workspace contains no TeX files and stores Papergod metadata in `.papergod/project.json`. Agent choices are `mock`, `codex`, `claude-code`, and `opencode`. External providers require an installed and authenticated CLI; Papergod invokes them non-interactively with structured output, timeouts, output limits, and read-only analysis permissions.
+The CLI initializes `main.tex` when the workspace contains no TeX files and stores Papergod metadata in `.papergod/project.json`. Agent choices are `mock`, `codex`, `claude-code`, `opencode`, and `pi`. External providers require an installed and authenticated CLI; Papergod invokes them non-interactively with structured output, timeouts, output limits, and analysis-only permissions.
 
 ![Papergod demo](./papergod-demo.png)
 
@@ -61,12 +61,16 @@ Express server (127.0.0.1 only)
 
 - The assistant is organized into Agent Configuration, assembled Prompt Context, a one-run Temporary Prompt, and the single **请神** invocation button
 - **请神** first shows a confirmation dialog, then submits one merged `Prompt Context + Temporary Prompt` instruction to the active Agent
-- Agent configuration uses one shared provider shape for Mock, Codex CLI, Claude Code, and OpenCode; all three external adapters support revision, paragraph drafting, peer review, review orchestration, and full-paper generation
-- Papergod detects CLI versions and non-secret authentication readiness, offers a **Check connection** action, and reports installed, sign-in-needed, or ready states without exposing credentials
+- A compact **Agent Activity** bar below the invocation button shows context preparation, live CLI output, atomic application, PDF compilation, elapsed time, cancellation, and the final result without blocking the paper
+- Ordinary Agent suggestions are applied together as one atomic revision instead of requiring repeated Accept clicks; the Agent Activity result can roll that revision back as long as no later source edit would be lost
+- **Change history** in Tools keeps the reading view clean while exposing the five most recent applied versions, per-change before/after diffs, source navigation for the current version, and checksum-protected whole-revision rollback
+- Agent configuration uses one shared provider shape for Mock, Codex CLI, Claude Code, OpenCode, and Pi Agent; every external adapter supports revision, paragraph drafting, peer review, review orchestration, and full-paper generation
+- Papergod detects CLI versions and non-secret authentication readiness with a fast **Check setup** action; actual model validation happens in the ordinary reviewable writing workflow
 - Custom CLI paths, prefix arguments, and model overrides are persisted in `.papergod/project.json`, reloaded on later runs, and passed to the real CLI invocation
 - Preview the complete invocation context assembled from project/document/element prompts, summaries, sentence intent, selected libraries, temporary instructions, and target source
 - **Mock agent**: deterministic suggestions based on pattern matching (passive voice, "very + adjective", short conclusions)
-- **CLI agents**: Codex, Claude Code, and OpenCode run non-interactively with validated structured output, read-only/plan execution, timeouts, cancellation, and audit records
+- **CLI agents**: Codex, Claude Code, OpenCode, and Pi Agent run non-interactively with validated structured output, analysis-only execution, timeouts, cancellation, and audit records
+- **Provider isolation**: Codex uses a read-only ephemeral execution; OpenCode runs in a temporary directory with permissions denied; Pi runs in JSON mode with tools, sessions, project context, extensions, and skills disabled
 - **Structured workflows**: editing, review orchestration, peer review, and full-paper generation each use a dedicated validated JSON protocol
 - **Accept/Reject**: both decisions are persisted; accepted edits use atomic revisions and checksum recovery points
 - **Element scope**: select a section, paragraph, or sentence from the outline to constrain prompts and diffs to that exact source range
@@ -95,7 +99,7 @@ Express server (127.0.0.1 only)
 
 - Work through one unified two-stage workspace: **Opinions & plans** followed by **Responses & delivery**
 - Anchor a comment to an exact editor selection, or import numbered/bulleted reviewer feedback
-- Use Mock, Codex, or OpenCode to split feedback into atomic categorized opinions, exact quotes, suggested fixes, dependencies, and document-node assignments
+- Use Mock or any configured external Agent to split feedback into atomic categorized opinions, exact quotes, suggested fixes, dependencies, and document-node assignments
 - Build revision plans with visible before/after text plus dependency and conflict information
 - Accept, reject, or defer changes individually; executable changes can also be accepted in a batch
 - Apply accepted edits atomically only after explicit review
@@ -105,7 +109,7 @@ Express server (127.0.0.1 only)
 
 - Start from methodology, statistics, writing, domain, and reproducibility reviewer profiles
 - Build a custom panel, add reviewer-specific instructions, and edit weighted rubric criteria
-- Run reviewers independently through Mock, Codex, or OpenCode with one audited Agent run per report
+- Run reviewers independently through Mock or any configured external Agent with one audited Agent run per report
 - Validate exact manuscript quotes and rubric references in every external Agent response
 - Synthesize consensus clusters, conflicting assessments, an overall verdict, and prioritized concerns
 - Select concerns and send them directly into the reviewable M6 revision workflow
@@ -124,7 +128,10 @@ Express server (127.0.0.1 only)
 ### LaTeX Compilation
 
 - Auto-detects available engines in order: tectonic → pdflatex → xelatex → lualatex
+- Opens an available paper directly in the compiled PDF view; LaTeX source remains available as an advanced tool
 - Renders compiled PDFs as clean, continuous, width-fitted paper pages without the browser PDF viewer chrome
+- Adds a PDF.js text layer: click manuscript text, choose word/sentence/paragraph scope, and save a persistent modification intent without changing the source immediately
+- Queued modification intents remain editable/removable, are assembled into one document-level prompt when **请神** is invoked, and are resolved together after one atomic revision; undoing that revision reopens the original intent queue
 - Source and rendered pages share one switchable workspace, leaving the assistant column fully available
 - Graceful degradation: if no engine found, compile button is disabled but editor works normally
 - Compilation errors displayed to the user
@@ -133,6 +140,7 @@ Express server (127.0.0.1 only)
 
 - Node.js ≥ 18
 - A LaTeX distribution (optional, for compilation): TeX Live, MiKTeX, or Tectonic
+- The corresponding provider CLI and login for external Agents. Pi Agent is not bundled; install and authenticate the current `pi` CLI using its official coding-agent documentation before selecting it.
 
 ## Testing
 
@@ -148,7 +156,7 @@ src/server/
   security.js   — Path sanitization + security headers
   latex.js      — Engine detection + compilation
   agent.js      — Suggestion store and deterministic Mock agent
-  agent-adapters.js — Codex/Claude Code/OpenCode non-interactive adapters
+  agent-adapters.js — Codex/Claude Code/OpenCode/Pi non-interactive adapters
   project-store.js — Versioned project metadata and validation
   project-resources.js — Corpus, vocabulary, annotation, and revision resources
   latex-structure.js — LaTeX structure/range parser
@@ -179,3 +187,4 @@ tests/
 - No concurrent editing / CRDT
 - No file upload (only pre-existing .tex files in workspace)
 - No bibliography / BibTeX support
+- PDF-to-source targeting currently matches PDF.js text against parsed manuscript sentences and paragraphs. Complex macros, equations, repeated fragments, and transformed text may not map; SyncTeX-backed coordinate mapping is the planned precision upgrade.

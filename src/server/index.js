@@ -1,7 +1,9 @@
 import express from 'express';
 import { resolve, join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { readdir, readFile, writeFile, stat } from 'fs/promises';
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile, stat } from 'fs/promises';
+import { randomUUID } from 'crypto';
+import { spawn } from 'child_process';
 import { sanitizePath, securityHeaders } from './security.js';
 import { detectEngines, compile } from './latex.js';
 import { generateSuggestions, registerSuggestions, attachSuggestionContext, getSuggestion, removeSuggestion } from './agent.js';
@@ -12,15 +14,16 @@ import {
   listRevisions, createRevision, updateRevision, deleteRevision,
   createAgentRun, updateAgentRun, listAgentRuns,
 } from './project-resources.js';
-import { detectAgentProviders, runWritingAgent } from './agent-adapters.js';
+import { AGENT_PROVIDERS, detectAgentProviders, runWritingAgent } from './agent-adapters.js';
 import {
   syncDocumentStructure, getDocumentStructure, updateDocumentMetadata,
   updateNodeMetadata, getNodeSourceContext,
 } from './document-structure.js';
 import { buildLibraryContext, composeMockParagraph, extractLibraryCandidates, renderSentencePattern, searchLibraries } from './library-engine.js';
 import { findStructureNode } from './latex-structure.js';
+import { getChangeHistoryEntry, getHistoricalRevisionSource, getRecentChangeHistory } from './change-history.js';
 import {
-  applyRevision, applySuggestionAsRevision, createRevisionPlan, decideRevisionChanges, importReviewOpinions, insertGeneratedParagraph, orchestrateReviewOpinions, recordRejectedSuggestion, rollbackRevision,
+  applyRevision, applySuggestionAsRevision, applySuggestionsAsRevision, createRevisionPlan, decideRevisionChanges, importReviewOpinions, insertGeneratedParagraph, orchestrateReviewOpinions, recordRejectedSuggestion, restoreRevisionVersion, rollbackRevision,
 } from './revision-engine.js';
 import {
   createReviewRound, getReviewerProfileCatalog, listReviewRounds, runReviewRound, sendReviewItemsToRevision,
@@ -33,6 +36,18 @@ import {
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, '../..');
 const DEFAULT_WORKSPACE = join(PROJECT_ROOT, 'workspace');
+const EXTERNAL_AGENT_PROVIDERS = AGENT_PROVIDERS.filter((item) => item !== 'mock');
+
+function publicErrorMessage(error) {
+  const message = String(error?.message || 'Unexpected error');
+  if (error?.code === 'ENOENT') return 'The configured Agent CLI command was not found.';
+  if (error?.code === 'AGENT_TIMEOUT') return 'The Agent did not respond before the timeout.';
+  if (/invalid_json_schema/i.test(message)) return 'The Agent rejected Papergod’s structured output schema. Update Papergod or choose another provider.';
+  if (/auth|sign.?in|log.?in|unauthorized|forbidden|\b401\b|\b403\b/i.test(message)) return 'The Agent CLI is installed but its model provider is not authenticated.';
+  if (/rate.?limit|quota|too many requests|\b429\b/i.test(message)) return 'The Agent provider rate limit or quota was reached. Try again later or choose another provider.';
+  if (message.length > 800 || message.split('\n').length > 8) return `${message.split('\n').find((line) => /error/i.test(line)) || message.split('\n')[0]}`.slice(0, 800);
+  return message;
+}
 
 async function resourceResponse(res, operation, successStatus = 200) {
   try {
@@ -42,13 +57,15 @@ async function resourceResponse(res, operation, successStatus = 200) {
     if (error.code === 'INVALID_PROJECT') {
       return res.status(400).json({ error: error.message, details: error.details });
     }
-    res.status(error.status || 500).json({ error: error.message });
+    res.status(error.status || 500).json({ error: publicErrorMessage(error), code: error.code });
   }
 }
 
 export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
   let provider = options.provider || 'mock';
   const agentCommands = { ...(options.agentCommands || {}) };
+  const agentProbeJobs = new Map();
+  const agentActivityJobs = new Map();
   const app = express();
   app.locals.config = { workspaceRoot, provider };
   app.use(express.json({ limit: '10mb' }));
@@ -57,10 +74,32 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
   app.use('/vendor/pdfjs-dist', express.static(join(PROJECT_ROOT, 'node_modules', 'pdfjs-dist'), { dotfiles: 'deny' }));
   app.use(express.static(join(PROJECT_ROOT, 'public')));
 
+  function beginAgentActivity(id, activeProvider) {
+    if (typeof id !== 'string' || !/^[a-zA-Z0-9-]{8,80}$/.test(id)) return null;
+    const activity = { id, provider: activeProvider, status: 'running', output: '', startedAt: new Date().toISOString(), updatedAt: new Date().toISOString() };
+    agentActivityJobs.set(id, activity);
+    return activity;
+  }
+
+  function appendAgentActivity(activity, stream, chunk) {
+    if (!activity || typeof chunk !== 'string') return;
+    const clean = chunk.replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, '').replace(/[^\x09\x0a\x0d\x20-\x7e\u0080-\uffff]/g, '');
+    if (!clean) return;
+    activity.output = `${activity.output}${stream === 'stderr' ? '[stderr] ' : ''}${clean}`.slice(-40_000);
+    activity.updatedAt = new Date().toISOString();
+  }
+
+  function finishAgentActivity(activity, status, message = '') {
+    if (!activity) return;
+    if (message) appendAgentActivity(activity, status === 'failed' ? 'stderr' : 'stdout', `${message}\n`);
+    activity.status = status;
+    activity.updatedAt = new Date().toISOString();
+  }
+
   async function hydrateAgentCommands(projectData = null) {
     const project = projectData || await loadProject(workspaceRoot);
     const profiles = project.project.agentProfiles || {};
-    for (const id of ['codex', 'claude-code', 'opencode']) {
+    for (const id of EXTERNAL_AGENT_PROVIDERS) {
       const profile = profiles[id];
       if (profile?.command?.trim()) {
         agentCommands[id] = {
@@ -75,6 +114,8 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
 
   async function requestSuggestions(content, prompt, req, context = {}) {
     const libraryContext = context.libraryContext || { prompt: '', resources: [], resourceIds: [], mode: 'automatic' };
+    const activity = beginAgentActivity(req.body?.activityId, provider);
+    appendAgentActivity(activity, 'stdout', `Starting ${provider} Agent in ${workspaceRoot}\n`);
     if (provider === 'mock') {
       const suggestions = generateSuggestions(content, prompt);
       attachSuggestionContext(suggestions, { ...context, selectedContent: content });
@@ -84,6 +125,7 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
         input: JSON.stringify({ characters: content.length, providedResources: libraryContext.resources, libraryMode: libraryContext.mode }),
         output: JSON.stringify({ usedResourceIds: [] }), error: '', startedAt: completedAt, finishedAt: completedAt,
       });
+      finishAgentActivity(activity, 'complete', `Mock Agent produced ${suggestions.length} suggestion${suggestions.length === 1 ? '' : 's'}.`);
       return {
         provider, runId: run.id, suggestions,
         library: { mode: libraryContext.mode, providedResources: libraryContext.resources, usedResourceIds: [] },
@@ -103,12 +145,14 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
         content, prompt, resourceContext: libraryContext.prompt, resourceIds: libraryContext.resourceIds,
       }, {
         workspaceRoot, commands: agentCommands, signal: controller.signal,
+        onOutput: (stream, chunk) => appendAgentActivity(activity, stream, chunk),
       });
       const suggestions = registerSuggestions(result.suggestions);
       attachSuggestionContext(suggestions, { ...context, selectedContent: content });
       await updateAgentRun(workspaceRoot, run.id, {
         status: 'complete', output: JSON.stringify(result), finishedAt: new Date().toISOString(),
       });
+      finishAgentActivity(activity, 'complete', 'Agent process completed successfully.');
       return {
         provider, runId: run.id, summary: result.summary, suggestions,
         library: {
@@ -117,8 +161,9 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
         },
       };
     } catch (error) {
+      finishAgentActivity(activity, 'failed', publicErrorMessage(error));
       await updateAgentRun(workspaceRoot, run.id, {
-        status: 'failed', error: error.message.slice(0, 4000), finishedAt: new Date().toISOString(),
+        status: 'failed', error: [error.message, error.diagnostic].filter(Boolean).join('\n').slice(0, 4000), finishedAt: new Date().toISOString(),
       });
       error.status = 502;
       throw error;
@@ -147,6 +192,19 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
     res.json({ provider, workspace: workspaceRoot });
   });
 
+  app.get('/api/agent/activity/:id', (req, res) => {
+    const activity = agentActivityJobs.get(req.params.id);
+    if (!activity) return res.status(404).json({ error: 'Agent activity not found' });
+    res.json(activity);
+  });
+
+  app.post('/api/workspace/open-folder', (_req, res) => {
+    const command = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer.exe' : 'xdg-open';
+    const child = spawn(command, [workspaceRoot], { detached: true, stdio: 'ignore', shell: false });
+    child.once('spawn', () => { child.unref(); res.json({ ok: true, workspace: workspaceRoot }); });
+    child.once('error', (error) => res.status(500).json({ error: `Could not open the paper folder: ${error.message}` }));
+  });
+
   app.get('/api/agents', async (_req, res) => {
     await resourceResponse(res, async () => {
       const project = await hydrateAgentCommands();
@@ -158,6 +216,7 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
         { id: 'codex', label: 'Codex CLI', adapter: 'structured-cli', command: 'codex', capabilities: ['revise', 'paragraph', 'review', 'generation'], integration: 'ready' },
         { id: 'claude-code', label: 'Claude Code', adapter: 'structured-cli', command: 'claude', capabilities: ['revise', 'paragraph', 'review', 'generation'], integration: 'ready' },
         { id: 'opencode', label: 'OpenCode CLI', adapter: 'structured-cli', command: 'opencode', capabilities: ['revise', 'paragraph', 'review', 'generation'], integration: 'ready' },
+        { id: 'pi', label: 'Pi Agent', adapter: 'json-event-cli', command: 'pi', capabilities: ['revise', 'paragraph', 'review', 'generation'], integration: 'ready' },
       ];
       return {
         selected: provider,
@@ -174,7 +233,7 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
 
   app.put('/api/agents/config', async (req, res) => {
     const { id, command = '', args = [], model = '', activate = false } = req.body || {};
-    if (!['mock', 'codex', 'claude-code', 'opencode'].includes(id)) return res.status(400).json({ error: 'Unknown Agent provider' });
+    if (!AGENT_PROVIDERS.includes(id)) return res.status(400).json({ error: 'Unknown Agent provider' });
     if (typeof command !== 'string' || command.length > 500) return res.status(400).json({ error: 'command must be a string up to 500 characters' });
     if (!Array.isArray(args) || args.some((item) => typeof item !== 'string') || args.length > 30) return res.status(400).json({ error: 'args must be an array of strings' });
     if (typeof model !== 'string' || model.length > 200) return res.status(400).json({ error: 'model must be a string up to 200 characters' });
@@ -185,13 +244,6 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
       });
       if (id !== 'mock' && command.trim()) agentCommands[id] = { command: command.trim(), args, model: model.trim() };
       if (activate) {
-        const detected = await detectAgentProviders({ commands: agentCommands, providers: [id] });
-        const selected = detected.find((item) => item.provider === id);
-        if (!selected?.available) {
-          const error = new Error(`${id} CLI is not available with the saved command`);
-          error.status = 409;
-          throw error;
-        }
         provider = id;
         app.locals.config.provider = provider;
       }
@@ -200,17 +252,72 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
   });
 
   app.post('/api/agents/probe', async (req, res) => {
-    const { id, command = '', args = [], model = '' } = req.body || {};
-    if (!['mock', 'codex', 'claude-code', 'opencode'].includes(id)) return res.status(400).json({ error: 'Unknown Agent provider' });
+    const { id, command = '', args = [], model = '', live = false } = req.body || {};
+    if (!AGENT_PROVIDERS.includes(id)) return res.status(400).json({ error: 'Unknown Agent provider' });
     if (typeof command !== 'string' || !Array.isArray(args) || args.some((item) => typeof item !== 'string') || typeof model !== 'string') {
       return res.status(400).json({ error: 'Invalid Agent probe configuration' });
     }
-    await resourceResponse(res, async () => {
-      const commands = { ...agentCommands };
-      if (id !== 'mock' && command.trim()) commands[id] = { command: command.trim(), args, model: model.trim() };
-      const detected = await detectAgentProviders({ commands, providers: [id] });
-      return { agent: detected.find((item) => item.provider === id) };
+    const commands = { ...agentCommands };
+    if (id !== 'mock' && command.trim()) commands[id] = { command: command.trim(), args, model: model.trim() };
+    if (!live) {
+      return resourceResponse(res, async () => {
+        const detected = await detectAgentProviders({ commands, providers: [id] });
+        return { agent: detected.find((item) => item.provider === id) };
+      });
+    }
+
+    const testId = `agent_probe_${randomUUID()}`;
+    const controller = new AbortController();
+    const job = { id: testId, provider: id, status: 'queued', createdAt: new Date().toISOString(), startedAt: null, finishedAt: null, agent: null, liveTest: null, controller };
+    agentProbeJobs.set(testId, job);
+    while (agentProbeJobs.size > 50) agentProbeJobs.delete(agentProbeJobs.keys().next().value);
+    res.status(202).json({ test: { id: testId, provider: id, status: job.status, createdAt: job.createdAt } });
+
+    setImmediate(async () => {
+      job.status = 'running';
+      job.startedAt = new Date().toISOString();
+      const startedAt = Date.now();
+      try {
+        const detected = await detectAgentProviders({ commands, providers: [id] });
+        const agent = detected.find((item) => item.provider === id);
+        job.agent = agent;
+        if (controller.signal.aborted) throw Object.assign(new Error('Agent live test cancelled'), { code: 'AGENT_CANCELLED' });
+        if (id === 'mock') {
+          job.liveTest = { ok: true, latencyMs: Date.now() - startedAt, summary: 'Built-in Mock workflow is ready.' };
+        } else if (!agent?.available) {
+          job.liveTest = { ok: false, latencyMs: Date.now() - startedAt, error: agent?.error || 'CLI unavailable' };
+        } else {
+          const result = await runWritingAgent(id, {
+            content: 'This result is very important.',
+            prompt: 'Return one precise academic edit for the supplied sentence.',
+            resourceContext: '', resourceIds: [],
+          }, { workspaceRoot, commands, timeoutMs: 60_000, signal: controller.signal, liveTest: true });
+          job.agent = { ...agent, authenticated: true, authStatus: 'Live test passed' };
+          job.liveTest = { ok: true, latencyMs: Date.now() - startedAt, summary: result.summary || 'Structured response validated.' };
+        }
+        job.status = job.liveTest.ok ? 'complete' : 'failed';
+      } catch (error) {
+        const cancelled = controller.signal.aborted || error.code === 'AGENT_CANCELLED';
+        job.status = cancelled ? 'cancelled' : 'failed';
+        job.liveTest = { ok: false, latencyMs: Date.now() - startedAt, error: cancelled ? 'Live test cancelled.' : publicErrorMessage(error), code: error.code };
+      } finally {
+        job.finishedAt = new Date().toISOString();
+      }
     });
+  });
+
+  app.get('/api/agents/probe/:testId', (req, res) => {
+    const job = agentProbeJobs.get(req.params.testId);
+    if (!job) return res.status(404).json({ error: 'Agent live test not found' });
+    const { controller: _controller, ...test } = job;
+    res.json({ test });
+  });
+
+  app.delete('/api/agents/probe/:testId', (req, res) => {
+    const job = agentProbeJobs.get(req.params.testId);
+    if (!job) return res.status(404).json({ error: 'Agent live test not found' });
+    if (['queued', 'running'].includes(job.status)) job.controller.abort();
+    res.json({ ok: true, status: job.status });
   });
 
   app.post('/api/agent/context-preview', async (req, res) => {
@@ -461,6 +568,52 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
     await resourceResponse(res, async () => ({ revisions: await listRevisions(workspaceRoot, req.query.documentId) }));
   });
 
+  app.get('/api/change-history', async (req, res) => {
+    await resourceResponse(res, async () => ({
+      entries: await getRecentChangeHistory(workspaceRoot, req.query.documentId, req.query.limit),
+    }));
+  });
+
+  app.get('/api/change-history/:id', async (req, res) => {
+    await resourceResponse(res, async () => ({ entry: await getChangeHistoryEntry(workspaceRoot, req.params.id) }));
+  });
+
+  app.post('/api/change-history/:id/restore', async (req, res) => {
+    await resourceResponse(res, async () => await restoreRevisionVersion(workspaceRoot, req.params.id));
+  });
+
+  app.get('/api/change-history/:id/preview.pdf', async (req, res) => {
+    let previewRoot = '';
+    try {
+      const { document, source } = await getHistoricalRevisionSource(workspaceRoot, req.params.id);
+      const previewBase = join(workspaceRoot, '.papergod', 'previews');
+      await mkdir(previewBase, { recursive: true });
+      previewRoot = await mkdtemp(join(previewBase, 'render-'));
+      const entries = await readdir(workspaceRoot, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.name === '.papergod') continue;
+        await cp(join(workspaceRoot, entry.name), join(previewRoot, entry.name), { recursive: true });
+      }
+      const previewTex = sanitizePath(document.file, previewRoot);
+      if (!previewTex) throw Object.assign(new Error('Invalid historical document path'), { status: 403 });
+      await mkdir(dirname(previewTex), { recursive: true });
+      await writeFile(previewTex, source, 'utf-8');
+      const result = await compile(previewTex, previewRoot);
+      if (!result.ok) {
+        await rm(previewRoot, { recursive: true, force: true });
+        return res.status(422).json({ error: result.error, log: result.log || null });
+      }
+      res.setHeader('Cache-Control', 'no-store');
+      res.sendFile(result.pdf, (error) => {
+        rm(previewRoot, { recursive: true, force: true }).catch(() => {});
+        if (error && !res.headersSent) res.status(error.statusCode || 500).json({ error: error.message });
+      });
+    } catch (error) {
+      if (previewRoot) await rm(previewRoot, { recursive: true, force: true }).catch(() => {});
+      res.status(error.status || 500).json({ error: publicErrorMessage(error), code: error.code });
+    }
+  });
+
   app.post('/api/generate/paper', async (req, res) => {
     const controller = new AbortController();
     req.once('aborted', () => controller.abort());
@@ -607,7 +760,7 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
       const libraryContext = buildLibraryContext(libraries, {
         query: `${effectivePrompt}\n${content}`, resourceIds,
       });
-      res.json(await requestSuggestions(content, effectivePrompt, req, { libraryContext }));
+      res.json(await requestSuggestions(content, effectivePrompt, req, { libraryContext, file: document?.file || '', nodeStart: 0 }));
     } catch (e) {
       res.status(e.status || 500).json({ error: e.message, code: e.code, details: e.details });
     }
@@ -708,6 +861,22 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
       res.json({ ok: true, ...result });
     } catch (e) {
       res.status(e.status || 500).json({ error: e.message, code: e.code });
+    }
+  });
+
+  app.post('/api/agent/apply-all', async (req, res) => {
+    const { file, suggestionIds } = req.body || {};
+    if (!file || !Array.isArray(suggestionIds) || !suggestionIds.length) return res.status(400).json({ error: 'file and suggestionIds are required' });
+    const safe = sanitizePath(file, workspaceRoot);
+    if (!safe) return res.status(403).json({ error: 'Access denied' });
+    if (!safe.endsWith('.tex')) return res.status(400).json({ error: 'Only .tex files can be edited' });
+    try {
+      const selected = suggestionIds.map((suggestionId) => getSuggestion(suggestionId));
+      const result = await applySuggestionsAsRevision(workspaceRoot, file, selected);
+      suggestionIds.forEach(removeSuggestion);
+      res.json({ ok: true, ...result });
+    } catch (error) {
+      res.status(error.status || 500).json({ error: error.message, code: error.code });
     }
   });
 

@@ -7,10 +7,11 @@ import { generateSuggestions, applySuggestionToContent } from '../src/server/age
 import { PROJECT_SCHEMA_VERSION, createDefaultProject, migrateProjectData, validateProject } from '../src/server/project-store.js';
 import { parseCliArgs } from '../src/cli.js';
 import { initializeWorkspace } from '../src/server/workspace.js';
-import { detectAgentProviders, parseAgentJson, parsePaperGenerationJson, parseReviewAgentJson, parseReviewOrchestrationJson, runAcademicReviewAgent, runPaperGenerationAgent, runProcess, runReviewOrchestrationAgent, runWritingAgent, validatePaperGenerationResponse, validateReviewOrchestrationResponse, validateReviewResponse, validateSuggestionResponse } from '../src/server/agent-adapters.js';
+import { PAPER_GENERATION_OUTPUT_SCHEMA, REVIEW_ORCHESTRATION_OUTPUT_SCHEMA, SUGGESTION_OUTPUT_SCHEMA, detectAgentProviders, parseAgentJson, parsePaperGenerationJson, parseReviewAgentJson, parseReviewOrchestrationJson, runAcademicReviewAgent, runPaperGenerationAgent, runProcess, runReviewOrchestrationAgent, runWritingAgent, validatePaperGenerationResponse, validateReviewOrchestrationResponse, validateReviewResponse, validateSuggestionResponse } from '../src/server/agent-adapters.js';
 import { parseLatexDocument } from '../src/server/latex-structure.js';
 import { buildLibraryContext, composeMockParagraph, extractLibraryCandidates, mergedVocabulary, renderSentencePattern, searchLibraries } from '../src/server/library-engine.js';
-import { splitAtomicOpinions } from '../src/server/revision-engine.js';
+import { applySuggestionsAsRevision, restoreRevisionVersion, splitAtomicOpinions } from '../src/server/revision-engine.js';
+import { getHistoricalRevisionSource, getRecentChangeHistory } from '../src/server/change-history.js';
 import { generateMockPeerReview, synthesizePeerReviews } from '../src/server/review-panel.js';
 import { resolve, join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -157,6 +158,33 @@ test('POST /api/agent/apply modifies file content', async () => {
   assert.ok(data.recoveryPoint.path.startsWith('.papergod/recovery/'));
 });
 
+test('POST /api/agent/apply-all applies one atomic AI revision and rolls it back', async () => {
+  const file = 'apply-all-test.tex';
+  const content = '\\documentclass{article}\\begin{document}This is very important. It was found that the method works. In conclusion, the result is very useful.\\end{document}';
+  await writeFile(join(tmpWorkspace, file), content, 'utf-8');
+  const synced = await api('/api/documents/sync', { method: 'POST', body: { file } });
+  const proposed = await api('/api/agent/suggest', {
+    method: 'POST',
+    body: { documentId: synced.data.document.id, content, prompt: 'Improve academic precision.' },
+  });
+  assert.ok(proposed.data.suggestions.length >= 2);
+  const applied = await api('/api/agent/apply-all', {
+    method: 'POST',
+    body: { file, suggestionIds: proposed.data.suggestions.map((item) => item.id) },
+  });
+  assert.equal(applied.status, 200);
+  assert.equal(applied.data.revision.origin, 'agent-batch');
+  assert.equal(applied.data.revision.status, 'applied');
+  assert.ok(applied.data.revision.changes.length >= 2);
+  assert.notEqual(applied.data.content, content);
+  assert.ok(applied.data.recoveryPoint.path.startsWith('.papergod/recovery/'));
+
+  const rolledBack = await api(`/api/revisions/${applied.data.revision.id}/rollback`, { method: 'POST' });
+  assert.equal(rolledBack.status, 200);
+  assert.equal(rolledBack.data.content, content);
+  assert.equal(rolledBack.data.revision.status, 'rolled-back');
+});
+
 test('POST /api/agent/reject removes suggestion', async () => {
   const content = 'This is very important.';
   const sugRes = await api('/api/agent/suggest', { method: 'POST', body: { content, prompt: 'fix' } });
@@ -184,13 +212,14 @@ test('GET /api/config exposes selected local provider', async () => {
   assert.equal(data.workspace, tmpWorkspace);
 });
 
-test('Agent configuration exposes Codex, Claude Code, and OpenCode adapters', async () => {
+test('Agent configuration exposes Codex, Claude Code, OpenCode, and Pi adapters', async () => {
   const listed = await api('/api/agents');
   assert.equal(listed.status, 200);
   assert.equal(listed.data.selected, 'mock');
   assert.ok(listed.data.providers.some((item) => item.id === 'codex' && item.integration === 'ready'));
   assert.ok(listed.data.providers.some((item) => item.id === 'opencode' && item.integration === 'ready'));
   assert.ok(listed.data.providers.some((item) => item.id === 'claude-code' && item.integration === 'ready'));
+  assert.ok(listed.data.providers.some((item) => item.id === 'pi' && item.integration === 'ready'));
   const saved = await api('/api/agents/config', {
     method: 'PUT', body: { id: 'mock', command: '', args: [], model: '', activate: true },
   });
@@ -333,10 +362,9 @@ test('LaTeX structure parser maps sections, paragraphs, sentences, and exact ran
   const source = await readFile(SAMPLE_TEX, 'utf-8');
   const document = { id: 'document_parser', title: '', sections: [] };
   const parsed = parseLatexDocument(source, document);
-  assert.equal(parsed.title, 'A Very Good Introduction to Artificial Intelligence');
-  assert.deepEqual(parsed.sections.map((section) => section.title), [
-    'Abstract', 'Introduction', 'Methods', 'Results', 'Conclusion',
-  ]);
+  assert.equal(parsed.title, 'Structured Workflows for AI-Assisted Scientific Writing: An Empirical Study');
+  const sectionTitles = parsed.sections.map((section) => section.title);
+  for (const expected of ['Abstract', 'Introduction', 'Methods', 'Results', 'Conclusion']) assert.ok(sectionTitles.includes(expected));
   const introduction = parsed.sections.find((section) => section.title === 'Introduction');
   assert.ok(introduction.children.length > 0);
   assert.ok(introduction.children[0].children.length >= 3);
@@ -453,6 +481,13 @@ test('React workbench and legacy overlays expose the complete writing workflow',
   const frontend = html + workbench;
   assert.ok(html.includes('id="root"'));
   assert.ok(frontend.includes('id="outline-tree"'));
+  assert.ok(workbench.includes('id="navigator-outline-tab"'));
+  assert.ok(workbench.includes('id="navigator-tools-tab"'));
+  assert.ok(workbench.includes('id="tool-open-folder"'));
+  assert.ok(workbench.includes('id="tool-show-source"'));
+  assert.ok(workbench.includes('id="tool-change-history"'));
+  assert.ok(workbench.includes('id="history-open"'));
+  assert.ok(!workbench.includes('id="engine-status"'));
   assert.ok(frontend.includes('id="context-summary"'));
   assert.ok(frontend.includes('id="context-prompt"'));
   assert.ok(frontend.includes('id="context-intent"'));
@@ -460,17 +495,40 @@ test('React workbench and legacy overlays expose the complete writing workflow',
   assert.ok(html.includes('id="library-form"'));
   assert.ok(frontend.includes('id="library-selection-status"'));
   assert.ok(frontend.includes('id="agent-config-module"'));
+  assert.ok(workbench.includes('id="agent-provider-quick"'));
   assert.ok(html.includes('id="agent-config-overlay"'));
   assert.ok(html.includes('id="agent-config-probe"'));
+  assert.ok(html.includes('id="agent-config-save"'));
+  assert.ok(html.includes('Check setup'));
   assert.ok(html.includes('<option value="claude-code">Claude Code</option>'));
+  assert.ok(html.includes('<option value="pi">Pi Agent</option>'));
   assert.ok(frontend.includes('id="prompt-context-module"'));
+  assert.ok(workbench.includes('id="prompt-management-module"'));
+  assert.ok(workbench.includes('Preview final prompt'));
   assert.ok(html.includes('id="prompt-preview-overlay"'));
   assert.ok(frontend.includes('id="temporary-prompt-module"'));
   assert.ok(!frontend.includes('id="ai-action"'));
   assert.ok(frontend.includes('id="ai-invoke"'));
-  assert.ok(frontend.includes('>请神</Button>'));
+  assert.ok(frontend.includes('data-i18n="ai.invoke"'));
+  assert.ok(workbench.includes('id="language-select"'));
+  assert.ok(frontend.includes('id="modification-intent-list"'));
+  assert.ok(frontend.includes('id="modification-intent-count"'));
   assert.ok(html.includes('id="invoke-confirm-overlay"'));
   assert.ok(html.includes('id="invoke-confirm"'));
+  assert.ok(html.includes('id="change-history-overlay"'));
+  assert.ok(html.includes('id="change-history-list"'));
+  assert.ok(html.includes('id="change-history-detail"'));
+  assert.ok(!html.includes('id="agent-activity-overlay"'));
+  assert.ok(workbench.includes('id="agent-activity-toggle"'));
+  assert.ok(workbench.includes('id="agent-activity-stages"'));
+  assert.ok(workbench.includes('id="agent-activity-undo"'));
+  assert.ok(html.includes('id="pdf-edit-menu"'));
+  assert.ok(html.includes('data-pdf-scope="word"'));
+  assert.ok(html.includes('id="pdf-sentence-reader-open"'));
+  assert.ok(html.includes('id="sentence-reader-overlay"'));
+  assert.ok(html.includes('id="sentence-reader-prev"'));
+  assert.ok(html.includes('id="sentence-reader-next"'));
+  assert.ok(html.includes('id="sentence-reader-submit"'));
   assert.ok(frontend.includes('id="focus-annotation-open"'));
   assert.ok(html.includes('id="focus-annotation-overlay"'));
   assert.ok(html.includes('id="focus-section-tree"'));
@@ -508,8 +566,28 @@ test('React workbench and legacy overlays expose the complete writing workflow',
   const reactTheme = await fetch(baseUrl + '/react/assets/main.css');
   assert.equal(reactTheme.status, 200);
   const appSource = await (await fetch(baseUrl + '/app.js')).text();
+  const i18nSource = await (await fetch(baseUrl + '/i18n.js')).text();
+  assert.ok(i18nSource.includes("const DEFAULT_LOCALE = 'en'"));
+  assert.ok(i18nSource.includes("'zh-CN'"));
+  assert.ok(i18nSource.includes("papergod.locale"));
+  assert.ok(appSource.includes('translateDom'));
+  assert.ok(appSource.includes('setLocale'));
+  assert.ok(appSource.includes('/api/agent/activity/'));
+  assert.ok(appSource.includes('data-provider='));
+  assert.ok(appSource.includes('selectAgentProvider'));
+  assert.ok(appSource.includes('activateAgentProvider'));
+  assert.ok(appSource.includes('live: false'));
   assert.ok(appSource.includes('/api/documents/sync'));
   assert.ok(appSource.includes('/api/agent/suggest-node'));
+  assert.ok(appSource.includes('/api/agent/apply-all'));
+  assert.ok(appSource.includes('/api/change-history'));
+  assert.ok(appSource.includes('rollbackChangeHistoryEntry'));
+  assert.ok(appSource.includes('id="history-pdf-pages"'));
+  assert.ok(appSource.includes('deriveHistoryDisplayChange'));
+  assert.ok(appSource.includes('applyHistoryDiffOverlay'));
+  assert.ok(appSource.includes('history-pdf-delete-pin'));
+  assert.ok(appSource.includes('history-diff-next'));
+  assert.ok(appSource.includes('/api/workspace/open-folder'));
   assert.ok(appSource.includes('/api/libraries/extract'));
   assert.ok(appSource.includes('/api/libraries/render-pattern'));
   assert.ok(appSource.includes('/api/agent/generate-paragraph'));
@@ -527,6 +605,21 @@ test('React workbench and legacy overlays expose the complete writing workflow',
   assert.ok(appSource.includes("setWorkspaceView('preview')"));
   assert.ok(appSource.includes('showCompiledPdf(data.pdf)'));
   assert.ok(appSource.includes("pdfjsLib.getDocument({ url: pdfUrl, isEvalSupported: false })"));
+  assert.ok(appSource.includes('new pdfjsLib.TextLayer'));
+  assert.ok(appSource.includes("setProperty('--scale-factor', viewport.scale)"));
+  assert.ok(appSource.includes('textOffsetAtPoint'));
+  assert.ok(appSource.includes('tokenOccurrences'));
+  assert.ok(appSource.includes('highlightPdfRanges'));
+  assert.ok(appSource.includes('createPositionalPdfIntent'));
+  assert.ok(appSource.includes('openSentenceReader'));
+  assert.ok(appSource.includes('submitSentenceReaderIntent'));
+  assert.ok(appSource.includes('queueModificationIntent'));
+  assert.ok(!appSource.includes('Could not map this exact PDF position'));
+  assert.ok(appSource.includes('class ModificationIntent'));
+  assert.ok(appSource.includes('modificationIntentPrompt'));
+  assert.ok(appSource.includes('context layers'));
+  const legacyTheme = await (await fetch(baseUrl + '/style.css')).text();
+  assert.ok(legacyTheme.includes('.pdf-scope-highlight'));
   const pdfModule = await fetch(baseUrl + '/vendor/pdfjs-dist/build/pdf.mjs');
   assert.equal(pdfModule.status, 200);
 });
@@ -537,6 +630,7 @@ test('CLI parses workspace, port, and Agent provider', () => {
   assert.equal(options.port, 4312);
   assert.equal(options.provider, 'codex');
   assert.equal(options.demo, true);
+  assert.equal(parseCliArgs(['--agent', 'pi'], '/tmp').provider, 'pi');
   assert.throws(() => parseCliArgs(['--agent', 'unknown']), /Agent must be one of/);
   assert.throws(() => parseCliArgs(['--port', '70000']), /Port must be an integer/);
 });
@@ -613,8 +707,18 @@ test('Agent response parser accepts JSON and JSONL text events', () => {
   assert.deepEqual(parseAgentJson(JSON.stringify(payload)), payload);
   const event = JSON.stringify({ type: 'message', part: { text: JSON.stringify(payload) } });
   assert.deepEqual(parseAgentJson(event), payload);
+  const fencedEvent = JSON.stringify({ type: 'text', part: { text: `\`\`\`json\n${JSON.stringify(payload)}\n\`\`\`` } });
+  assert.deepEqual(parseAgentJson(fencedEvent), payload);
   const claudeResult = JSON.stringify({ type: 'result', structured_output: payload, result: '' });
   assert.deepEqual(parseAgentJson(claudeResult), payload);
+  const piResult = JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: JSON.stringify(payload) }] } });
+  assert.deepEqual(parseAgentJson(piResult), payload);
+});
+
+test('Codex output schemas use only supported structured-output keywords', () => {
+  for (const schema of [SUGGESTION_OUTPUT_SCHEMA, PAPER_GENERATION_OUTPUT_SCHEMA, REVIEW_ORCHESTRATION_OUTPUT_SCHEMA]) {
+    assert.equal(JSON.stringify(schema).includes('uniqueItems'), false);
+  }
 });
 
 test('Agent response validation requires exact source text', () => {
@@ -638,10 +742,10 @@ test('Agent response validation rejects unprovided resource provenance', () => {
   assert.ok(validation.errors.some((error) => error.includes('was not provided')));
 });
 
-test('Codex, Claude Code, and OpenCode adapters use structured output through fake CLIs', async () => {
+test('Codex, Claude Code, OpenCode, and Pi adapters use structured output through fake CLIs', async () => {
   const fakeCli = join(tmpWorkspace, 'fake-agent.mjs');
   await writeFile(fakeCli, `
-import { writeFileSync } from 'fs';
+import { readFileSync, writeFileSync } from 'fs';
 const args = process.argv.slice(2);
 if (args.includes('--version')) {
   process.stdout.write('fake-agent 1.0.0\\n');
@@ -650,6 +754,15 @@ if (args.includes('--version')) {
 if (args.includes('--output-format') && (!args.includes('--json-schema') || args[args.indexOf('--model') + 1] !== 'test-model')) {
   process.stderr.write('Claude structured output or model flag missing');
   process.exit(2);
+}
+if (args[0] === 'run') {
+  const directory = args[args.indexOf('--dir') + 1];
+  if (!args.includes('--pure') || args[args.indexOf('--format') + 1] !== 'json' || JSON.parse(readFileSync(directory + '/opencode.json', 'utf8')).permission !== 'deny') {
+    process.stderr.write('OpenCode isolation flags missing'); process.exit(2);
+  }
+}
+if (args.includes('--mode') && (args[args.indexOf('--mode') + 1] !== 'json' || !args.includes('--no-tools') || !args.includes('--no-session') || !args.includes('--no-context-files'))) {
+  process.stderr.write('Pi analysis-only flags missing'); process.exit(2);
 }
 const response = JSON.stringify({
   summary: 'One precise edit.',
@@ -664,19 +777,22 @@ else process.stdout.write(JSON.stringify({ type: 'text', part: { text: response 
     codex: { command: process.execPath, args: [fakeCli] },
     'claude-code': { command: process.execPath, args: [fakeCli], model: 'test-model' },
     opencode: { command: process.execPath, args: [fakeCli] },
+    pi: { command: process.execPath, args: [fakeCli] },
   };
   const request = { prompt: 'Improve precision.', content: 'This result is very important.' };
   const codex = await runWritingAgent('codex', request, { workspaceRoot: tmpWorkspace, commands });
   const claude = await runWritingAgent('claude-code', request, { workspaceRoot: tmpWorkspace, commands });
   const opencode = await runWritingAgent('opencode', request, { workspaceRoot: tmpWorkspace, commands });
+  const pi = await runWritingAgent('pi', request, { workspaceRoot: tmpWorkspace, commands });
   assert.equal(codex.suggestions[0].suggestedText, 'crucial');
   assert.deepEqual(claude, codex);
   assert.deepEqual(opencode, codex);
+  assert.deepEqual(pi, codex);
   const providers = await detectAgentProviders({ commands });
   assert.ok(providers.every((provider) => provider.available));
 });
 
-test('Codex, Claude Code, and OpenCode peer-review adapters enforce structured reports', async () => {
+test('Codex, Claude Code, OpenCode, and Pi peer-review adapters enforce structured reports', async () => {
   const fakeCli = join(tmpWorkspace, 'fake-review-agent.mjs');
   await writeFile(fakeCli, `
 import { writeFileSync } from 'fs';
@@ -693,6 +809,7 @@ else process.stdout.write(JSON.stringify({ type: 'text', part: { text: response 
     codex: { command: process.execPath, args: [fakeCli] },
     'claude-code': { command: process.execPath, args: [fakeCli] },
     opencode: { command: process.execPath, args: [fakeCli] },
+    pi: { command: process.execPath, args: [fakeCli] },
   };
   const request = {
     content: 'Our method is very important.',
@@ -702,12 +819,14 @@ else process.stdout.write(JSON.stringify({ type: 'text', part: { text: response 
   const codex = await runAcademicReviewAgent('codex', request, { workspaceRoot: tmpWorkspace, commands });
   const claude = await runAcademicReviewAgent('claude-code', request, { workspaceRoot: tmpWorkspace, commands });
   const opencode = await runAcademicReviewAgent('opencode', request, { workspaceRoot: tmpWorkspace, commands });
+  const pi = await runAcademicReviewAgent('pi', request, { workspaceRoot: tmpWorkspace, commands });
   assert.equal(codex.items[0].rubricId, 'rigor');
   assert.deepEqual(claude, codex);
   assert.deepEqual(opencode, codex);
+  assert.deepEqual(pi, codex);
 });
 
-test('Codex, Claude Code, and OpenCode full-paper adapters validate complete safe LaTeX', async () => {
+test('Codex, Claude Code, OpenCode, and Pi full-paper adapters validate complete safe LaTeX', async () => {
   const fakeCli = join(tmpWorkspace, 'fake-paper-agent.mjs');
   await writeFile(fakeCli, `
 import { writeFileSync } from 'fs';
@@ -721,19 +840,22 @@ else process.stdout.write(JSON.stringify({ type: 'text', part: { text: response 
     codex: { command: process.execPath, args: [fakeCli] },
     'claude-code': { command: process.execPath, args: [fakeCli] },
     opencode: { command: process.execPath, args: [fakeCli] },
+    pi: { command: process.execPath, args: [fakeCli] },
   };
   const request = { instruction: 'Draft.', projectContext: '', outlineContext: '', resourceContext: '', resourceIds: [] };
   const codex = await runPaperGenerationAgent('codex', request, { workspaceRoot: tmpWorkspace, commands });
   const claude = await runPaperGenerationAgent('claude-code', request, { workspaceRoot: tmpWorkspace, commands });
   const opencode = await runPaperGenerationAgent('opencode', request, { workspaceRoot: tmpWorkspace, commands });
+  const pi = await runPaperGenerationAgent('pi', request, { workspaceRoot: tmpWorkspace, commands });
   assert.match(codex.latex, /documentclass/);
   assert.deepEqual(claude, codex);
   assert.deepEqual(opencode, codex);
+  assert.deepEqual(pi, codex);
   assert.deepEqual(parsePaperGenerationJson(JSON.stringify(codex)), codex);
   assert.equal(validatePaperGenerationResponse({ ...codex, latex: '\\documentclass{article}\\begin{document}\\immediate\\write18{bad}\\end{document}' }, []).ok, false);
 });
 
-test('Codex, Claude Code, and OpenCode review orchestrators return atomic anchored dependencies', async () => {
+test('Codex, Claude Code, OpenCode, and Pi review orchestrators return atomic anchored dependencies', async () => {
   const fakeCli = join(tmpWorkspace, 'fake-orchestrator-agent.mjs');
   await writeFile(fakeCli, `
 import { writeFileSync } from 'fs';
@@ -746,13 +868,15 @@ const outputIndex = args.indexOf('--output-last-message');
 if (outputIndex !== -1) writeFileSync(args[outputIndex + 1], response);
 else process.stdout.write(JSON.stringify({ type: 'text', part: { text: response } }) + '\\n');
 `, 'utf-8');
-  const commands = { codex: { command: process.execPath, args: [fakeCli] }, 'claude-code': { command: process.execPath, args: [fakeCli] }, opencode: { command: process.execPath, args: [fakeCli] } };
+  const commands = { codex: { command: process.execPath, args: [fakeCli] }, 'claude-code': { command: process.execPath, args: [fakeCli] }, opencode: { command: process.execPath, args: [fakeCli] }, pi: { command: process.execPath, args: [fakeCli] } };
   const request = { feedback: 'Improve wording and evidence.', content: 'This very important central claim needs support.', outlineContext: 'One paragraph.' };
   const codex = await runReviewOrchestrationAgent('codex', request, { workspaceRoot: tmpWorkspace, commands });
   const claude = await runReviewOrchestrationAgent('claude-code', request, { workspaceRoot: tmpWorkspace, commands });
   const opencode = await runReviewOrchestrationAgent('opencode', request, { workspaceRoot: tmpWorkspace, commands });
+  const pi = await runReviewOrchestrationAgent('pi', request, { workspaceRoot: tmpWorkspace, commands });
   assert.deepEqual(claude, codex);
   assert.deepEqual(opencode, codex);
+  assert.deepEqual(pi, codex);
   assert.deepEqual(parseReviewOrchestrationJson(JSON.stringify(codex)), codex);
   assert.equal(validateReviewOrchestrationResponse(codex, request.content).ok, true);
   assert.equal(validateReviewOrchestrationResponse({ ...codex, opinions: [{ ...codex.opinions[0], quote: 'invented' }] }, request.content).ok, false);
@@ -774,12 +898,66 @@ test('Agent process supports cancellation', async () => {
   await assert.rejects(running, (error) => error.code === 'AGENT_CANCELLED');
 });
 
+test('Agent process streams stdout and stderr to an activity listener', async () => {
+  const events = [];
+  await runProcess(process.execPath, ['-e', "process.stdout.write('working\\n'); process.stderr.write('checking\\n')"], {
+    onOutput: (stream, chunk) => events.push({ stream, chunk }),
+  });
+  assert.ok(events.some((item) => item.stream === 'stdout' && item.chunk.includes('working')));
+  assert.ok(events.some((item) => item.stream === 'stderr' && item.chunk.includes('checking')));
+});
+
+test('Change history reconstructs, previews, and restores any of five recent versions safely', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'papergod-change-history-'));
+  try {
+    let content = '\\documentclass{article}\\begin{document}Version 0.\\end{document}';
+    await writeFile(join(workspace, 'main.tex'), content, 'utf-8');
+    await initializeWorkspace(workspace);
+    let latest;
+    for (let version = 1; version <= 6; version += 1) {
+      const before = `Version ${version - 1}`;
+      const after = `Version ${version}`;
+      latest = await applySuggestionsAsRevision(workspace, 'main.tex', [{ originalText: before, suggestedText: after, category: 'content', reason: `Advance to ${version}` }]);
+      content = latest.content;
+    }
+    const history = await getRecentChangeHistory(workspace, latest.revision.documentId, 5);
+    assert.equal(history.length, 5);
+    assert.equal(history[0].id, latest.revision.id);
+    assert.equal(history[0].isLatest, true);
+    assert.equal(history[0].canRollback, true);
+    assert.equal(content.slice(history[0].changes[0].currentStart, history[0].changes[0].currentEnd), 'Version 6');
+    assert.ok(history.slice(1).every((entry) => entry.canRollback === false && entry.canRestore === true));
+    const target = history.find((entry) => entry.changes[0].after === 'Version 3');
+    const historical = await getHistoricalRevisionSource(workspace, target.id);
+    assert.match(historical.source, /Version 3/);
+    const restored = await restoreRevisionVersion(workspace, target.id);
+    assert.match(restored.content, /Version 3/);
+    assert.equal(restored.revision.origin, 'history-restore');
+    assert.equal(restored.revision.restoredRevisionId, target.id);
+    assert.match(await readFile(join(workspace, restored.recoveryPoint.path), 'utf-8'), /Version 6/);
+    content = restored.content;
+    await writeFile(join(workspace, 'main.tex'), content.replace('Version 3', 'Version 3 with manual follow-up'), 'utf-8');
+    const afterManualEdit = await getRecentChangeHistory(workspace, latest.revision.documentId, 5);
+    assert.equal(afterManualEdit[0].canRollback, false);
+    await writeFile(join(workspace, 'main.tex'), content, 'utf-8');
+    const deleted = await applySuggestionsAsRevision(workspace, 'main.tex', [{ originalText: 'Version 3', suggestedText: '', category: 'content', reason: 'Remove obsolete version label' }]);
+    const afterDeletion = await getRecentChangeHistory(workspace, deleted.revision.documentId, 5);
+    assert.equal(afterDeletion[0].changes[0].type, 'deleted');
+    assert.equal(afterDeletion[0].changes[0].after, '');
+    assert.ok(afterDeletion[0].changes[0].contextBefore);
+    assert.ok(afterDeletion[0].changes[0].contextAfter);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test('External Agent API persists auditable run records', async () => {
   const fakeCli = join(tmpWorkspace, 'fake-codex-api.mjs');
   await writeFile(fakeCli, `
 import { writeFileSync } from 'fs';
 const args = process.argv.slice(2);
 if (args.includes('--version')) { process.stdout.write('fake-codex 1.0\\n'); process.exit(0); }
+process.stdout.write('Analyzing manuscript scope...\\n');
 const outputIndex = args.indexOf('--output-last-message');
 writeFileSync(args[outputIndex + 1], JSON.stringify({ summary: 'API edit.', usedResourceIds: [], suggestions: [{ category: 'style', description: 'Precise wording', originalText: 'very important', suggestedText: 'crucial', reason: 'Precision' }] }));
 `, 'utf-8');
@@ -794,7 +972,7 @@ writeFileSync(args[outputIndex + 1], JSON.stringify({ summary: 'API edit.', used
     const root = `http://127.0.0.1:${address.port}`;
     const response = await fetch(`${root}/api/agent/suggest`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt: 'Improve.', content: 'This is very important.' }),
+      body: JSON.stringify({ prompt: 'Improve.', content: 'This is very important.', activityId: 'activity-test-1234' }),
     });
     assert.equal(response.status, 200);
     const data = await response.json();
@@ -806,8 +984,59 @@ writeFileSync(args[outputIndex + 1], JSON.stringify({ summary: 'API edit.', used
     assert.equal(run.status, 'complete');
     assert.ok(run.startedAt);
     assert.ok(run.finishedAt);
+    const activityResponse = await fetch(`${root}/api/agent/activity/activity-test-1234`);
+    assert.equal(activityResponse.status, 200);
+    const activity = await activityResponse.json();
+    assert.equal(activity.status, 'complete');
+    assert.match(activity.output, /Analyzing manuscript scope/);
+    assert.doesNotMatch(activity.output, /Current editing request/);
   } finally {
     await new Promise((resolveClose) => agentServer.close(resolveClose));
+  }
+});
+
+test('Agent probe can perform a real structured-response live test', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'papergod-agent-probe-'));
+  const fakeCli = join(workspace, 'fake-live-codex.mjs');
+  await initializeWorkspace(workspace);
+  await writeFile(fakeCli, `
+import { writeFileSync } from 'fs';
+const args = process.argv.slice(2);
+if (args.includes('--version')) { process.stdout.write('fake-codex 1.0\\n'); process.exit(0); }
+if (args.includes('login') && args.includes('status')) { process.stdout.write('Logged in\\n'); process.exit(0); }
+if (!args.includes('model_reasoning_effort="low"')) { process.stderr.write('Live test did not use low reasoning effort'); process.exit(2); }
+const outputIndex = args.indexOf('--output-last-message');
+writeFileSync(args[outputIndex + 1], JSON.stringify({ summary: 'Live structured response.', usedResourceIds: [], suggestions: [{ category: 'style', description: 'Remove an intensifier', originalText: 'very important', suggestedText: 'important', reason: 'Academic precision' }] }));
+`, 'utf-8');
+  const probeApp = createApp(workspace, {
+    provider: 'codex', agentCommands: { codex: { command: process.execPath, args: [fakeCli] } },
+  });
+  const probeServer = await new Promise((resolveListen) => {
+    const instance = probeApp.listen(0, '127.0.0.1', () => resolveListen(instance));
+  });
+  try {
+    const root = `http://127.0.0.1:${probeServer.address().port}`;
+    const response = await fetch(`${root}/api/agents/probe`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: 'codex', live: true }),
+    });
+    assert.equal(response.status, 202);
+    const queued = await response.json();
+    assert.match(queued.test.id, /^agent_probe_/);
+    let testResult;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const status = await (await fetch(`${root}/api/agents/probe/${queued.test.id}`)).json();
+      testResult = status.test;
+      if (['complete', 'failed', 'cancelled'].includes(testResult.status)) break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+    }
+    assert.equal(testResult.status, 'complete');
+    assert.equal(testResult.agent.authenticated, true);
+    assert.equal(testResult.liveTest.ok, true);
+    assert.match(testResult.liveTest.summary, /Live structured response/);
+  } finally {
+    await new Promise((resolveClose) => probeServer.close(resolveClose));
+    await rm(workspace, { recursive: true, force: true });
   }
 });
 

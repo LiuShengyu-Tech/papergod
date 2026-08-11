@@ -1,4 +1,5 @@
 import * as pdfjsLib from '/vendor/pdfjs-dist/build/pdf.mjs';
+import { getLocale, setLocale, t, translateDom } from '/i18n.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs-dist/build/pdf.worker.mjs';
 
@@ -27,12 +28,58 @@ let workspaceView = 'source';
 let pdfRenderGeneration = 0;
 let pdfLoadingTask = null;
 let agentProviders = [];
+let agentActivationGeneration = 0;
 let currentPromptPreview = null;
 let promptPreviewTimer = null;
 let focusParagraphId = null;
 let focusSentenceId = null;
 let focusParagraphDirty = false;
 let focusSentenceDirty = false;
+let agentActivityController = null;
+let agentActivityTimer = null;
+let agentActivityStartedAt = 0;
+let agentActivityId = null;
+let agentActivityPoll = null;
+let agentActivitySystemLog = [];
+let agentActivityTerminalLog = '';
+let agentActivityStage = '';
+let lastAiRevisionId = null;
+let lastAiIntentIds = [];
+let pdfAnnotationTarget = null;
+let latexEngineAvailable = false;
+let modificationIntents = [];
+let sentenceReaderItems = [];
+let sentenceReaderIndex = 0;
+let sentenceReaderWord = null;
+let changeHistoryEntries = [];
+let selectedChangeHistoryId = null;
+let historyPdfLoadingTask = null;
+let historyPdfRenderGeneration = 0;
+let historyDiffMarks = [];
+let activeHistoryDiffIndex = 0;
+
+class ModificationIntent {
+  constructor(annotation) {
+    this.id = annotation.id;
+    this.documentId = annotation.documentId;
+    this.scope = annotation.source?.actor?.split(':')[1] || annotation.target?.type || 'sentence';
+    this.nodeId = annotation.target?.id || '';
+    this.start = annotation.target?.start || 0;
+    this.end = annotation.target?.end || 0;
+    this.quote = annotation.target?.quote || '';
+    this.comment = annotation.body || '';
+    this.createdAt = annotation.createdAt || '';
+    this.positional = annotation.target?.type === 'document' && this.quote.startsWith('PDF page');
+  }
+
+  toPrompt(index) {
+    return [
+      `Modification intent ${index + 1} (${this.scope})`,
+      `${this.positional ? 'PDF position/context (locate the corresponding LaTeX semantically)' : 'Exact source target'}: ${this.quote}`,
+      `Author instruction: ${this.comment}`,
+    ].join('\n');
+  }
+}
 
 function setWorkspaceView(view) {
   if (view === 'preview' && document.getElementById('preview-view-btn').disabled) return;
@@ -60,6 +107,10 @@ async function showCompiledPdf(url, { switchView = true } = {}) {
   document.getElementById('preview-view-btn').disabled = false;
   if (switchView) setWorkspaceView('preview');
   try {
+    if (switchView) {
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      if (renderGeneration !== pdfRenderGeneration) return;
+    }
     const pdfUrl = url + (url.includes('?') ? '&' : '?') + 't=' + Date.now();
     pdfLoadingTask = pdfjsLib.getDocument({ url: pdfUrl, isEvalSupported: false });
     const pdf = await pdfLoadingTask.promise;
@@ -72,7 +123,10 @@ async function showCompiledPdf(url, { switchView = true } = {}) {
       const outputScale = Math.min(window.devicePixelRatio || 1, 2);
       const pageElement = document.createElement('div');
       pageElement.className = 'pdf-page';
-      pageElement.setAttribute('role', 'img');
+      pageElement.style.width = `${Math.floor(viewport.width)}px`;
+      pageElement.style.height = `${Math.floor(viewport.height)}px`;
+      pageElement.style.setProperty('--scale-factor', viewport.scale);
+      pageElement.setAttribute('role', 'document');
       pageElement.setAttribute('aria-label', 'PDF page ' + pageNumber + ' of ' + pdf.numPages);
       const canvas = document.createElement('canvas');
       canvas.width = Math.floor(viewport.width * outputScale);
@@ -80,12 +134,30 @@ async function showCompiledPdf(url, { switchView = true } = {}) {
       canvas.style.width = Math.floor(viewport.width) + 'px';
       canvas.style.height = Math.floor(viewport.height) + 'px';
       pageElement.appendChild(canvas);
+      const textLayer = document.createElement('div');
+      textLayer.className = 'textLayer pdf-text-layer';
+      textLayer.style.width = `${Math.floor(viewport.width)}px`;
+      textLayer.style.height = `${Math.floor(viewport.height)}px`;
+      pageElement.appendChild(textLayer);
       container.appendChild(pageElement);
       await page.render({
         canvasContext: canvas.getContext('2d', { alpha: false }),
         viewport,
         transform: outputScale === 1 ? null : [outputScale, 0, 0, outputScale, 0, 0],
       }).promise;
+      const textContent = await page.getTextContent();
+      await new pdfjsLib.TextLayer({ textContentSource: textContent, container: textLayer, viewport }).render();
+      const renderedSpans = [...textLayer.querySelectorAll('span')];
+      const textItems = textContent.items.filter((item) => item.str?.trim());
+      let itemCursor = 0;
+      renderedSpans.forEach((span) => {
+        while (itemCursor < textItems.length && textItems[itemCursor].str !== span.textContent) itemCursor += 1;
+        if (itemCursor < textItems.length) {
+          span.dataset.pdfHasEol = String(Boolean(textItems[itemCursor].hasEOL));
+          itemCursor += 1;
+        }
+      });
+      textLayer.addEventListener('click', handlePdfTextClick);
     }
     if (renderGeneration === pdfRenderGeneration) placeholder.classList.add('hidden');
   } catch (error) {
@@ -94,6 +166,986 @@ async function showCompiledPdf(url, { switchView = true } = {}) {
     placeholder.classList.remove('hidden');
     showStatus(error?.message || 'PDF rendering failed', 'error');
   }
+}
+
+function canonicalPdfUnit(value) {
+  return String(value || '').normalize('NFKC')
+    .replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/[‐‑‒–—]/g, '-')
+    .toLocaleLowerCase().replace(/\s+/g, ' ');
+}
+
+function canonicalPdfText(value) {
+  return canonicalPdfUnit(value).trim();
+}
+
+function sourceMatchText(value) {
+  let result = String(value || '').replace(/~/g, ' ').replace(/\\([%&_#$])/g, '$1');
+  for (let pass = 0; pass < 3; pass += 1) {
+    result = result.replace(/\\(?:emph|textbf|textit|textrm|texttt|underline|mbox)\*?(?:\[[^\]]*\])?\{([^{}]*)\}/g, '$1');
+  }
+  return canonicalPdfText(result.replace(/\\[a-zA-Z@]+\*?(?:\[[^\]]*\])?/g, '').replace(/[{}]/g, ''));
+}
+
+function buildPdfTextIndex(root = document, selector = '.pdf-text-layer') {
+  const characters = [];
+  const positions = [];
+  const spanRanges = new Map();
+  const append = (raw, span = null) => {
+    for (let offset = 0; offset < raw.length; offset += 1) {
+      const normalized = canonicalPdfUnit(raw[offset]);
+      if (!normalized) continue;
+      for (const character of normalized) {
+        if (character === ' ' && characters.at(-1) === ' ') continue;
+        characters.push(character);
+        positions.push(span ? { span, node: span.firstChild, offset } : null);
+      }
+    }
+  };
+  let previousSpan = null;
+  root.querySelectorAll(selector).forEach((layer, layerIndex) => {
+    if (layerIndex > 0) append(' ');
+    previousSpan = null;
+    layer.querySelectorAll('span').forEach((span) => {
+      const text = span.textContent || '';
+      if (!text) return;
+      if (previousSpan) {
+        const previousRect = previousSpan.getBoundingClientRect();
+        const currentRect = span.getBoundingClientRect();
+        const wrappedLine = currentRect.left < previousRect.right - Math.max(2, previousRect.height * 0.3);
+        const lineBreak = previousSpan.dataset.pdfHasEol === 'true'
+          || Math.abs(currentRect.top - previousRect.top) > Math.max(2, previousRect.height * 0.45)
+          || wrappedLine;
+        const visibleGap = currentRect.left - previousRect.right > Math.max(1, previousRect.height * 0.12);
+        if (lineBreak && characters.at(-1) === '-') {
+          characters.pop(); positions.pop();
+        } else if ((lineBreak || visibleGap) && !/\s$/.test(previousSpan.textContent || '') && !/^\s|^[,.;:!?%)\]}]/.test(text)) append(' ');
+      }
+      const start = characters.length;
+      append(text, span);
+      spanRanges.set(span, { start, end: characters.length });
+      previousSpan = span;
+    });
+  });
+  const rawText = characters.join('');
+  const leading = rawText.length - rawText.trimStart().length;
+  const text = rawText.trim();
+  return { text, positions: positions.slice(leading, leading + text.length), spanRanges };
+}
+
+function occurrences(haystack, needle) {
+  const result = [];
+  if (!needle) return result;
+  for (let start = haystack.indexOf(needle); start !== -1; start = haystack.indexOf(needle, start + 1)) {
+    result.push({ start, end: start + needle.length });
+  }
+  return result;
+}
+
+function tokenOccurrences(haystack, quote) {
+  const tokens = [...haystack.matchAll(/[\p{L}\p{N}]+(?:'[\p{L}\p{N}]+)*/gu)]
+    .map((match) => ({ value: match[0], start: match.index, end: match.index + match[0].length }));
+  const target = [...sourceMatchText(quote).matchAll(/[\p{L}\p{N}]+(?:'[\p{L}\p{N}]+)*/gu)].map((match) => match[0]);
+  if (target.length < 2) return [];
+  const result = [];
+  for (let start = 0; start <= tokens.length - target.length; start += 1) {
+    if (target.every((value, offset) => tokens[start + offset].value === value)) {
+      result.push({ start: tokens[start].start, end: tokens[start + target.length - 1].end });
+    }
+  }
+  return result;
+}
+
+function matchingOccurrences(index, quote) {
+  const exact = occurrences(index.text, sourceMatchText(quote));
+  return exact.length ? exact : tokenOccurrences(index.text, quote);
+}
+
+function occurrenceAt(index, quote, clickedIndex) {
+  const matches = matchingOccurrences(index, quote);
+  return matches.find((item) => item.start <= clickedIndex && clickedIndex < item.end) || null;
+}
+
+function textOffsetAtPoint(span, clientX, clientY) {
+  const node = span.firstChild;
+  if (!node?.length) return 0;
+  let nearest = { offset: 0, distance: Number.POSITIVE_INFINITY };
+  for (let offset = 0; offset < node.length; offset += 1) {
+    const range = document.createRange();
+    range.setStart(node, offset);
+    range.setEnd(node, offset + 1);
+    for (const rect of range.getClientRects()) {
+      if (clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom) return offset;
+      const distance = Math.abs(clientX - (rect.left + rect.width / 2)) + Math.abs(clientY - (rect.top + rect.height / 2));
+      if (distance < nearest.distance) nearest = { offset, distance };
+    }
+  }
+  return nearest.offset;
+}
+
+function paragraphScopeRanges(index, paragraph, anchorSentence, anchorRange) {
+  const sentences = paragraph.children || [];
+  const anchorIndex = sentences.findIndex((item) => item.id === anchorSentence.id);
+  if (anchorIndex === -1) return [anchorRange];
+  const ranges = new Array(sentences.length);
+  ranges[anchorIndex] = anchorRange;
+  for (let position = anchorIndex - 1; position >= 0; position -= 1) {
+    const matches = matchingOccurrences(index, sentences[position].text)
+      .filter((item) => item.end <= ranges[position + 1].start)
+      .sort((a, b) => b.end - a.end);
+    if (!matches[0] || ranges[position + 1].start - matches[0].end > 8) break;
+    ranges[position] = matches[0];
+  }
+  for (let position = anchorIndex + 1; position < sentences.length; position += 1) {
+    const matches = matchingOccurrences(index, sentences[position].text)
+      .filter((item) => item.start >= ranges[position - 1].end)
+      .sort((a, b) => a.start - b.start);
+    if (!matches[0] || matches[0].start - ranges[position - 1].end > 8) break;
+    ranges[position] = matches[0];
+  }
+  return ranges.filter(Boolean);
+}
+
+function clearPdfScopeHighlight() {
+  document.querySelectorAll('.pdf-scope-highlight, .pdf-position-marker').forEach((item) => item.remove());
+}
+
+function highlightPdfRanges(index, ranges, scope) {
+  clearPdfScopeHighlight();
+  const spanOffsets = new Map();
+  for (const range of ranges || []) {
+    for (let position = range.start; position < range.end; position += 1) {
+      const anchor = index.positions[position];
+      if (!anchor?.node) continue;
+      const existing = spanOffsets.get(anchor.span) || { node: anchor.node, start: anchor.offset, end: anchor.offset + 1 };
+      existing.start = Math.min(existing.start, anchor.offset);
+      existing.end = Math.max(existing.end, anchor.offset + 1);
+      spanOffsets.set(anchor.span, existing);
+    }
+  }
+  spanOffsets.forEach(({ node, start, end }, span) => {
+    const selection = document.createRange();
+    selection.setStart(node, Math.min(start, node.length));
+    selection.setEnd(node, Math.min(end, node.length));
+    const page = span.closest('.pdf-page');
+    const pageRect = page.getBoundingClientRect();
+    for (const rect of selection.getClientRects()) {
+      if (!rect.width || !rect.height) continue;
+      const left = Math.max(0, rect.left - pageRect.left);
+      const right = Math.min(pageRect.width, rect.right - pageRect.left);
+      if (right <= left) continue;
+      const marker = document.createElement('span');
+      marker.className = `pdf-scope-highlight scope-${scope}`;
+      marker.style.left = `${left}px`;
+      marker.style.top = `${rect.top - pageRect.top}px`;
+      marker.style.width = `${right - left}px`;
+      marker.style.height = `${rect.height}px`;
+      page.appendChild(marker);
+    }
+  });
+}
+
+function showPdfPositionMarker(point) {
+  if (!point?.page) return;
+  const marker = document.createElement('span');
+  marker.className = 'pdf-position-marker';
+  marker.style.left = `${point.left}px`;
+  marker.style.top = `${point.top}px`;
+  point.page.appendChild(marker);
+}
+
+function openPdfEditMenu(event) {
+  const menu = document.getElementById('pdf-edit-menu');
+  menu.style.left = `${Math.max(12, Math.min(event.clientX + 10, window.innerWidth - 390))}px`;
+  menu.style.top = `${Math.max(12, Math.min(event.clientY + 10, window.innerHeight - 300))}px`;
+  menu.classList.remove('hidden');
+  document.querySelectorAll('[data-pdf-scope]').forEach((button) => button.classList.toggle('active', button.dataset.pdfScope === 'sentence'));
+  document.getElementById('pdf-edit-quote').textContent = pdfAnnotationTarget.quote;
+  document.getElementById('pdf-edit-comment').value = '';
+  document.getElementById('pdf-edit-comment').focus();
+}
+
+function createPositionalPdfIntent(event, textLayer, clickedSpan = null, index = buildPdfTextIndex()) {
+  const page = textLayer.closest('.pdf-page');
+  const pageRect = page.getBoundingClientRect();
+  const spans = [...textLayer.querySelectorAll('span')].filter((item) => item.textContent.trim());
+  let anchorSpan = clickedSpan;
+  if (!anchorSpan) {
+    anchorSpan = spans.map((span) => {
+      const rect = span.getBoundingClientRect();
+      const x = Math.max(rect.left, Math.min(event.clientX, rect.right));
+      const y = Math.max(rect.top, Math.min(event.clientY, rect.bottom));
+      return { span, distance: Math.hypot(event.clientX - x, event.clientY - y) };
+    }).sort((a, b) => a.distance - b.distance)[0]?.span || null;
+  }
+  const anchorIndex = spans.indexOf(anchorSpan);
+  const nearbySpans = anchorIndex === -1 ? [] : spans.slice(Math.max(0, anchorIndex - 1), anchorIndex + 2);
+  const sentenceText = anchorSpan?.textContent.trim() || '';
+  const paragraphText = nearbySpans.map((span) => span.textContent.trim()).filter(Boolean).join(' ');
+  let word = sentenceText.match(/[\p{L}\p{N}'’-]+/u)?.[0] || 'selected position';
+  const ranges = { word: [], sentence: [], paragraph: [] };
+  if (clickedSpan && anchorSpan && index.spanRanges.has(anchorSpan)) {
+    const spanRange = index.spanRanges.get(anchorSpan);
+    const localOffset = clickedSpan ? textOffsetAtPoint(anchorSpan, event.clientX, event.clientY) : 0;
+    const positions = index.positions.map((anchor, position) => ({ anchor, position })).filter((item) => item.anchor?.span === anchorSpan);
+    const clickedIndex = positions.find((item) => item.anchor.offset >= localOffset)?.position ?? spanRange.start;
+    let wordStart = clickedIndex;
+    let wordEnd = clickedIndex + 1;
+    while (wordStart > spanRange.start && /[\p{L}\p{N}'-]/u.test(index.text[wordStart - 1])) wordStart -= 1;
+    while (wordEnd < spanRange.end && /[\p{L}\p{N}'-]/u.test(index.text[wordEnd])) wordEnd += 1;
+    word = index.text.slice(wordStart, wordEnd) || word;
+    ranges.word = [{ start: wordStart, end: wordEnd }];
+    ranges.sentence = [spanRange];
+    ranges.paragraph = nearbySpans.map((span) => index.spanRanges.get(span)).filter(Boolean);
+  }
+  const pageLabel = page.getAttribute('aria-label') || 'PDF page';
+  const xPercent = Math.round((event.clientX - pageRect.left) / Math.max(1, pageRect.width) * 100);
+  const yPercent = Math.round((event.clientY - pageRect.top) / Math.max(1, pageRect.height) * 100);
+  const location = `${pageLabel} · ${xPercent}% from left · ${yPercent}% from top`;
+  const quoteFor = (value) => `${location}${value ? `\nNearby PDF text: ${value}` : ''}`;
+  pdfAnnotationTarget = {
+    fallback: true, scope: 'sentence', word, sentence: null, paragraph: null,
+    node: { id: currentDocument.id, type: 'document' }, index,
+    quote: quoteFor(sentenceText), fallbackQuotes: {
+      word: quoteFor(word), sentence: quoteFor(sentenceText), paragraph: quoteFor(paragraphText),
+    },
+    ranges,
+    point: { page, left: event.clientX - pageRect.left, top: event.clientY - pageRect.top },
+  };
+  highlightPdfRanges(index, ranges.sentence, 'sentence');
+  if (!ranges.sentence.length) showPdfPositionMarker(pdfAnnotationTarget.point);
+  openPdfEditMenu(event);
+}
+
+function handlePdfTextClick(event) {
+  const span = event.target.closest('.pdf-text-layer span');
+  if (!currentDocument) return;
+  const index = buildPdfTextIndex();
+  if (!span) return createPositionalPdfIntent(event, event.currentTarget, null, index);
+  const localOffset = textOffsetAtPoint(span, event.clientX, event.clientY);
+  const spanRange = index.spanRanges.get(span);
+  const candidates = index.positions.map((anchor, position) => ({ anchor, position }))
+    .filter(({ anchor }) => anchor?.span === span);
+  const clickedIndex = candidates.find(({ anchor }) => anchor.offset >= localOffset)?.position
+    ?? candidates.at(-1)?.position ?? spanRange?.start;
+  if (!Number.isInteger(clickedIndex)) return;
+  let wordStart = clickedIndex;
+  let wordEnd = clickedIndex + 1;
+  while (wordStart > 0 && /[\p{L}\p{N}'-]/u.test(index.text[wordStart - 1])) wordStart -= 1;
+  while (wordEnd < index.text.length && /[\p{L}\p{N}'-]/u.test(index.text[wordEnd])) wordEnd += 1;
+  const word = index.text.slice(wordStart, wordEnd);
+  const paragraphs = currentDocument.sections.flatMap((section) => section.children || []);
+  const sentenceCandidates = paragraphs.flatMap((paragraph) => (paragraph.children || []).map((sentence) => ({ sentence, paragraph })));
+  const matched = sentenceCandidates.map((item) => ({ ...item, range: occurrenceAt(index, item.sentence.text, clickedIndex) }))
+    .filter((item) => item.range).sort((a, b) => (a.range.end - a.range.start) - (b.range.end - b.range.start))[0] || null;
+  if (!matched) {
+    return createPositionalPdfIntent(event, event.currentTarget, span, index);
+  }
+  const paragraphRanges = paragraphScopeRanges(index, matched.paragraph, matched.sentence, matched.range);
+  pdfAnnotationTarget = {
+    scope: 'sentence', word, sentence: matched.sentence, paragraph: matched.paragraph,
+    node: matched.sentence, quote: matched.sentence.text, index,
+    ranges: { word: [{ start: wordStart, end: wordEnd }], sentence: [matched.range], paragraph: paragraphRanges },
+  };
+  highlightPdfRanges(index, pdfAnnotationTarget.ranges.sentence, 'sentence');
+  openPdfEditMenu(event);
+}
+
+function choosePdfAnnotationScope(scope) {
+  if (!pdfAnnotationTarget) return;
+  const target = pdfAnnotationTarget.fallback
+    ? { node: pdfAnnotationTarget.node, quote: pdfAnnotationTarget.fallbackQuotes[scope] }
+    : scope === 'word'
+    ? { node: pdfAnnotationTarget.sentence || pdfAnnotationTarget.paragraph, quote: pdfAnnotationTarget.word }
+    : scope === 'paragraph'
+      ? { node: pdfAnnotationTarget.paragraph, quote: pdfAnnotationTarget.paragraph?.text }
+      : { node: pdfAnnotationTarget.sentence || pdfAnnotationTarget.paragraph, quote: pdfAnnotationTarget.sentence?.text || pdfAnnotationTarget.paragraph?.text };
+  if (!target.node || !target.quote) return;
+  Object.assign(pdfAnnotationTarget, { scope, ...target });
+  highlightPdfRanges(pdfAnnotationTarget.index, pdfAnnotationTarget.ranges[scope], scope);
+  if (pdfAnnotationTarget.fallback && !pdfAnnotationTarget.ranges[scope].length) showPdfPositionMarker(pdfAnnotationTarget.point);
+  document.querySelectorAll('[data-pdf-scope]').forEach((button) => button.classList.toggle('active', button.dataset.pdfScope === scope));
+  document.getElementById('pdf-edit-quote').textContent = target.quote;
+}
+
+function readableSentenceTokens(raw) {
+  const characters = [];
+  const offsets = [];
+  for (let cursor = 0; cursor < raw.length;) {
+    if (raw[cursor] === '\\') {
+      const command = raw.slice(cursor).match(/^\\[a-zA-Z@]+\*?(?:\[[^\]]*\])?/);
+      if (command) { cursor += command[0].length; continue; }
+    }
+    if (raw[cursor] === '$') {
+      const end = raw.indexOf('$', cursor + 1);
+      const label = ' equation ';
+      for (const character of label) { characters.push(character); offsets.push(undefined); }
+      cursor = end === -1 ? cursor + 1 : end + 1;
+      continue;
+    }
+    if ('{}'.includes(raw[cursor])) { cursor += 1; continue; }
+    characters.push(raw[cursor]); offsets.push(cursor); cursor += 1;
+  }
+  const displayCharacters = [];
+  const normalizedOffsets = [];
+  let pendingSpace = false;
+  for (let index = 0; index < characters.length; index += 1) {
+    if (/\s/.test(characters[index])) { pendingSpace = displayCharacters.length > 0; continue; }
+    if (pendingSpace) { displayCharacters.push(' '); normalizedOffsets.push(offsets[index]); }
+    displayCharacters.push(characters[index]); normalizedOffsets.push(offsets[index]);
+    pendingSpace = false;
+  }
+  const text = displayCharacters.join('');
+  const tokens = [];
+  const matcher = /[\p{L}\p{N}'’-]+/gu;
+  let match;
+  while ((match = matcher.exec(text))) {
+    const rawStart = normalizedOffsets[match.index];
+    const rawEndOffset = normalizedOffsets[match.index + match[0].length - 1];
+    if (rawStart === undefined || rawEndOffset === undefined) continue;
+    tokens.push({ text: match[0], displayStart: match.index, displayEnd: match.index + match[0].length, rawStart, rawEnd: rawEndOffset + 1 });
+  }
+  return { text, tokens };
+}
+
+function allReadableSentences() {
+  if (!currentDocument) return [];
+  return currentDocument.sections.flatMap((section) => (section.children || []).flatMap((paragraph) =>
+    (paragraph.children || []).map((sentence) => ({ section, paragraph, sentence }))));
+}
+
+function renderSentenceReader() {
+  const item = sentenceReaderItems[sentenceReaderIndex];
+  if (!item) return;
+  sentenceReaderWord = null;
+  const readable = readableSentenceTokens(item.sentence.text);
+  const container = document.getElementById('sentence-reader-text');
+  let cursor = 0;
+  container.innerHTML = readable.tokens.map((token, index) => {
+    const before = escapeHtml(readable.text.slice(cursor, token.displayStart));
+    cursor = token.displayEnd;
+    return before + '<button type="button" class="sentence-reader-word" data-reader-word="' + index + '">' + escapeHtml(token.text) + '</button>';
+  }).join('') + escapeHtml(readable.text.slice(cursor));
+  container.querySelectorAll('[data-reader-word]').forEach((button) => button.addEventListener('click', () => {
+    const index = Number(button.dataset.readerWord);
+    sentenceReaderWord = sentenceReaderWord?.index === index ? null : { index, ...readable.tokens[index] };
+    container.querySelectorAll('[data-reader-word]').forEach((word) => word.classList.toggle('selected', Number(word.dataset.readerWord) === sentenceReaderWord?.index));
+    document.getElementById('sentence-reader-selection').textContent = sentenceReaderWord ? t('reader.scopeWord', { word: sentenceReaderWord.text }) : t('reader.scopeSentence');
+  }));
+  document.getElementById('sentence-reader-position').textContent = t('reader.position', { section: item.section.title, current: sentenceReaderIndex + 1, total: sentenceReaderItems.length });
+  document.getElementById('sentence-reader-selection').textContent = t('reader.scopeSentence');
+  document.getElementById('sentence-reader-comment').value = '';
+  document.getElementById('sentence-reader-prev').disabled = sentenceReaderIndex === 0;
+  document.getElementById('sentence-reader-next').disabled = sentenceReaderIndex === sentenceReaderItems.length - 1;
+  container.focus();
+}
+
+function openSentenceReader() {
+  sentenceReaderItems = allReadableSentences();
+  if (!sentenceReaderItems.length) return showStatus(t('status.readerNoSentences'), 'error');
+  const initialId = pdfAnnotationTarget?.sentence?.id;
+  const found = sentenceReaderItems.findIndex((item) => item.sentence.id === initialId);
+  sentenceReaderIndex = found >= 0 ? found : 0;
+  document.getElementById('pdf-edit-menu').classList.add('hidden');
+  clearPdfScopeHighlight();
+  renderSentenceReader();
+  document.getElementById('sentence-reader-overlay').classList.remove('hidden');
+}
+
+function closeSentenceReader() {
+  document.getElementById('sentence-reader-overlay').classList.add('hidden');
+  sentenceReaderWord = null;
+}
+
+async function queueModificationIntent(target, comment, scope) {
+  const res = await fetch('/api/annotations', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      documentId: currentDocument.id, target, category: 'content', severity: 'info', body: comment,
+      suggestedFix: '', source: { type: 'user', actor: `pdf-intent:${scope}` },
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Modification intent could not be saved');
+  await loadModificationIntents();
+}
+
+async function submitSentenceReaderIntent() {
+  const item = sentenceReaderItems[sentenceReaderIndex];
+  const comment = document.getElementById('sentence-reader-comment').value.trim();
+  if (!item || !comment) return showStatus(t('status.readerCommentRequired'), 'error');
+  const range = item.sentence.sourceRange;
+  const target = sentenceReaderWord
+    ? { type: 'range', id: item.sentence.id, start: range.start + sentenceReaderWord.rawStart, end: range.start + sentenceReaderWord.rawEnd, quote: item.sentence.text.slice(sentenceReaderWord.rawStart, sentenceReaderWord.rawEnd) }
+    : { type: 'sentence', id: item.sentence.id, start: range.start, end: range.end, quote: editor.getValue().slice(range.start, range.end) };
+  try {
+    await queueModificationIntent(target, comment, sentenceReaderWord ? 'word' : 'sentence');
+    document.getElementById('sentence-reader-comment').value = '';
+    showStatus(t('status.readerQueued'), 'success');
+  } catch (error) { showStatus(error.message, 'error'); }
+}
+
+function pdfIntentTarget() {
+  const target = pdfAnnotationTarget;
+  if (target?.fallback) {
+    return { type: 'document', id: currentDocument.id, start: 0, end: 0, quote: target.quote };
+  }
+  const node = target?.node;
+  const sourceRange = node?.sourceRange;
+  if (!target || !node || !sourceRange) return null;
+  let start = sourceRange.start;
+  let end = sourceRange.end;
+  let quote = editor.getValue().slice(start, end);
+  if (target.scope === 'word') {
+    const normalized = [];
+    const offsets = [];
+    for (let offset = 0; offset < quote.length; offset += 1) {
+      for (const character of canonicalPdfUnit(quote[offset])) {
+        normalized.push(character); offsets.push(offset);
+      }
+    }
+    const word = canonicalPdfText(target.word);
+    const matches = occurrences(normalized.join(''), word);
+    const sentenceRange = target.ranges?.sentence?.[0];
+    const wordRange = target.ranges?.word?.[0];
+    const relative = sentenceRange && wordRange
+      ? Math.max(0, Math.min(1, (wordRange.start - sentenceRange.start) / Math.max(1, sentenceRange.end - sentenceRange.start)))
+      : 0;
+    const expected = relative * normalized.length;
+    const selected = matches.sort((a, b) => Math.abs(a.start - expected) - Math.abs(b.start - expected))[0];
+    if (selected && offsets[selected.start] !== undefined && offsets[selected.end - 1] !== undefined) {
+      start += offsets[selected.start];
+      end = sourceRange.start + offsets[selected.end - 1] + 1;
+      quote = editor.getValue().slice(start, end);
+    }
+  }
+  return { type: target.scope === 'word' ? 'range' : target.scope, id: node.id, start, end, quote };
+}
+
+function modificationIntentPrompt() {
+  if (!modificationIntents.length) return '';
+  return [
+    'Apply all queued modification intents as one coherent manuscript revision.',
+    'Address every intent independently, preserve unrelated text and evidence, and return exact non-overlapping source replacements.',
+    '',
+    modificationIntents.map((intent, index) => intent.toPrompt(index)).join('\n\n'),
+  ].join('\n');
+}
+
+function combinedTemporaryPrompt() {
+  return [modificationIntentPrompt(), document.getElementById('ai-prompt').value.trim()].filter(Boolean).join('\n\nAdditional run instruction:\n');
+}
+
+function renderModificationIntents() {
+  const container = document.getElementById('modification-intent-list');
+  if (!container) return;
+  document.getElementById('modification-intent-count').textContent = t('ai.queued', { count: modificationIntents.length });
+  const badge = document.getElementById('ai-invoke-intent-count');
+  badge.textContent = modificationIntents.length;
+  badge.classList.toggle('hidden', modificationIntents.length === 0);
+  if (!modificationIntents.length) {
+    container.innerHTML = '<div class="outline-empty">' + escapeHtml(t('ai.intentsEmpty')) + '</div>';
+    return;
+  }
+  container.innerHTML = modificationIntents.map((intent) => '<article class="modification-intent" data-intent-id="' + escapeHtml(intent.id) + '">'
+    + '<div class="modification-intent-head"><span class="modification-intent-scope">' + escapeHtml(intent.scope + (intent.positional ? ' · PDF position' : '')) + '</span><button class="modification-intent-remove" type="button">Remove</button></div>'
+    + '<blockquote>' + escapeHtml(shorten(intent.quote, 150)) + '</blockquote>'
+    + '<textarea aria-label="Modification instruction">' + escapeHtml(intent.comment) + '</textarea></article>').join('');
+  container.querySelectorAll('.modification-intent').forEach((element) => {
+    const intent = modificationIntents.find((item) => item.id === element.dataset.intentId);
+    element.querySelector('textarea').addEventListener('change', (event) => updateModificationIntent(intent.id, event.target.value));
+    element.querySelector('.modification-intent-remove').addEventListener('click', () => deleteModificationIntent(intent.id));
+  });
+}
+
+async function loadModificationIntents() {
+  if (!currentDocument) return;
+  try {
+    const res = await fetch('/api/annotations?documentId=' + encodeURIComponent(currentDocument.id));
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Modification intents could not be loaded');
+    modificationIntents = data.annotations
+      .filter((item) => item.status === 'open' && item.source?.actor?.startsWith('pdf-intent:'))
+      .map((item) => new ModificationIntent(item));
+    renderModificationIntents();
+    schedulePromptContextPreview();
+  } catch (error) { showStatus(error.message, 'error'); }
+}
+
+async function updateModificationIntent(id, comment) {
+  if (!comment.trim()) return deleteModificationIntent(id);
+  try {
+    const res = await fetch('/api/annotations/' + encodeURIComponent(id), {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ body: comment.trim() }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Modification intent could not be updated');
+    await loadModificationIntents();
+    showStatus('Modification intent updated', 'success');
+  } catch (error) { showStatus(error.message, 'error'); }
+}
+
+async function deleteModificationIntent(id) {
+  try {
+    const res = await fetch('/api/annotations/' + encodeURIComponent(id), { method: 'DELETE' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Modification intent could not be removed');
+    await loadModificationIntents();
+    showStatus('Modification intent removed', 'success');
+  } catch (error) { showStatus(error.message, 'error'); }
+}
+
+async function resolveModificationIntents(ids) {
+  await Promise.all(ids.map(async (id) => {
+    const res = await fetch('/api/annotations/' + encodeURIComponent(id), {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'resolved' }),
+    });
+    if (!res.ok) throw new Error('Applied revision saved, but an intent could not be marked resolved');
+  }));
+  await loadModificationIntents();
+}
+
+function historyTime(entry) {
+  const value = entry.rolledBackAt || entry.appliedAt || entry.createdAt;
+  if (!value) return '';
+  return new Intl.DateTimeFormat(getLocale(), { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(value));
+}
+
+function renderChangeHistoryList() {
+  const list = document.getElementById('change-history-list');
+  if (!changeHistoryEntries.length) {
+    list.innerHTML = '<div class="change-history-empty"><strong>' + escapeHtml(t('history.empty')) + '</strong><p>' + escapeHtml(t('history.emptyHelp')) + '</p></div>';
+    document.getElementById('change-history-detail').innerHTML = '<div class="change-history-empty"><strong>' + escapeHtml(t('history.select')) + '</strong><p>' + escapeHtml(t('history.selectHelp')) + '</p></div>';
+    return;
+  }
+  list.innerHTML = changeHistoryEntries.map((entry) => '<button type="button" class="change-history-item ' + (entry.id === selectedChangeHistoryId ? 'selected' : '') + '" data-history-id="' + escapeHtml(entry.id) + '">'
+    + '<span class="change-history-item-head"><strong>' + escapeHtml(entry.title || entry.origin) + '</strong>' + (entry.isLatest ? '<em>' + escapeHtml(t('history.latest')) + '</em>' : '') + '</span>'
+    + '<span>' + escapeHtml(historyTime(entry)) + ' · ' + escapeHtml(t('history.changes', { count: entry.changeCount })) + '</span></button>').join('')
+    + '<p class="change-history-notice">' + escapeHtml(t('history.recentNotice')) + '</p>';
+  list.querySelectorAll('[data-history-id]').forEach((button) => button.addEventListener('click', () => {
+    selectedChangeHistoryId = button.dataset.historyId;
+    renderChangeHistoryList();
+    renderChangeHistoryDetail();
+  }));
+}
+
+function historyVisibleText(value) {
+  return sourceMatchText(String(value || '')
+    .replace(/(^|[^\\])%.*$/gm, '$1')
+    .replace(/\\(?:label|cite\w*|ref|eqref|autoref|url|href)\*?(?:\[[^\]]*\])?\{[^{}]*\}(?:\{[^{}]*\})?/g, ' ')
+    .replace(/\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\]|\$[^$]*\$/g, ' '));
+}
+
+function historyAnchorCandidates(value, side) {
+  const words = historyVisibleText(value).match(/[\p{L}\p{N}]+(?:'[\p{L}\p{N}]+)*/gu) || [];
+  const candidates = [];
+  for (const size of [10, 8, 6, 4, 3]) {
+    if (words.length < size) continue;
+    candidates.push((side === 'before' ? words.slice(-size) : words.slice(0, size)).join(' '));
+  }
+  return candidates;
+}
+
+function historyContextOccurrences(index, value, side) {
+  for (const candidate of historyAnchorCandidates(value, side)) {
+    const matches = matchingOccurrences(index, candidate);
+    if (matches.length) return matches;
+  }
+  return [];
+}
+
+function chooseHistoryOccurrence(index, quote, change) {
+  const matches = matchingOccurrences(index, quote);
+  if (matches.length <= 1) return matches[0] || null;
+  const before = historyContextOccurrences(index, change.contextBefore, 'before');
+  const after = historyContextOccurrences(index, change.contextAfter, 'after');
+  return [...matches].sort((left, right) => {
+    const score = (candidate) => {
+      const beforeDistance = before.filter((item) => item.end <= candidate.start).map((item) => candidate.start - item.end);
+      const afterDistance = after.filter((item) => item.start >= candidate.end).map((item) => item.start - candidate.end);
+      return (beforeDistance.length ? Math.min(...beforeDistance) : 100000) + (afterDistance.length ? Math.min(...afterDistance) : 100000);
+    };
+    return score(left) - score(right);
+  })[0];
+}
+
+function historyVisibleSegments(value) {
+  return String(value || '').split(/\n+/)
+    .flatMap((block) => historyVisibleText(block).split(/(?<=[.!?])\s+(?=[\p{Lu}\p{N}])/u))
+    .map((item) => item.trim()).filter(Boolean);
+}
+
+function deriveHistoryDisplayChange(change) {
+  const before = historyVisibleText(change.before);
+  const after = historyVisibleText(change.after);
+  const tokenize = (text) => [...text.matchAll(/[\p{L}\p{N}]+(?:'[\p{L}\p{N}]+)*/gu)]
+    .map((match) => ({ value: match[0], start: match.index, end: match.index + match[0].length }));
+  const beforeTokens = tokenize(before);
+  const afterTokens = tokenize(after);
+  let prefix = 0;
+  while (prefix < beforeTokens.length && prefix < afterTokens.length && beforeTokens[prefix].value === afterTokens[prefix].value) prefix += 1;
+  let suffix = 0;
+  while (suffix < beforeTokens.length - prefix && suffix < afterTokens.length - prefix
+    && beforeTokens[beforeTokens.length - suffix - 1].value === afterTokens[afterTokens.length - suffix - 1].value) suffix += 1;
+  const sliceChanged = (text, tokens, start, suffixSize) => {
+    const endIndex = tokens.length - suffixSize;
+    if (start >= endIndex) return '';
+    return text.slice(tokens[start].start, tokens[endIndex - 1].end).trim();
+  };
+  const changedBefore = sliceChanged(before, beforeTokens, prefix, suffix);
+  const changedAfter = sliceChanged(after, afterTokens, prefix, suffix);
+  const sharedPrefix = prefix ? after.slice(0, afterTokens[prefix - 1].end) : '';
+  const sharedSuffix = suffix ? after.slice(afterTokens[afterTokens.length - suffix].start) : '';
+  const type = !changedBefore && changedAfter ? 'added' : changedBefore && !changedAfter ? 'deleted' : 'modified';
+  return {
+    type,
+    before: changedBefore || (type === 'modified' ? before : ''),
+    after: changedAfter || (type === 'modified' ? after : ''),
+    contextBefore: [change.contextBefore, sharedPrefix].filter(Boolean).join(' '),
+    contextAfter: [sharedSuffix, change.contextAfter].filter(Boolean).join(' '),
+  };
+}
+
+function matchHistorySegment(index, segment, minimumStart, change, depth = 0) {
+  const matches = matchingOccurrences(index, segment).filter((item) => item.start >= minimumStart);
+  if (matches.length) {
+    if (minimumStart > 0) return [matches.sort((left, right) => left.start - right.start)[0]];
+    return [chooseHistoryOccurrence(index, segment, change) || matches[0]];
+  }
+  const words = segment.match(/[\p{L}\p{N}]+(?:'[\p{L}\p{N}]+)*/gu) || [];
+  if (depth >= 3 || words.length < 8) return [];
+  const middle = Math.floor(words.length / 2);
+  const left = matchHistorySegment(index, words.slice(0, middle).join(' '), minimumStart, change, depth + 1);
+  const nextStart = left.at(-1)?.end ?? minimumStart;
+  const right = matchHistorySegment(index, words.slice(middle).join(' '), nextStart, change, depth + 1);
+  return [...left, ...right];
+}
+
+function historyChangeOccurrences(index, change) {
+  const visible = historyVisibleText(change.after);
+  if (!visible) return { ranges: [], coverage: 0 };
+  const direct = chooseHistoryOccurrence(index, visible, change);
+  if (direct) return { ranges: [direct], coverage: 1 };
+  const ranges = [];
+  let minimumStart = 0;
+  let matchedCharacters = 0;
+  for (const segment of historyVisibleSegments(change.after)) {
+    const matched = matchHistorySegment(index, segment, minimumStart, change);
+    if (!matched.length) continue;
+    ranges.push(...matched);
+    minimumStart = matched.at(-1).end;
+    matchedCharacters += matched.reduce((total, item) => total + item.end - item.start, 0);
+  }
+  return { ranges, coverage: Math.min(1, matchedCharacters / Math.max(1, visible.length)) };
+}
+
+function findHistoryDeletionAnchor(index, change) {
+  const after = historyContextOccurrences(index, change.contextAfter, 'after');
+  if (after.length) return { position: after[0].start, side: 'before' };
+  const before = historyContextOccurrences(index, change.contextBefore, 'before');
+  if (before.length) return { position: before.at(-1).end - 1, side: 'after' };
+  return null;
+}
+
+function historyMarkerElementsForRange(index, range, type, changeIndex) {
+  const spanOffsets = new Map();
+  for (let position = range.start; position < range.end; position += 1) {
+    const anchor = index.positions[position];
+    if (!anchor?.node) continue;
+    const existing = spanOffsets.get(anchor.span) || { node: anchor.node, start: anchor.offset, end: anchor.offset + 1 };
+    existing.start = Math.min(existing.start, anchor.offset);
+    existing.end = Math.max(existing.end, anchor.offset + 1);
+    spanOffsets.set(anchor.span, existing);
+  }
+  const elements = [];
+  spanOffsets.forEach(({ node, start, end }, span) => {
+    const selection = document.createRange();
+    selection.setStart(node, Math.min(start, node.length));
+    selection.setEnd(node, Math.min(end, node.length));
+    const page = span.closest('.history-pdf-page');
+    const pageRect = page.getBoundingClientRect();
+    for (const rect of selection.getClientRects()) {
+      const left = Math.max(0, rect.left - pageRect.left);
+      const right = Math.min(pageRect.width, rect.right - pageRect.left);
+      if (!rect.width || !rect.height || right <= left) continue;
+      const marker = document.createElement('button');
+      marker.type = 'button';
+      marker.className = `history-pdf-mark history-pdf-${type}`;
+      marker.dataset.historyDiffIndex = String(changeIndex);
+      marker.setAttribute('aria-label', t(`history.${type}`));
+      marker.style.left = `${left}px`;
+      marker.style.top = `${rect.top - pageRect.top}px`;
+      marker.style.width = `${right - left}px`;
+      marker.style.height = `${rect.height}px`;
+      page.appendChild(marker);
+      elements.push(marker);
+    }
+  });
+  return elements;
+}
+
+function historyDeletionMarker(index, anchor, changeIndex) {
+  const position = index.positions[Math.max(0, Math.min(anchor.position, index.positions.length - 1))];
+  if (!position?.span) return [];
+  const page = position.span.closest('.history-pdf-page');
+  const pageRect = page.getBoundingClientRect();
+  const spanRect = position.span.getBoundingClientRect();
+  const marker = document.createElement('button');
+  marker.type = 'button';
+  marker.className = 'history-pdf-delete-pin';
+  marker.dataset.historyDiffIndex = String(changeIndex);
+  marker.setAttribute('aria-label', t('history.deleted'));
+  marker.textContent = '−' + (changeIndex + 1);
+  marker.style.top = `${Math.max(4, spanRect.top - pageRect.top)}px`;
+  page.appendChild(marker);
+  return [marker];
+}
+
+function historyChangePin(elements, type, changeIndex) {
+  const first = elements[0];
+  const page = first?.closest('.history-pdf-page');
+  if (!page) return null;
+  const marker = document.createElement('button');
+  marker.type = 'button';
+  marker.className = `history-pdf-change-pin history-pin-${type}`;
+  marker.dataset.historyDiffIndex = String(changeIndex);
+  marker.setAttribute('aria-label', t(`history.${type}`));
+  marker.textContent = `${type === 'added' ? '+' : '~'}${changeIndex + 1}`;
+  marker.style.top = `${Math.max(4, Number.parseFloat(first.style.top) || 4)}px`;
+  page.appendChild(marker);
+  return marker;
+}
+
+function renderHistoryChangeCard(mark) {
+  const card = document.getElementById('history-change-card');
+  if (!card || !mark) return;
+  const change = mark.change;
+  card.classList.remove('hidden');
+  card.innerHTML = '<div class="history-change-card-head"><strong>' + escapeHtml(t(`history.${mark.type}`)) + ' #' + (mark.index + 1) + '</strong><span>' + escapeHtml(mark.mapped ? t(`history.confidence.${mark.confidence}`) : t('history.unmapped')) + '</span></div>'
+    + (mark.before ? '<div><label>' + escapeHtml(t('history.before')) + '</label><del>' + escapeHtml(mark.before) + '</del></div>' : '')
+    + (mark.after ? '<div><label>' + escapeHtml(t('history.after')) + '</label><ins>' + escapeHtml(mark.after) + '</ins></div>' : '')
+    + (change.reason ? '<p><strong>' + escapeHtml(t('history.reason')) + ':</strong> ' + escapeHtml(change.reason) + '</p>' : '');
+}
+
+function focusHistoryDiff(index, { scroll = true } = {}) {
+  if (!historyDiffMarks.length) return;
+  activeHistoryDiffIndex = (index + historyDiffMarks.length) % historyDiffMarks.length;
+  historyDiffMarks.forEach((mark, markIndex) => mark.elements.forEach((element) => element.classList.toggle('active', markIndex === activeHistoryDiffIndex)));
+  const active = historyDiffMarks[activeHistoryDiffIndex];
+  document.getElementById('history-diff-position').textContent = `${activeHistoryDiffIndex + 1} / ${historyDiffMarks.length}`;
+  renderHistoryChangeCard(active);
+  if (scroll && active.elements[0]) {
+    const viewport = document.getElementById('history-pdf-viewport');
+    const page = active.elements[0].closest('.history-pdf-page');
+    if (viewport && page) {
+      const target = page.offsetTop + active.elements[0].offsetTop - viewport.clientHeight * .28;
+      viewport.scrollTo({ top: Math.max(0, target), behavior: 'smooth' });
+    }
+  }
+}
+
+function applyHistoryDiffOverlay(entry, container) {
+  const index = buildPdfTextIndex(container, '.history-pdf-text-layer');
+  historyDiffMarks = entry.changes.map((change, changeIndex) => {
+    const display = deriveHistoryDisplayChange(change);
+    const type = display.type;
+    const locator = { ...change, after: display.after, contextBefore: display.contextBefore, contextAfter: display.contextAfter };
+    let elements = [];
+    let confidence = 'approximate';
+    if (type === 'deleted') {
+      const anchor = findHistoryDeletionAnchor(index, locator);
+      if (anchor) { elements = historyDeletionMarker(index, anchor, changeIndex); confidence = 'anchored'; }
+    } else {
+      const located = historyChangeOccurrences(index, locator);
+      if (located.ranges.length) {
+        elements = located.ranges.flatMap((range) => historyMarkerElementsForRange(index, range, type, changeIndex));
+        confidence = located.coverage > .9 ? 'exact' : 'anchored';
+        const pin = historyChangePin(elements, type, changeIndex);
+        if (pin) elements.push(pin);
+      }
+    }
+    const mark = { index: changeIndex, change, type, before: display.before, after: display.after, elements, mapped: elements.length > 0, confidence };
+    elements.forEach((element) => element.addEventListener('click', () => focusHistoryDiff(changeIndex, { scroll: false })));
+    return mark;
+  });
+  const mapped = historyDiffMarks.filter((mark) => mark.mapped).length;
+  document.getElementById('history-diff-summary').textContent = t('history.mappedSummary', { mapped, total: historyDiffMarks.length });
+  document.getElementById('history-diff-position').textContent = historyDiffMarks.length ? `1 / ${historyDiffMarks.length}` : '0 / 0';
+  if (historyDiffMarks.length) focusHistoryDiff(0);
+}
+
+async function renderChangeHistoryPdf(entry) {
+  const generation = ++historyPdfRenderGeneration;
+  const container = document.getElementById('history-pdf-pages');
+  const placeholder = document.getElementById('history-pdf-placeholder');
+  if (!container || !placeholder) return;
+  if (historyPdfLoadingTask) await historyPdfLoadingTask.destroy().catch(() => {});
+  historyDiffMarks = [];
+  container.replaceChildren();
+  placeholder.textContent = t('history.rendering');
+  placeholder.classList.remove('hidden');
+  try {
+    const url = '/api/change-history/' + encodeURIComponent(entry.id) + '/preview.pdf?t=' + Date.now();
+    historyPdfLoadingTask = pdfjsLib.getDocument({ url, isEvalSupported: false });
+    const pdf = await historyPdfLoadingTask.promise;
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      if (generation !== historyPdfRenderGeneration) return;
+      const page = await pdf.getPage(pageNumber);
+      const baseViewport = page.getViewport({ scale: 1 });
+      const availableWidth = Math.max(420, container.clientWidth - 72);
+      const viewport = page.getViewport({ scale: availableWidth / baseViewport.width });
+      const outputScale = Math.min(window.devicePixelRatio || 1, 2);
+      const pageElement = document.createElement('div');
+      pageElement.className = 'pdf-page history-pdf-page';
+      pageElement.style.width = `${Math.floor(viewport.width)}px`;
+      pageElement.style.height = `${Math.floor(viewport.height)}px`;
+      pageElement.style.setProperty('--scale-factor', viewport.scale);
+      pageElement.setAttribute('aria-label', 'Historical PDF page ' + pageNumber + ' of ' + pdf.numPages);
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.floor(viewport.width * outputScale);
+      canvas.height = Math.floor(viewport.height * outputScale);
+      canvas.style.width = Math.floor(viewport.width) + 'px';
+      canvas.style.height = Math.floor(viewport.height) + 'px';
+      pageElement.appendChild(canvas);
+      const textLayer = document.createElement('div');
+      textLayer.className = 'textLayer history-pdf-text-layer';
+      textLayer.style.width = `${Math.floor(viewport.width)}px`;
+      textLayer.style.height = `${Math.floor(viewport.height)}px`;
+      pageElement.appendChild(textLayer);
+      container.appendChild(pageElement);
+      await page.render({ canvasContext: canvas.getContext('2d', { alpha: false }), viewport, transform: outputScale === 1 ? null : [outputScale, 0, 0, outputScale, 0, 0] }).promise;
+      const textContent = await page.getTextContent();
+      await new pdfjsLib.TextLayer({ textContentSource: textContent, container: textLayer, viewport }).render();
+      const renderedSpans = [...textLayer.querySelectorAll('span')];
+      const textItems = textContent.items.filter((item) => item.str?.trim());
+      let cursor = 0;
+      renderedSpans.forEach((span) => {
+        while (cursor < textItems.length && textItems[cursor].str !== span.textContent) cursor += 1;
+        if (cursor < textItems.length) { span.dataset.pdfHasEol = String(Boolean(textItems[cursor].hasEOL)); cursor += 1; }
+      });
+    }
+    if (generation !== historyPdfRenderGeneration) return;
+    placeholder.classList.add('hidden');
+    applyHistoryDiffOverlay(entry, container);
+  } catch (error) {
+    if (generation !== historyPdfRenderGeneration) return;
+    placeholder.textContent = t('history.renderFailed');
+    placeholder.classList.remove('hidden');
+    showStatus(error?.message || t('history.renderFailed'), 'error');
+  }
+}
+
+function renderChangeHistoryDetail() {
+  const detail = document.getElementById('change-history-detail');
+  const entry = changeHistoryEntries.find((item) => item.id === selectedChangeHistoryId);
+  if (!entry) return;
+  const status = entry.status === 'rolled-back' ? t('history.rolledBack') : t('history.applied');
+  const changes = entry.changes.map((change, index) => '<article class="change-history-diff" data-history-change="' + escapeHtml(change.id) + '">'
+    + '<header><strong>#' + (index + 1) + '</strong>' + (Number.isInteger(change.currentStart) ? '<button type="button" class="history-open-source">' + escapeHtml(t('history.openSource')) + '</button>' : '') + '</header>'
+    + '<div class="history-diff-columns"><section><span>' + escapeHtml(t('history.before')) + '</span><pre>' + escapeHtml(change.before) + '</pre></section><section><span>' + escapeHtml(t('history.after')) + '</span><pre>' + escapeHtml(change.after) + '</pre></section></div>'
+    + (change.reason ? '<p><strong>' + escapeHtml(t('history.reason')) + ':</strong> ' + escapeHtml(change.reason) + '</p>' : '') + '</article>').join('');
+  detail.innerHTML = '<div class="change-history-detail-head"><div><span>' + escapeHtml(entry.origin) + '</span><h3>' + escapeHtml(entry.title || entry.origin) + '</h3><p>' + escapeHtml(status) + ' · ' + escapeHtml(historyTime(entry)) + ' · ' + escapeHtml(t('history.changes', { count: entry.changeCount })) + '</p></div>'
+    + '<div class="change-history-version-actions">'
+    + (entry.canRestore ? '<button id="change-history-restore" type="button">' + escapeHtml(t('history.restoreThis')) + '</button>' : '')
+    + (entry.canRollback ? '<button id="change-history-rollback" type="button">' + escapeHtml(t('history.rollback')) + '</button>' : '') + '</div></div>'
+    + '<div class="change-history-safety ' + (entry.matchesCurrent ? 'current' : '') + '">' + escapeHtml(entry.matchesCurrent ? t('history.currentMatch') : t('history.restoreSafe')) + (entry.canRollback ? '<br>' + escapeHtml(t('history.rollbackWarning')) : '') + '</div>'
+    + '<section class="change-history-preview"><div class="change-history-section-title"><div><strong>' + escapeHtml(t('history.annotatedPreview')) + '</strong><span id="history-diff-summary">' + escapeHtml(t('history.preparingMarks')) + '</span></div>'
+    + '<div class="history-diff-controls"><span class="history-legend added">' + escapeHtml(t('history.added')) + '</span><span class="history-legend modified">' + escapeHtml(t('history.modified')) + '</span><span class="history-legend deleted">' + escapeHtml(t('history.deleted')) + '</span>'
+    + '<button id="history-diff-toggle" type="button" aria-pressed="true">' + escapeHtml(t('history.hideMarks')) + '</button><button id="history-diff-previous" type="button" aria-label="' + escapeHtml(t('history.previousChange')) + '">‹</button><strong id="history-diff-position">0 / 0</strong><button id="history-diff-next" type="button" aria-label="' + escapeHtml(t('history.nextChange')) + '">›</button></div></div>'
+    + '<div id="history-pdf-viewport"><div id="history-pdf-pages"></div><div id="history-pdf-placeholder">' + escapeHtml(t('history.rendering')) + '</div></div><aside id="history-change-card" class="hidden"></aside></section>'
+    + '<details class="change-history-source"><summary>' + escapeHtml(t('history.sourceChanges', { count: entry.changeCount })) + '</summary><div class="change-history-diffs">' + changes + '</div></details>';
+  detail.querySelectorAll('.history-open-source').forEach((button) => button.addEventListener('click', () => {
+    const changeId = button.closest('[data-history-change]').dataset.historyChange;
+    const change = entry.changes.find((item) => item.id === changeId);
+    document.getElementById('change-history-overlay').classList.add('hidden');
+    setWorkspaceView('source');
+    editor.setSelection(editor.posFromIndex(change.currentStart), editor.posFromIndex(change.currentEnd));
+    editor.scrollIntoView({ from: editor.posFromIndex(change.currentStart), to: editor.posFromIndex(change.currentEnd) }, 80);
+    editor.focus();
+  }));
+  document.getElementById('change-history-rollback')?.addEventListener('click', () => rollbackChangeHistoryEntry(entry));
+  document.getElementById('change-history-restore')?.addEventListener('click', () => restoreChangeHistoryEntry(entry));
+  document.getElementById('history-diff-previous').addEventListener('click', () => focusHistoryDiff(activeHistoryDiffIndex - 1));
+  document.getElementById('history-diff-next').addEventListener('click', () => focusHistoryDiff(activeHistoryDiffIndex + 1));
+  document.getElementById('history-diff-toggle').addEventListener('click', (event) => {
+    const viewport = document.getElementById('history-pdf-viewport');
+    const hidden = viewport.classList.toggle('history-marks-hidden');
+    event.currentTarget.setAttribute('aria-pressed', String(!hidden));
+    event.currentTarget.textContent = t(hidden ? 'history.showMarks' : 'history.hideMarks');
+  });
+  renderChangeHistoryPdf(entry);
+}
+
+async function loadRecentChangeHistory({ silent = false } = {}) {
+  if (!currentDocument) return;
+  try {
+    const res = await fetch('/api/change-history?documentId=' + encodeURIComponent(currentDocument.id) + '&limit=5');
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Change history could not be loaded');
+    changeHistoryEntries = data.entries || [];
+    if (!changeHistoryEntries.some((item) => item.id === selectedChangeHistoryId)) selectedChangeHistoryId = changeHistoryEntries[0]?.id || null;
+    renderChangeHistoryList();
+    if (selectedChangeHistoryId) renderChangeHistoryDetail();
+  } catch (error) {
+    if (!silent) showStatus(error.message, 'error');
+  }
+}
+
+async function openChangeHistory() {
+  if (!currentDocument) return showStatus(t('history.openPaper'), 'error');
+  document.getElementById('change-history-overlay').classList.remove('hidden');
+  await loadRecentChangeHistory();
+}
+
+async function rollbackChangeHistoryEntry(entry) {
+  if (!entry.canRollback || !confirm(t('history.rollbackConfirm'))) return;
+  try {
+    const res = await fetch('/api/revisions/' + encodeURIComponent(entry.id) + '/rollback', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not restore the previous version');
+    editor.setValue(data.content);
+    lastAiRevisionId = null;
+    lastAiIntentIds = [];
+    await syncStructure({ silent: true });
+    await compileFile({ silent: true });
+    await Promise.all([loadModificationIntents(), loadRecentChangeHistory({ silent: true })]);
+    showStatus(t('history.restored'), 'success');
+  } catch (error) { showStatus(error.message, 'error'); }
+}
+
+async function restoreChangeHistoryEntry(entry) {
+  if (!entry.canRestore || !confirm(t('history.restoreConfirm'))) return;
+  const button = document.getElementById('change-history-restore');
+  if (button) button.disabled = true;
+  try {
+    const res = await fetch('/api/change-history/' + encodeURIComponent(entry.id) + '/restore', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not restore this version');
+    editor.setValue(data.content);
+    lastAiRevisionId = null;
+    lastAiIntentIds = [];
+    await syncStructure({ silent: true });
+    document.getElementById('change-history-overlay').classList.add('hidden');
+    await compileFile({ silent: true });
+    await Promise.all([loadModificationIntents(), loadRecentChangeHistory({ silent: true })]);
+    showStatus(t('history.versionRestored'), 'success');
+  } catch (error) {
+    showStatus(error.message, 'error');
+    if (button) button.disabled = false;
+  }
+}
+
+async function submitPdfAnnotation() {
+  if (!pdfAnnotationTarget?.node) return;
+  const comment = document.getElementById('pdf-edit-comment').value.trim();
+  if (!comment) return showStatus(t('status.intentRequired'), 'error');
+  const target = pdfIntentTarget();
+  if (!target) return showStatus('This PDF selection has no stable source target', 'error');
+  try {
+    await queueModificationIntent(target, comment, pdfAnnotationTarget.scope);
+    document.getElementById('pdf-edit-menu').classList.add('hidden');
+    clearPdfScopeHighlight();
+    showStatus(t('status.intentQueued'), 'success');
+  } catch (error) { showStatus(error.message, 'error'); }
 }
 
 function resetCompiledPreview() {
@@ -120,22 +1172,134 @@ function showStatus(msg, type) {
   el._timer = setTimeout(() => { el.textContent = ''; el.className = ''; }, 3500);
 }
 
+const AGENT_ACTIVITY_STAGE_ORDER = ['prepare', 'run', 'apply', 'compile'];
+const AGENT_ACTIVITY_STAGE_KEYS = { prepare: 'activity.preparing', run: 'activity.running', apply: 'activity.applying', compile: 'activity.compiling', done: 'activity.complete' };
+
+function renderAgentActivityLog() {
+  const system = agentActivitySystemLog.map((item) => `Papergod · ${item}`).join('\n');
+  const terminal = agentActivityTerminalLog.trim();
+  const log = document.getElementById('agent-activity-log');
+  log.textContent = [system, terminal && `\n${t('activity.cliOutput')}\n${terminal}`].filter(Boolean).join('\n') || t('activity.waiting');
+  log.scrollTop = log.scrollHeight;
+}
+
+async function pollAgentActivity() {
+  if (!agentActivityId) return;
+  try {
+    const res = await fetch(`/api/agent/activity/${encodeURIComponent(agentActivityId)}`);
+    if (!res.ok) return;
+    const activity = await res.json();
+    agentActivityTerminalLog = activity.output || '';
+    renderAgentActivityLog();
+  } catch {}
+}
+
+function setAgentActivityStage(stage, message) {
+  agentActivityStage = stage;
+  const activeIndex = AGENT_ACTIVITY_STAGE_ORDER.indexOf(stage);
+  document.querySelectorAll('#agent-activity-stages li').forEach((item) => {
+    const index = AGENT_ACTIVITY_STAGE_ORDER.indexOf(item.dataset.stage);
+    item.classList.toggle('active', index === activeIndex);
+    item.classList.toggle('complete', activeIndex > index || stage === 'done');
+  });
+  const label = stage ? t(AGENT_ACTIVITY_STAGE_KEYS[stage] || 'activity.running') : t('activity.failed');
+  document.getElementById('agent-activity-label').textContent = label;
+  if (message && agentActivitySystemLog.at(-1) !== message) agentActivitySystemLog.push(message);
+  renderAgentActivityLog();
+}
+
+function refreshSentenceReaderLocale() {
+  const item = sentenceReaderItems[sentenceReaderIndex];
+  if (!item) return;
+  document.getElementById('sentence-reader-position').textContent = t('reader.position', { section: item.section.title, current: sentenceReaderIndex + 1, total: sentenceReaderItems.length });
+  document.getElementById('sentence-reader-selection').textContent = sentenceReaderWord ? t('reader.scopeWord', { word: sentenceReaderWord.text }) : t('reader.scopeSentence');
+}
+
+function openAgentActivity({ provider, scope, prompt }) {
+  const activity = document.getElementById('agent-activity');
+  activity.className = 'agent-activity running';
+  document.getElementById('agent-activity-subtitle').textContent = `${provider} · ${scope}`;
+  document.getElementById('agent-activity-result').classList.add('hidden');
+  document.getElementById('agent-activity-result').textContent = '';
+  document.getElementById('agent-activity-undo').classList.add('hidden');
+  document.getElementById('agent-activity-cancel').classList.remove('hidden');
+  agentActivityId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  agentActivitySystemLog = [`Preparing request (${prompt.length.toLocaleString()} prompt characters).`];
+  agentActivityTerminalLog = '';
+  renderAgentActivityLog();
+  agentActivityStartedAt = Date.now();
+  clearInterval(agentActivityTimer);
+  agentActivityTimer = setInterval(() => { document.getElementById('agent-activity-elapsed').textContent = `${Math.round((Date.now() - agentActivityStartedAt) / 1000)}s`; }, 500);
+  clearInterval(agentActivityPoll);
+  agentActivityPoll = setInterval(pollAgentActivity, 500);
+  document.getElementById('agent-activity-elapsed').textContent = '0s';
+  setAgentActivityStage('prepare');
+}
+
+function finishAgentActivity(message, { error = false, revisionId = null, intentIds = [] } = {}) {
+  clearInterval(agentActivityTimer);
+  clearInterval(agentActivityPoll);
+  agentActivityTimer = null;
+  agentActivityPoll = null;
+  pollAgentActivity();
+  agentActivityController = null;
+  setAgentActivityStage(error ? '' : 'done');
+  document.getElementById('agent-activity').className = `agent-activity ${error ? 'error' : 'complete'}`;
+  const result = document.getElementById('agent-activity-result');
+  result.textContent = message;
+  result.className = `agent-activity-result ${error ? 'error' : 'success'}`;
+  document.getElementById('agent-activity-cancel').classList.add('hidden');
+  lastAiRevisionId = revisionId;
+  lastAiIntentIds = revisionId ? [...intentIds] : [];
+  document.getElementById('agent-activity-undo').classList.toggle('hidden', !revisionId);
+}
+
+async function undoLastAiRevision() {
+  if (!lastAiRevisionId) return;
+  const button = document.getElementById('agent-activity-undo');
+  button.disabled = true;
+  try {
+    const res = await fetch(`/api/revisions/${encodeURIComponent(lastAiRevisionId)}/rollback`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not undo the AI revision');
+    editor.setValue(data.content);
+    if (lastAiIntentIds.length) {
+      await Promise.all(lastAiIntentIds.map((id) => fetch('/api/annotations/' + encodeURIComponent(id), {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'open' }),
+      })));
+      await loadModificationIntents();
+    }
+    await syncStructure({ silent: true });
+    await compileFile({ silent: true });
+    lastAiRevisionId = null;
+    lastAiIntentIds = [];
+    button.classList.add('hidden');
+    document.getElementById('agent-activity-result').textContent = 'AI revision rolled back and the previous PDF was restored.';
+    showStatus('AI revision rolled back', 'success');
+  } catch (error) { showStatus(error.message, 'error'); }
+  finally { button.disabled = false; }
+}
+
 async function loadEngineStatus() {
+  const compileBtn = document.getElementById('compile-btn');
   try {
     const res = await fetch('/api/engines');
     const data = await res.json();
-    const el = document.getElementById('engine-status');
-    const compileBtn = document.getElementById('compile-btn');
     if (data.engines && data.engines.length > 0) {
-      el.textContent = 'Engine: ' + data.engines[0];
+      latexEngineAvailable = true;
       compileBtn.disabled = false;
+      compileBtn.removeAttribute('aria-disabled');
     } else {
-      el.textContent = 'No LaTeX engine';
+      latexEngineAvailable = false;
       compileBtn.disabled = true;
+      compileBtn.setAttribute('aria-disabled', 'true');
+      showStatus(t('engine.missing'), 'error');
     }
   } catch {
-    document.getElementById('engine-status').textContent = 'Engine check failed';
-    document.getElementById('compile-btn').disabled = true;
+    latexEngineAvailable = false;
+    compileBtn.disabled = true;
+    compileBtn.setAttribute('aria-disabled', 'true');
+    showStatus(t('engine.checkFailed'), 'error');
   }
 }
 
@@ -144,13 +1308,60 @@ async function loadConfig() {
     const res = await fetch('/api/config');
     const data = await res.json();
     currentProvider = data.provider || 'mock';
-    document.getElementById('agent-provider').textContent = currentProvider;
+    const quickSelect = document.getElementById('agent-provider-quick');
+    if (quickSelect?.querySelector(`option[value="${currentProvider}"]`)) quickSelect.value = currentProvider;
   } catch {}
+}
+
+function renderQuickAgentSelector() {
+  const select = document.getElementById('agent-provider-quick');
+  if (!select) return;
+  select.innerHTML = agentProviders.map((item) => `<option value="${escapeHtml(item.id)}"${item.available ? '' : ' disabled'}>${escapeHtml(item.label)}${item.available ? '' : ' · ' + escapeHtml(t('agent.unavailable'))}</option>`).join('');
+  select.value = currentProvider;
+  select.title = t('agent.activeTitle', { name: agentProviders.find((item) => item.id === currentProvider)?.label || currentProvider });
+}
+
+async function activateAgentProvider(id) {
+  const profile = agentProviders.find((item) => item.id === id);
+  const select = document.getElementById('agent-provider-quick');
+  if (!profile || !select) return;
+  const previousProvider = currentProvider;
+  const generation = ++agentActivationGeneration;
+  currentProvider = id;
+  renderQuickAgentSelector();
+  renderAgentConfiguration();
+  showStatus(t('agent.selected', { name: profile.label }), 'success');
+  try {
+    const res = await fetch('/api/agents/config', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id, command: profile.command || '', args: profile.args || [], model: profile.model || '', activate: true }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || `Could not activate ${profile.label}`);
+    if (generation !== agentActivationGeneration) return;
+    currentProvider = data.selected || id;
+    document.getElementById('panel-provider').value = currentProvider;
+    renderQuickAgentSelector();
+    renderAgentConfiguration();
+    showStatus(t('agent.active', { name: profile.label }), 'success');
+  } catch (error) {
+    if (generation !== agentActivationGeneration) return;
+    currentProvider = previousProvider;
+    renderQuickAgentSelector();
+    renderAgentConfiguration();
+    showStatus(error.message, 'error');
+  }
 }
 
 function selectedAgentProfile() {
   const id = document.getElementById('agent-config-provider')?.value;
   return agentProviders.find((item) => item.id === id) || null;
+}
+
+function setAgentConfigNote(message, state = 'neutral') {
+  const note = document.getElementById('agent-config-note');
+  note.textContent = message;
+  note.className = `agent-config-note ${state}`;
 }
 
 function fillAgentConfigForm() {
@@ -159,31 +1370,43 @@ function fillAgentConfigForm() {
   document.getElementById('agent-config-command').value = profile.command || '';
   document.getElementById('agent-config-model').value = profile.model || '';
   document.getElementById('agent-config-args').value = (profile.args || []).join('\n');
-  document.getElementById('agent-config-note').textContent = profile.id === 'mock'
-    ? 'The built-in Mock provider runs locally without an external account.'
-    : `${profile.available ? 'CLI detected.' : 'CLI not detected.'} ${profile.authStatus || 'Authentication not checked.'}`;
+  const note = profile.id === 'mock'
+    ? t('agent.mockNote')
+    : `${profile.available ? t('agent.cliDetected') : t('agent.cliMissing')} ${profile.authStatus || t('agent.authUnchecked')}${profile.id === currentProvider ? ' ' + t('agent.currentUse') : ' ' + t('agent.saveActivate')}`;
+  setAgentConfigNote(note, profile.id === 'mock' || profile.available && profile.authenticated ? 'success' : profile.available ? 'warning' : 'error');
+  document.getElementById('agent-config-probe').textContent = profile.id === 'mock' ? t('agent.checkMock') : t('agent.checkSetup', { name: profile.label });
+  document.getElementById('agent-config-save').textContent = profile.id === currentProvider ? t('agent.saveSettings') : t('agent.use', { name: profile.label });
 }
 
 function renderAgentConfiguration() {
   const current = agentProviders.find((item) => item.id === currentProvider);
   document.getElementById('agent-config-summary').textContent = current
-    ? `${current.label} · ${current.available ? current.authenticated ? 'ready' : 'sign-in needed' : 'CLI not detected'}`
+    ? `${current.label} · ${current.available ? current.authenticated ? t('agent.ready') : t('agent.signin') : t('agent.cliMissing')}`
     : currentProvider;
   const list = document.getElementById('agent-provider-list');
+  const select = document.getElementById('agent-config-provider');
+  const selected = agentProviders.some((item) => item.id === select.value) ? select.value : currentProvider;
   list.innerHTML = agentProviders.map((item) => {
     const state = item.available && item.authenticated ? 'available' : item.available ? 'attention' : '';
-    const stateText = item.available && item.authenticated ? 'ready' : item.available ? 'sign-in needed' : 'not installed';
-    return '<article class="agent-provider-card ' + (item.id === currentProvider ? 'active' : '') + '"><div><strong>'
-      + escapeHtml(item.label) + '</strong><span class="' + state + '">' + stateText + '</span></div><p>'
-      + escapeHtml(item.adapter) + ' · ' + escapeHtml((item.capabilities || []).join(', ') || 'future adapter')
+    const stateText = item.available && item.authenticated ? t('agent.ready') : item.available ? t('agent.signin') : t('agent.notInstalled');
+    return '<button type="button" class="agent-provider-card ' + (item.id === selected ? 'selected ' : '') + (item.id === currentProvider ? 'active' : '')
+      + '" data-provider="' + escapeHtml(item.id) + '" aria-pressed="' + String(item.id === selected) + '"><span class="provider-card-head"><strong>'
+      + escapeHtml(item.label) + '</strong><span class="' + state + '">' + stateText + '</span></span><span class="provider-card-details">'
+      + escapeHtml(item.adapter) + ' · ' + escapeHtml((item.capabilities || []).join(', ') || t('agent.future'))
       + (item.version ? '<br>' + escapeHtml(item.version) : '')
-      + (item.authStatus ? '<br>' + escapeHtml(item.authStatus) : '') + '</p></article>';
+      + (item.authStatus ? '<br>' + escapeHtml(item.authStatus) : '') + '</span>'
+      + (item.id === currentProvider ? '<span class="provider-use">' + escapeHtml(t('agent.currently')) + '</span>' : item.available ? '<span class="provider-action">' + escapeHtml(t('agent.clickUse')) + '</span>' : '') + '</button>';
   }).join('');
-  const select = document.getElementById('agent-config-provider');
-  const selected = select.value || currentProvider;
   select.innerHTML = agentProviders.map((item) => '<option value="' + escapeHtml(item.id) + '">' + escapeHtml(item.label) + '</option>').join('');
   select.value = agentProviders.some((item) => item.id === selected) ? selected : agentProviders[0]?.id || '';
   fillAgentConfigForm();
+}
+
+function selectAgentProvider(id) {
+  if (!agentProviders.some((item) => item.id === id)) return;
+  document.getElementById('agent-config-provider').value = id;
+  renderAgentConfiguration();
+  document.getElementById('agent-config-form').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 }
 
 async function loadAgentConfiguration() {
@@ -193,7 +1416,7 @@ async function loadAgentConfiguration() {
     if (!res.ok) throw new Error(data.error || 'Agent configuration failed to load');
     currentProvider = data.selected;
     agentProviders = data.providers || [];
-    document.getElementById('agent-provider').textContent = currentProvider;
+    renderQuickAgentSelector();
     renderAgentConfiguration();
   } catch (error) {
     document.getElementById('agent-config-summary').textContent = error.message;
@@ -211,41 +1434,57 @@ async function saveAgentConfiguration(event) {
     args: document.getElementById('agent-config-args').value.split('\n').map((item) => item.trim()).filter(Boolean),
     activate: true,
   };
+  const button = document.getElementById('agent-config-save');
+  button.disabled = true;
+  button.textContent = t('agent.activating', { name: profile.label });
   try {
     const res = await fetch('/api/agents/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Agent configuration save failed');
     currentProvider = data.selected;
     await loadAgentConfiguration();
-    document.getElementById('panel-provider').value = ['mock', 'codex', 'claude-code', 'opencode'].includes(currentProvider) ? currentProvider : 'mock';
-    showStatus('Agent configuration saved', 'success');
+    document.getElementById('panel-provider').value = ['mock', 'codex', 'claude-code', 'opencode', 'pi'].includes(currentProvider) ? currentProvider : 'mock';
+    showStatus(t('agent.configSaved'), 'success');
   } catch (error) { showStatus(error.message, 'error'); }
+  finally { button.disabled = false; fillAgentConfigForm(); }
 }
 
 async function probeAgentConfiguration() {
   const profile = selectedAgentProfile();
   if (!profile) return;
   const button = document.getElementById('agent-config-probe');
+  const startedAt = Date.now();
   button.disabled = true;
-  button.textContent = 'Checking…';
+  button.textContent = t('agent.checking');
+  setAgentConfigNote(t('agent.checkingCommand', { name: profile.label }), 'neutral');
   try {
     const body = {
       id: profile.id,
       command: document.getElementById('agent-config-command').value.trim(),
       model: document.getElementById('agent-config-model').value.trim(),
       args: document.getElementById('agent-config-args').value.split('\n').map((item) => item.trim()).filter(Boolean),
+      live: false,
     };
     const res = await fetch('/api/agents/probe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Agent connection check failed');
     Object.assign(profile, data.agent || {});
-    document.getElementById('agent-config-note').textContent = profile.available
-      ? `${profile.version || 'CLI detected'} · ${profile.authStatus || 'Authentication not confirmed'}`
-      : profile.error || 'CLI not detected';
     renderAgentConfiguration();
-    showStatus(profile.available && profile.authenticated ? 'Agent is ready' : 'Agent needs attention', profile.available && profile.authenticated ? 'success' : 'error');
-  } catch (error) { showStatus(error.message, 'error'); }
-  finally { button.disabled = false; button.textContent = 'Check connection'; }
+    const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
+    const message = profile.available
+      ? `Setup check finished in ${seconds}s · ${profile.version || 'CLI detected'} · ${profile.authStatus || 'Authentication not confirmed'}`
+      : `Setup check finished in ${seconds}s · ${profile.error || 'CLI not detected'}`;
+    const ready = profile.available && (profile.authenticated || profile.id === 'pi');
+    setAgentConfigNote(message, ready ? 'success' : profile.available ? 'warning' : 'error');
+    showStatus(ready ? `${profile.label} setup is ready` : `${profile.label} setup needs attention`, ready ? 'success' : 'error');
+  } catch (error) {
+    setAgentConfigNote(error.message, 'error');
+    showStatus(error.message, 'error');
+  } finally {
+    button.disabled = false;
+    const selected = selectedAgentProfile();
+    button.textContent = selected?.id === 'mock' ? t('agent.checkMock') : t('agent.checkSetup', { name: selected?.label || 'Agent' });
+  }
 }
 
 function schedulePromptContextPreview() {
@@ -256,21 +1495,21 @@ function schedulePromptContextPreview() {
 async function refreshPromptContextPreview() {
   if (!currentDocument || !editor) return;
   currentPromptPreview = null;
-  const selectedId = selectedNode?.type !== 'document' ? selectedNode?.id : null;
+  const selectedId = modificationIntents.length ? null : selectedNode?.type !== 'document' ? selectedNode?.id : null;
   try {
     const res = await fetch('/api/agent/context-preview', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         nodeId: selectedId, documentId: currentDocument.id,
         content: selectedId ? '' : editor.getValue(),
-        temporaryPrompt: document.getElementById('ai-prompt').value.trim(),
+        temporaryPrompt: combinedTemporaryPrompt(),
         resourceIds: [...selectedResourceIds],
       }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Prompt preview failed');
     currentPromptPreview = data;
-    document.getElementById('prompt-context-meta').textContent = `${data.scope} · ${data.layers.length} layers · ${data.characterCount.toLocaleString()} chars`;
+    document.getElementById('prompt-context-meta').textContent = `${data.layers.length} context layers · ${data.characterCount.toLocaleString()} chars`;
     document.getElementById('prompt-context-excerpt').textContent = data.contextPrompt;
     document.getElementById('prompt-preview-meta').textContent = `${data.provider} · ${data.scope} · ${data.characterCount.toLocaleString()} characters`;
     document.getElementById('prompt-preview-content').textContent = data.assembledPrompt;
@@ -1225,6 +2464,8 @@ async function loadFile(name) {
       li.classList.toggle('active', li.dataset.file === name);
     });
     await syncStructure({ silent: true });
+    await loadModificationIntents();
+    if (latexEngineAvailable) await compileFile({ silent: true });
   } catch (e) {
     showStatus('Failed to load ' + name, 'error');
   }
@@ -1541,8 +2782,8 @@ async function saveContext() {
   }
 }
 
-async function compileFile() {
-  if (!await saveFile()) return;
+async function compileFile({ silent = false } = {}) {
+  if (!await saveFile()) return false;
   showStatus('Compiling...', '');
   try {
     const res = await fetch('/api/compile', {
@@ -1553,52 +2794,90 @@ async function compileFile() {
     const data = await res.json();
     if (data.ok) {
       showCompiledPdf(data.pdf);
-      showStatus('Compiled (' + data.engine + ')', 'success');
+      if (!silent) showStatus('Compiled (' + data.engine + ')', 'success');
+      return true;
     } else {
       showStatus('Compile error', 'error');
-      alert('Compilation failed:\n' + data.error);
+      if (!silent) alert('Compilation failed:\n' + data.error);
+      return false;
     }
   } catch {
     showStatus('Compile request failed', 'error');
+    return false;
   }
 }
 
 async function invokeAgent() {
   await refreshPromptContextPreview();
   if (!currentPromptPreview) return showStatus('Prompt context is not ready', 'error');
-  const temporaryCharacters = document.getElementById('ai-prompt').value.trim().length;
-  document.getElementById('invoke-confirm-summary').textContent = `${currentProvider} · ${currentPromptPreview.scope} · ${currentPromptPreview.contextPrompt.length.toLocaleString()} context characters + ${temporaryCharacters.toLocaleString()} temporary characters`;
+  const temporaryCharacters = combinedTemporaryPrompt().length;
+  const batchSummary = modificationIntents.length ? ` · ${modificationIntents.length} queued modification intent${modificationIntents.length === 1 ? '' : 's'}` : '';
+  document.getElementById('invoke-confirm-summary').textContent = `${currentProvider} · ${currentPromptPreview.scope}${batchSummary} · ${currentPromptPreview.contextPrompt.length.toLocaleString()} context characters + ${temporaryCharacters.toLocaleString()} instruction characters`;
   document.getElementById('invoke-confirm-overlay').classList.remove('hidden');
 }
 
-async function askAgent(composedPrompt = null) {
+async function askAgent(composedPrompt = null, isComposed = Boolean(composedPrompt)) {
   const prompt = composedPrompt || document.getElementById('ai-prompt').value.trim();
-  const selectedId = selectedNode?.type !== 'document' ? selectedNode?.id : null;
-  if (!await saveFile()) return;
+  const intentIds = modificationIntents.map((item) => item.id);
+  const selectedId = intentIds.length ? null : selectedNode?.type !== 'document' ? selectedNode?.id : null;
+  openAgentActivity({ provider: currentProvider, scope: intentIds.length ? `${intentIds.length} modification intents` : selectedNode?.type || 'document', prompt });
+  if (!await saveFile()) return finishAgentActivity('Could not save the paper before starting the Agent.', { error: true });
   const content = editor.getValue();
   const button = document.getElementById('ai-invoke');
   button.disabled = true;
+  agentActivityController = new AbortController();
+  setAgentActivityStage('run', `${currentProvider} is analyzing the selected paper scope. The paper remains available while this task runs.`);
   showStatus('Agent is analyzing...', '');
   try {
     const res = await fetch(selectedId ? '/api/agent/suggest-node' : '/api/agent/suggest', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
+      signal: agentActivityController.signal,
       body: JSON.stringify(selectedId
-        ? { nodeId: selectedId, prompt, promptIsComposed: Boolean(composedPrompt), resourceIds: [...selectedResourceIds] }
-        : { documentId: currentDocument?.id, content, prompt, promptIsComposed: Boolean(composedPrompt), resourceIds: [...selectedResourceIds] }),
+        ? { nodeId: selectedId, prompt, promptIsComposed: isComposed, resourceIds: [...selectedResourceIds], activityId: agentActivityId }
+        : { documentId: currentDocument?.id, content, prompt, promptIsComposed: isComposed, resourceIds: [...selectedResourceIds], activityId: agentActivityId }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Agent request failed');
     suggestions = data.suggestions || [];
     lastLibraryUsage = data.library || null;
-    renderSuggestions();
     renderLibraryUsage();
     document.getElementById('ai-prompt').value = '';
     schedulePromptContextPreview();
-    if (suggestions.length === 0) showStatus('No suggestions generated', '');
-    else showStatus(suggestions.length + ' suggestion(s)', 'success');
+    if (suggestions.length === 0) {
+      renderSuggestions();
+      showStatus('No changes proposed', '');
+      finishAgentActivity(data.summary || 'The Agent completed without proposing source changes.');
+      return;
+    }
+    setAgentActivityStage('apply', `Applying ${suggestions.length} proposed change${suggestions.length === 1 ? '' : 's'} as one atomic revision…`);
+    document.getElementById('agent-activity-cancel').classList.add('hidden');
+    agentActivityController = null;
+    const applyResponse = await fetch('/api/agent/apply-all', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file: currentFile, suggestionIds: suggestions.map((item) => item.id) }),
+    });
+    const applied = await applyResponse.json();
+    if (!applyResponse.ok) throw new Error(applied.error || 'AI revision could not be applied');
+    editor.setValue(applied.content);
+    suggestions = [];
+    renderSuggestions();
+    await syncStructure({ silent: true });
+    setAgentActivityStage('compile', 'Revision applied. Compiling the updated PDF…');
+    const compiled = await compileFile({ silent: true });
+    const appliedCount = applied.revision?.changes?.filter((item) => item.status === 'applied').length || 0;
+    let intentResolutionNote = '';
+    if (intentIds.length) {
+      try { await resolveModificationIntents(intentIds); }
+      catch (error) { intentResolutionNote = ` ${error.message}`; }
+    }
+    finishAgentActivity(`${appliedCount} change${appliedCount === 1 ? '' : 's'} applied${compiled ? ' and the PDF was rebuilt' : '; PDF compilation needs attention'}.${intentResolutionNote}`, { revisionId: applied.revision?.id || null, intentIds });
+    await loadRecentChangeHistory({ silent: true });
+    showStatus(t('history.saved', { count: appliedCount }), 'success');
   } catch (error) {
-    showStatus(error.message || 'Agent request failed', 'error');
+    const message = error.name === 'AbortError' ? 'AI task cancelled.' : error.message || 'Agent request failed';
+    finishAgentActivity(message, { error: true });
+    showStatus(message, 'error');
   } finally {
     button.disabled = false;
   }
@@ -1637,23 +2916,7 @@ async function generateParagraph() {
 
 function renderSuggestions() {
   const container = document.getElementById('ai-suggestions');
-  container.innerHTML = suggestions.map(s => {
-    return '<div class="suggestion" data-id="' + s.id + '">'
-      + '<span class="badge ' + s.category + '">' + escapeHtml(s.category) + '</span>'
-      + '<div class="desc">' + escapeHtml(s.description) + '</div>'
-      + '<div class="diff"><del>' + escapeHtml(s.originalText) + '</del>\n<ins>' + escapeHtml(s.suggestedText) + '</ins></div>'
-      + '<div class="actions">'
-      + '<button class="accept" data-id="' + s.id + '">Accept</button>'
-      + '<button class="reject" data-id="' + s.id + '">Reject</button>'
-      + '</div></div>';
-  }).join('');
-
-  container.querySelectorAll('.accept').forEach(btn => {
-    btn.addEventListener('click', () => acceptSuggestion(btn.dataset.id));
-  });
-  container.querySelectorAll('.reject').forEach(btn => {
-    btn.addEventListener('click', () => rejectSuggestion(btn.dataset.id));
-  });
+  container.replaceChildren();
 }
 
 async function acceptSuggestion(id) {
@@ -1702,6 +2965,7 @@ async function rejectSuggestion(id) {
 }
 
 function init() {
+  translateDom();
   editor = CodeMirror.fromTextArea(document.getElementById('editor'), {
     mode: 'stex',
     lineNumbers: true,
@@ -1723,6 +2987,71 @@ function init() {
   document.getElementById('source-view-btn').addEventListener('click', () => setWorkspaceView('source'));
   document.getElementById('preview-view-btn').addEventListener('click', () => setWorkspaceView('preview'));
   document.getElementById('ai-invoke').addEventListener('click', invokeAgent);
+  document.getElementById('language-select').value = getLocale();
+  document.getElementById('language-select').addEventListener('change', event => setLocale(event.target.value));
+  document.addEventListener('papergod:locale-changed', () => {
+    renderModificationIntents();
+    refreshSentenceReaderLocale();
+    if (agentProviders.length) { renderQuickAgentSelector(); renderAgentConfiguration(); }
+    if (changeHistoryEntries.length) { renderChangeHistoryList(); renderChangeHistoryDetail(); }
+    if (agentActivityStage) setAgentActivityStage(agentActivityStage);
+    else renderAgentActivityLog();
+  });
+  const setNavigatorTab = (tab) => {
+    const outline = tab === 'outline';
+    document.getElementById('navigator-outline-panel').classList.toggle('hidden', !outline);
+    document.getElementById('navigator-tools-panel').classList.toggle('hidden', outline);
+    document.getElementById('navigator-outline-tab').classList.toggle('active', outline);
+    document.getElementById('navigator-tools-tab').classList.toggle('active', !outline);
+    document.getElementById('navigator-outline-tab').setAttribute('aria-selected', String(outline));
+    document.getElementById('navigator-tools-tab').setAttribute('aria-selected', String(!outline));
+  };
+  document.getElementById('navigator-outline-tab').addEventListener('click', () => setNavigatorTab('outline'));
+  document.getElementById('navigator-tools-tab').addEventListener('click', () => setNavigatorTab('tools'));
+  document.getElementById('tool-show-source').addEventListener('click', () => setWorkspaceView('source'));
+  document.getElementById('tool-compile').addEventListener('click', compileFile);
+  document.getElementById('tool-change-history').addEventListener('click', openChangeHistory);
+  document.getElementById('history-open').addEventListener('click', openChangeHistory);
+  document.getElementById('tool-libraries').addEventListener('click', () => document.getElementById('library-open').click());
+  document.getElementById('tool-agent-config').addEventListener('click', () => document.getElementById('agent-config-open').click());
+  document.getElementById('change-history-close').addEventListener('click', () => document.getElementById('change-history-overlay').classList.add('hidden'));
+  document.getElementById('change-history-refresh').addEventListener('click', () => loadRecentChangeHistory());
+  document.getElementById('change-history-overlay').addEventListener('click', event => {
+    if (event.target.id === 'change-history-overlay') event.currentTarget.classList.add('hidden');
+  });
+  document.getElementById('tool-open-folder').addEventListener('click', async () => {
+    try {
+      const res = await fetch('/api/workspace/open-folder', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Could not open paper folder');
+      showStatus('Paper folder opened', 'success');
+    } catch (error) { showStatus(error.message, 'error'); }
+  });
+  document.getElementById('agent-activity-toggle').addEventListener('click', () => {
+    const panel = document.getElementById('agent-activity-panel');
+    const expanded = panel.classList.toggle('hidden') === false;
+    document.getElementById('agent-activity-toggle').setAttribute('aria-expanded', String(expanded));
+  });
+  document.getElementById('agent-activity-cancel').addEventListener('click', () => agentActivityController?.abort());
+  document.getElementById('agent-activity-undo').addEventListener('click', undoLastAiRevision);
+  document.querySelectorAll('[data-pdf-scope]').forEach((button) => button.addEventListener('click', () => choosePdfAnnotationScope(button.dataset.pdfScope)));
+  document.getElementById('pdf-sentence-reader-open').addEventListener('click', openSentenceReader);
+  document.getElementById('pdf-edit-cancel').addEventListener('click', () => {
+    document.getElementById('pdf-edit-menu').classList.add('hidden');
+    clearPdfScopeHighlight();
+  });
+  document.getElementById('pdf-edit-submit').addEventListener('click', submitPdfAnnotation);
+  document.getElementById('sentence-reader-close').addEventListener('click', closeSentenceReader);
+  document.getElementById('sentence-reader-overlay').addEventListener('click', event => {
+    if (event.target.id === 'sentence-reader-overlay') closeSentenceReader();
+  });
+  document.getElementById('sentence-reader-prev').addEventListener('click', () => {
+    if (sentenceReaderIndex > 0) { sentenceReaderIndex -= 1; renderSentenceReader(); }
+  });
+  document.getElementById('sentence-reader-next').addEventListener('click', () => {
+    if (sentenceReaderIndex < sentenceReaderItems.length - 1) { sentenceReaderIndex += 1; renderSentenceReader(); }
+  });
+  document.getElementById('sentence-reader-submit').addEventListener('click', submitSentenceReaderIntent);
   document.getElementById('invoke-confirm').addEventListener('click', async () => {
     document.getElementById('invoke-confirm-overlay').classList.add('hidden');
     if (currentPromptPreview) await askAgent(currentPromptPreview.mergedPrompt);
@@ -1737,11 +3066,23 @@ function init() {
     document.getElementById('agent-config-overlay').classList.remove('hidden');
     await loadAgentConfiguration();
   });
-  document.getElementById('agent-config-close').addEventListener('click', () => document.getElementById('agent-config-overlay').classList.add('hidden'));
+  document.getElementById('agent-provider-quick').addEventListener('change', event => activateAgentProvider(event.target.value));
+  const closeAgentConfiguration = () => {
+    document.getElementById('agent-config-overlay').classList.add('hidden');
+  };
+  document.getElementById('agent-config-close').addEventListener('click', closeAgentConfiguration);
   document.getElementById('agent-config-overlay').addEventListener('click', event => {
-    if (event.target.id === 'agent-config-overlay') event.currentTarget.classList.add('hidden');
+    if (event.target.id === 'agent-config-overlay') closeAgentConfiguration();
   });
-  document.getElementById('agent-config-provider').addEventListener('change', fillAgentConfigForm);
+  document.getElementById('agent-provider-list').addEventListener('click', event => {
+    const card = event.target.closest('[data-provider]');
+    if (!card) return;
+    const id = card.dataset.provider;
+    selectAgentProvider(id);
+    const profile = agentProviders.find((item) => item.id === id);
+    if (profile?.available && id !== currentProvider) activateAgentProvider(id);
+  });
+  document.getElementById('agent-config-provider').addEventListener('change', event => selectAgentProvider(event.target.value));
   document.getElementById('agent-config-form').addEventListener('submit', saveAgentConfiguration);
   document.getElementById('agent-config-probe').addEventListener('click', probeAgentConfiguration);
   document.getElementById('prompt-preview-open').addEventListener('click', async () => {
@@ -1846,6 +3187,14 @@ function init() {
   document.getElementById('download-workflow-export').addEventListener('click', downloadWorkflowExport);
   document.getElementById('refresh-self-revise').addEventListener('click', loadSelfReviseWorkspace);
   document.addEventListener('keydown', async event => {
+    const readerOpen = !document.getElementById('sentence-reader-overlay').classList.contains('hidden');
+    if (readerOpen && !['TEXTAREA', 'INPUT'].includes(event.target.tagName) && ['ArrowLeft', 'ArrowRight'].includes(event.key)) {
+      const direction = event.key === 'ArrowLeft' ? -1 : 1;
+      const next = sentenceReaderIndex + direction;
+      if (next >= 0 && next < sentenceReaderItems.length) { sentenceReaderIndex = next; renderSentenceReader(); }
+      event.preventDefault();
+      return;
+    }
     if (event.key === 'Escape') {
       document.getElementById('library-overlay').classList.add('hidden');
       document.getElementById('review-overlay').classList.add('hidden');
@@ -1853,6 +3202,10 @@ function init() {
       document.getElementById('agent-config-overlay').classList.add('hidden');
       document.getElementById('prompt-preview-overlay').classList.add('hidden');
       document.getElementById('invoke-confirm-overlay').classList.add('hidden');
+      document.getElementById('change-history-overlay').classList.add('hidden');
+      document.getElementById('pdf-edit-menu').classList.add('hidden');
+      closeSentenceReader();
+      clearPdfScopeHighlight();
       if (!document.getElementById('focus-annotation-overlay').classList.contains('hidden')) await closeFocusAnnotation();
     }
   });
@@ -1861,12 +3214,11 @@ function init() {
   });
   document.getElementById('ai-prompt').addEventListener('input', schedulePromptContextPreview);
 
-  loadEngineStatus();
+  loadEngineStatus().then(() => loadFile(currentFile));
   loadConfig();
   loadAgentConfiguration();
   updateLibrarySelectionStatus();
   loadFileTree();
-  loadFile(currentFile);
 }
 
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, { once: true });

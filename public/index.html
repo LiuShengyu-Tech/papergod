@@ -11,24 +11,52 @@
 <body>
   <div id="root"></div>
 
+  <div id="pdf-edit-menu" class="hidden" role="dialog" aria-label="PDF revision comment">
+    <div class="pdf-scope-options"><button data-pdf-scope="word" data-i18n="pdf.word">Word</button><button data-pdf-scope="sentence" data-i18n="pdf.sentence">Sentence</button><button data-pdf-scope="paragraph" data-i18n="pdf.paragraph">Paragraph</button><button id="pdf-sentence-reader-open" type="button" data-i18n="pdf.reader">Sentence reader</button></div>
+    <blockquote id="pdf-edit-quote"></blockquote>
+    <textarea id="pdf-edit-comment" rows="3" placeholder="What should the AI change?" data-i18n-placeholder="pdf.commentPlaceholder"></textarea>
+    <div class="pdf-edit-actions"><button id="pdf-edit-cancel" type="button" data-i18n="pdf.cancel">Cancel</button><button id="pdf-edit-submit" class="primary" type="button" data-i18n="pdf.queue">Add to revision queue</button></div>
+  </div>
+
+  <div id="sentence-reader-overlay" class="hidden compact-overlay" role="dialog" aria-modal="true" aria-labelledby="sentence-reader-title">
+    <section id="sentence-reader-dialog" class="compact-dialog">
+      <header class="sentence-reader-header">
+        <div><h2 id="sentence-reader-title" data-i18n="reader.title">Sentence reader</h2><p id="sentence-reader-position">Sentence 1 of 1</p></div>
+        <button id="sentence-reader-close" type="button" aria-label="Close sentence reader" data-i18n-aria-label="reader.close">×</button>
+      </header>
+      <div class="sentence-reader-body">
+        <p class="sentence-reader-help" data-i18n="reader.help">Focus on one sentence at a time. Select a word to comment on that word; leave all words unselected to comment on the whole sentence.</p>
+        <article id="sentence-reader-text" tabindex="0" aria-live="polite"></article>
+        <div id="sentence-reader-selection" data-i18n="reader.scopeSentence">Current scope: whole sentence</div>
+        <label for="sentence-reader-comment" data-i18n="reader.comment">Revision comment</label>
+        <textarea id="sentence-reader-comment" rows="4" placeholder="Describe how this sentence should be revised…" data-i18n-placeholder="reader.commentPlaceholder"></textarea>
+        <div class="sentence-reader-actions">
+          <button id="sentence-reader-prev" type="button" data-i18n="reader.previous">← Previous sentence</button>
+          <button id="sentence-reader-next" type="button" data-i18n="reader.next">Next sentence →</button>
+          <button id="sentence-reader-submit" class="primary" type="button" data-i18n="reader.queue">Add to revision queue</button>
+        </div>
+      </div>
+    </section>
+  </div>
+
   <div id="agent-config-overlay" class="hidden compact-overlay" role="dialog" aria-modal="true" aria-labelledby="agent-config-title">
     <section class="compact-dialog">
-      <div class="library-header"><div><h2 id="agent-config-title">Agent Configuration</h2><p>Configure local CLI Agents; unavailable adapters retain the same interface shape</p></div><button id="agent-config-close" aria-label="Close">×</button></div>
+      <div class="library-header"><div><h2 id="agent-config-title" data-i18n="agentConfig.title">Agent Configuration</h2><p data-i18n="agentConfig.subtitle">Configure local CLI Agents; unavailable adapters retain the same interface shape</p></div><button id="agent-config-close" aria-label="Close">×</button></div>
       <div class="compact-dialog-body">
         <div id="agent-provider-list"></div>
         <form id="agent-config-form">
-          <label for="agent-config-provider">Provider</label>
+          <label for="agent-config-provider" data-i18n="agentConfig.provider">Provider</label>
           <select id="agent-config-provider"></select>
-          <label for="agent-config-command">CLI command</label>
+          <label for="agent-config-command" data-i18n="agentConfig.command">CLI command</label>
           <input id="agent-config-command" placeholder="codex">
-          <label for="agent-config-model">Model override</label>
+          <label for="agent-config-model" data-i18n="agentConfig.model">Model override</label>
           <input id="agent-config-model" placeholder="Use the CLI default">
-          <label for="agent-config-args">Prefix args (one per line)</label>
+          <label for="agent-config-args" data-i18n="agentConfig.args">Prefix args (one per line)</label>
           <textarea id="agent-config-args" rows="3"></textarea>
-          <p id="agent-config-note"></p>
+          <p id="agent-config-note" aria-live="polite"></p>
           <div class="agent-config-actions">
-            <button id="agent-config-probe" type="button">Check connection</button>
-            <button type="submit" class="primary">Save and use</button>
+            <button id="agent-config-probe" type="button" data-i18n="agentConfig.check">Check setup</button>
+            <button id="agent-config-save" type="submit" class="primary" data-i18n="agentConfig.save">Save and use</button>
           </div>
         </form>
       </div>
@@ -37,17 +65,27 @@
 
   <div id="prompt-preview-overlay" class="hidden compact-overlay" role="dialog" aria-modal="true" aria-labelledby="prompt-preview-title">
     <section class="compact-dialog prompt-dialog">
-      <div class="library-header"><div><h2 id="prompt-preview-title">Full Prompt Context</h2><p id="prompt-preview-meta">Not generated yet</p></div><button id="prompt-preview-close" aria-label="Close">×</button></div>
-      <pre id="prompt-preview-content">Prompt not generated yet.</pre>
+      <div class="library-header"><div><h2 id="prompt-preview-title" data-i18n="promptPreview.title">Final Agent Prompt</h2><p id="prompt-preview-meta" data-i18n="promptPreview.empty">Not generated yet</p></div><button id="prompt-preview-close" aria-label="Close">×</button></div>
+      <pre id="prompt-preview-content" data-i18n="promptPreview.bodyEmpty">Prompt not generated yet.</pre>
     </section>
   </div>
 
   <div id="invoke-confirm-overlay" class="hidden compact-overlay" role="dialog" aria-modal="true" aria-labelledby="invoke-confirm-title">
     <section class="compact-dialog confirm-dialog">
-      <div class="library-header"><div><h2 id="invoke-confirm-title">Confirm Agent Invocation</h2><p>The Prompt Context and Temporary Prompt will be merged and sent to the active Agent.</p></div><button id="invoke-confirm-close" aria-label="Close">×</button></div>
+      <div class="library-header"><div><h2 id="invoke-confirm-title" data-i18n="invoke.title">Confirm Agent Invocation</h2><p data-i18n="invoke.subtitle">The queued modification intents, temporary prompt, and managed context will be sent as one final prompt.</p></div><button id="invoke-confirm-close" aria-label="Close">×</button></div>
       <div class="confirm-dialog-body">
-        <p id="invoke-confirm-summary">Preparing prompt…</p>
-        <div class="confirm-actions"><button id="invoke-cancel" type="button">Cancel</button><button id="invoke-confirm" class="primary" type="button">Confirm</button></div>
+        <p id="invoke-confirm-summary" data-i18n="invoke.preparing">Preparing prompt…</p>
+        <div class="confirm-actions"><button id="invoke-cancel" type="button" data-i18n="invoke.cancel">Cancel</button><button id="invoke-confirm" class="primary" type="button" data-i18n="invoke.confirm">Confirm</button></div>
+      </div>
+    </section>
+  </div>
+
+  <div id="change-history-overlay" class="hidden compact-overlay" role="dialog" aria-modal="true" aria-labelledby="change-history-title">
+    <section id="change-history-dialog" class="compact-dialog">
+      <div class="library-header"><div><h2 id="change-history-title" data-i18n="history.title">Change history</h2><p data-i18n="history.subtitle">Preview and restore any of the five most recent paper versions.</p></div><div class="change-history-header-actions"><button id="change-history-refresh" type="button" data-i18n="history.refresh">Refresh</button><button id="change-history-close" type="button" aria-label="Close">×</button></div></div>
+      <div id="change-history-body">
+        <aside id="change-history-list"><div class="outline-empty" data-i18n="history.loading">Loading change history…</div></aside>
+        <main id="change-history-detail"><div class="change-history-empty"><strong data-i18n="history.select">Select a version</strong><p data-i18n="history.selectHelp">Open a version to inspect its changes without altering the paper.</p></div></main>
       </div>
     </section>
   </div>
@@ -231,7 +269,7 @@
           <label for="panel-name">Round name</label>
           <input id="panel-name" value="Independent peer review">
           <label for="panel-provider">Agent provider</label>
-          <select id="panel-provider"><option value="mock">Mock</option><option value="codex">Codex</option><option value="claude-code">Claude Code</option><option value="opencode">OpenCode</option></select>
+          <select id="panel-provider"><option value="mock">Mock</option><option value="codex">Codex</option><option value="claude-code">Claude Code</option><option value="opencode">OpenCode</option><option value="pi">Pi Agent</option></select>
           <div class="builder-heading"><h3>Reviewers</h3><span>Select 1–8</span></div>
           <div id="reviewer-builder"><div class="outline-empty">Loading profiles...</div></div>
           <details class="custom-builder"><summary>Add custom reviewer</summary>

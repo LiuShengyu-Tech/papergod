@@ -4,6 +4,7 @@ import { mkdir, readFile, rename, writeFile } from 'fs/promises';
 import { sanitizePath } from './security.js';
 import { loadProject, updateProject } from './project-store.js';
 import { syncDocumentStructure } from './document-structure.js';
+import { getHistoricalRevisionSource } from './change-history.js';
 import { createAgentRun, updateAgentRun } from './project-resources.js';
 import { runReviewOrchestrationAgent } from './agent-adapters.js';
 
@@ -306,7 +307,7 @@ export async function decideRevisionChanges(workspaceRoot, revisionId, decisions
       if (decision.after !== undefined) {
         if (typeof decision.after !== 'string') throw problem('after must be a string');
         change.after = decision.after;
-        change.executable = Boolean(change.before && change.after && change.before !== change.after);
+        change.executable = typeof change.before === 'string' && typeof change.after === 'string' && change.before !== change.after;
       }
       if (decision.status === 'accepted' && !change.executable) throw problem('A change needs distinct before/after text before it can be accepted');
       change.status = decision.status;
@@ -343,7 +344,7 @@ function validateAcceptedChanges(content, changes) {
   const sorted = [...changes].sort((a, b) => b.target.start - a.target.start);
   for (let index = 0; index < sorted.length; index += 1) {
     const change = sorted[index];
-    if (!change.executable || typeof change.before !== 'string' || !change.after || change.before === change.after) throw problem(`Change ${change.id} is not executable`);
+    if (!change.executable || typeof change.before !== 'string' || typeof change.after !== 'string' || change.before === change.after) throw problem(`Change ${change.id} is not executable`);
     if (content.slice(change.target.start, change.target.end) !== change.before) {
       throw problem(`Source text changed for ${change.id}; create a new revision plan`, 409, 'STALE_CHANGE');
     }
@@ -447,6 +448,31 @@ export async function rollbackRevision(workspaceRoot, revisionId) {
   });
 }
 
+export async function restoreRevisionVersion(workspaceRoot, revisionId) {
+  const historical = await getHistoricalRevisionSource(workspaceRoot, revisionId);
+  const safe = sanitizePath(historical.document.file, workspaceRoot);
+  if (!safe) throw problem('Access denied', 403);
+  const current = await readFile(safe, 'utf-8');
+  if (current === historical.source) throw problem('This version is already current', 409);
+  const timestamp = now();
+  const changeId = id('change');
+  const revision = {
+    id: id('revision'), documentId: historical.document.id, file: historical.document.file,
+    title: `Restore version · ${historical.revision.title || historical.revision.id}`,
+    summary: `Restore the paper to version ${historical.revision.id} while preserving the current paper as a recovery point.`,
+    status: 'review', annotationIds: [],
+    changes: [{
+      id: changeId, target: { type: 'range', id: historical.document.id, start: 0, end: current.length, quote: current },
+      before: current, after: historical.source, reason: `Restore historical version ${historical.revision.id}.`,
+      status: 'accepted', executable: true, dependsOn: [], conflictsWith: [],
+    }],
+    graph: { nodes: [changeId], edges: [] }, recoveryPoint: null, origin: 'history-restore',
+    restoredRevisionId: historical.revision.id, createdAt: timestamp, updatedAt: timestamp,
+  };
+  await updateProject(workspaceRoot, (draft) => draft.revisions.push(revision));
+  return applyRevision(workspaceRoot, revision.id);
+}
+
 export async function applySuggestionAsRevision(workspaceRoot, file, suggestion) {
   if (!suggestion || typeof suggestion.originalText !== 'string' || typeof suggestion.suggestedText !== 'string') {
     throw problem('Suggestion not found', 404);
@@ -474,6 +500,42 @@ export async function applySuggestionAsRevision(workspaceRoot, file, suggestion)
     createdAt: timestamp, updatedAt: timestamp,
   };
   if (!revision.changes[0].executable) throw problem('Suggestion does not change the source');
+  await updateProject(workspaceRoot, (draft) => draft.revisions.push(revision));
+  return applyRevision(workspaceRoot, revision.id);
+}
+
+export async function applySuggestionsAsRevision(workspaceRoot, file, suggestions) {
+  if (!Array.isArray(suggestions) || !suggestions.length) throw problem('No suggestions to apply');
+  const document = await syncDocumentStructure(workspaceRoot, file);
+  const safe = sanitizePath(file, workspaceRoot); if (!safe) throw problem('Access denied', 403);
+  const content = await readFile(safe, 'utf-8');
+  const candidateChanges = suggestions.map((suggestion) => {
+    if (!suggestion || typeof suggestion.originalText !== 'string' || typeof suggestion.suggestedText !== 'string') throw problem('Suggestion not found', 404);
+    if (suggestion.file && suggestion.file !== file) throw problem('Suggestion belongs to a different file', 409);
+    let start = suggestion.sourceRange?.start;
+    let end = suggestion.sourceRange?.end;
+    if (!Number.isInteger(start) || !Number.isInteger(end)) {
+      start = content.indexOf(suggestion.originalText); end = start + suggestion.originalText.length;
+    }
+    if (start < 0 || content.slice(start, end) !== suggestion.originalText) throw problem('Source text changed; generate new suggestions', 409, 'STALE_CHANGE');
+    return {
+      id: id('change'), target: { type: 'range', id: suggestion.nodeId || document.id, start, end, quote: suggestion.originalText },
+      before: suggestion.originalText, after: suggestion.suggestedText,
+      reason: suggestion.reason || suggestion.description || 'Agent suggestion', status: 'accepted', executable: suggestion.originalText !== suggestion.suggestedText,
+      dependsOn: [], conflictsWith: [],
+    };
+  });
+  const changes = [];
+  for (const candidate of candidateChanges) {
+    if (candidate.executable && !changes.some((accepted) => overlap(candidate, accepted))) changes.push(candidate);
+  }
+  if (!changes.length) throw problem('No non-overlapping source changes to apply');
+  const timestamp = now();
+  const revision = {
+    id: id('revision'), documentId: document.id, file, title: `AI revision · ${changes.length} change${changes.length === 1 ? '' : 's'}`,
+    summary: `Applied ${changes.length} Agent suggestion${changes.length === 1 ? '' : 's'} as one atomic revision.`, status: 'review', annotationIds: [], changes,
+    graph: { nodes: changes.map((item) => item.id), edges: [] }, recoveryPoint: null, origin: 'agent-batch', createdAt: timestamp, updatedAt: timestamp,
+  };
   await updateProject(workspaceRoot, (draft) => draft.revisions.push(revision));
   return applyRevision(workspaceRoot, revision.id);
 }
