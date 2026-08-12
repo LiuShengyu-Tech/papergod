@@ -40,6 +40,40 @@
     </section>
   </div>
 
+  <div id="references-overlay" class="hidden compact-overlay" role="dialog" aria-modal="true" aria-labelledby="references-title">
+    <section id="references-dialog" class="compact-dialog">
+      <div class="library-header"><div><h2 id="references-title" data-i18n="references.title">References</h2><p data-i18n="references.subtitle">One searchable citation library from local papers and Zotero Desktop.</p></div><button id="references-close" type="button" aria-label="Close">×</button></div>
+      <div class="references-toolbar">
+        <input id="references-search" type="search" data-i18n-placeholder="references.search" placeholder="Search title, author, year, DOI, or citekey…">
+        <button id="references-write-bib" type="button" data-i18n="references.writeBib">Update references.bib</button>
+        <button id="references-check" type="button" data-i18n="references.check">Check citations</button>
+        <button id="references-insert-selected" class="primary" type="button" data-i18n="references.insertSelected">Insert selected</button>
+      </div>
+      <div class="references-body">
+        <aside class="references-sources">
+          <section><h3 data-i18n="references.folderSource">Literature folders</h3><p data-i18n="references.folderHelp">Scan BibTeX and PDF files recursively. Uncertain PDF matches remain marked for review.</p>
+            <form id="references-folder-form"><div class="reference-folder-path-row"><input id="references-folder-path" type="text" placeholder="/absolute/path/to/papers" required><button id="references-folder-browse" type="button" data-i18n="workspace.browse">Browse…</button></div><button type="submit" data-i18n="references.addScan">Add &amp; scan</button></form>
+            <div id="references-folders"><div class="outline-empty" data-i18n="references.noFolders">No folders configured.</div></div>
+            <button id="references-rescan" type="button" data-i18n="references.rescan">Rescan folders</button>
+          </section>
+          <section><div class="reference-source-heading"><h3>Zotero Desktop</h3><span id="zotero-status">—</span></div><p data-i18n="references.zoteroHelp">Read the local Zotero library without cloud credentials.</p>
+            <button id="zotero-connect" type="button" data-i18n="references.connectZotero">Connect Zotero</button>
+            <select id="zotero-collection" class="hidden"><option value="" data-i18n="references.allZotero">All Zotero items</option></select>
+            <div class="zotero-search-row hidden" id="zotero-search-row"><input id="zotero-search" type="search" placeholder="Search Zotero…"><button id="zotero-search-button" type="button" data-i18n="references.searchButton">Search</button></div>
+            <div id="zotero-results"></div>
+          </section>
+        </aside>
+        <main class="references-library">
+          <div class="references-summary"><span id="references-count">0 references</span><span id="references-bib-file">references.bib</span></div>
+          <div id="references-check-result" class="hidden"></div>
+          <button id="references-add-setup" class="hidden" type="button" data-i18n="references.addSetup">Add bibliography setup to paper</button>
+          <div id="references-list"><div class="outline-empty" data-i18n="references.loading">Loading references…</div></div>
+        </main>
+      </div>
+      <div id="references-note" role="status" aria-live="polite"></div>
+    </section>
+  </div>
+
   <div id="pdf-edit-menu" class="hidden" role="dialog" aria-label="PDF revision comment">
     <div class="pdf-scope-options"><button data-pdf-scope="word" data-i18n="pdf.word">Word</button><button data-pdf-scope="sentence" data-i18n="pdf.sentence">Sentence</button><button data-pdf-scope="paragraph" data-i18n="pdf.paragraph">Paragraph</button><button id="pdf-sentence-reader-open" type="button" data-i18n="pdf.reader">Sentence reader</button></div>
     <blockquote id="pdf-edit-quote"></blockquote>

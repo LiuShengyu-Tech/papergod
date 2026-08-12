@@ -7,6 +7,8 @@ import { generateSuggestions, applySuggestionToContent } from '../src/server/age
 import { PROJECT_SCHEMA_VERSION, createDefaultProject, migrateProjectData, validateProject } from '../src/server/project-store.js';
 import { parseCliArgs, resolveStartupWorkspace } from '../src/cli.js';
 import { initializeWorkspace } from '../src/server/workspace.js';
+import { buildCitationContext, checkCitations, findUnknownAgentCitations, parseBibTeX, scanReferenceFolder, serializeReference } from '../src/server/references.js';
+import { enrichZoteroAttachment, exportBetterBibTeX, getZoteroFullText, getZoteroStatus, listZoteroCollections, searchZoteroItems } from '../src/server/zotero.js';
 import { PAPER_GENERATION_OUTPUT_SCHEMA, REVIEW_ORCHESTRATION_OUTPUT_SCHEMA, SUGGESTION_OUTPUT_SCHEMA, detectAgentProviders, parseAgentJson, parsePaperGenerationJson, parseReviewAgentJson, parseReviewOrchestrationJson, runAcademicReviewAgent, runPaperGenerationAgent, runProcess, runReviewOrchestrationAgent, runWritingAgent, validatePaperGenerationResponse, validateReviewOrchestrationResponse, validateReviewResponse, validateSuggestionResponse } from '../src/server/agent-adapters.js';
 import { parseLatexDocument } from '../src/server/latex-structure.js';
 import { buildLibraryContext, composeMockParagraph, extractLibraryCandidates, mergedVocabulary, renderSentencePattern, searchLibraries } from '../src/server/library-engine.js';
@@ -484,12 +486,15 @@ test('React workbench and legacy overlays expose the complete writing workflow',
   assert.ok(workbench.includes('id="navigator-outline-tab"'));
   assert.ok(workbench.includes('id="navigator-tools-tab"'));
   assert.ok(workbench.includes('id="tool-workspaces"'));
+  assert.ok(workbench.includes('id="tool-references"'));
   assert.ok(workbench.includes('id="tool-terminal"'));
   assert.ok(html.includes('id="workspace-manager-overlay"'));
   assert.ok(html.includes('id="workspace-add-form"'));
   assert.ok(html.includes('id="workspace-browser"'));
   assert.ok(html.includes('id="terminal-overlay"'));
   assert.ok(html.includes('id="terminal-screen"'));
+  assert.ok(html.includes('id="references-overlay"'));
+  assert.ok(html.includes('id="references-list"'));
   assert.ok(workbench.includes('id="tool-open-folder"'));
   assert.ok(workbench.includes('id="tool-show-source"'));
   assert.ok(workbench.includes('id="tool-change-history"'));
@@ -574,6 +579,8 @@ test('React workbench and legacy overlays expose the complete writing workflow',
   assert.equal(reactTheme.status, 200);
   const appSource = await (await fetch(baseUrl + '/app.js')).text();
   const i18nSource = await (await fetch(baseUrl + '/i18n.js')).text();
+  assert.ok(appSource.includes("'/api/references/bibliography'"));
+  assert.ok(appSource.includes('selectedReferenceCitekeys'));
   assert.ok(i18nSource.includes("const DEFAULT_LOCALE = 'en'"));
   assert.ok(i18nSource.includes("'zh-CN'"));
   assert.ok(i18nSource.includes("papergod.locale"));
@@ -769,6 +776,90 @@ test('Workspace terminal runs an interactive command in the active workspace', a
   assert.match(output, /PAPERGOD_TERMINAL_OK/);
   const stopped = await api(`/api/terminal/${encodeURIComponent(id)}`, { method: 'DELETE' });
   assert.equal(stopped.status, 200);
+});
+
+test('Reference core parses nested BibTeX, serializes records, and validates LaTeX citekeys', () => {
+  const source = `@article{smith2024reliable,
+    title = {A {Reliable} Reference Pipeline},
+    author = {Smith, Jane and Doe, John},
+    year = {2024},
+    doi = {10.1234/example.42}
+  }`;
+  const items = parseBibTeX(source, '/papers/library.bib');
+  assert.equal(items.length, 1);
+  assert.equal(items[0].title, 'A Reliable Reference Pipeline');
+  assert.deepEqual(items[0].authors, ['Smith, Jane', 'Doe, John']);
+  assert.equal(items[0].doi, '10.1234/example.42');
+  assert.match(serializeReference(items[0]), /@article\{smith2024reliable/);
+  const check = checkCitations('Evidence \\cite{smith2024reliable,missing2025}.\\bibliography{references}', items);
+  assert.deepEqual(check.cited, ['smith2024reliable', 'missing2025']);
+  assert.deepEqual(check.missing, ['missing2025']);
+  assert.equal(check.bibliographyConfigured, true);
+  assert.match(buildCitationContext(items, ['smith2024reliable']), /Only use citation keys listed above/);
+  assert.deepEqual(findUnknownAgentCitations([{ suggestedText: '\\cite{smith2024reliable,invented2026}' }], '', items), ['invented2026']);
+  assert.deepEqual(findUnknownAgentCitations([{ suggestedText: '\\cite{legacyKey}' }], '\\cite{legacyKey}', []), []);
+});
+
+test('Reference folder and API form a BibTeX import, write, and citation-check workflow', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'papergod-references-'));
+  const paper = join(root, 'paper');
+  const literature = join(root, 'literature');
+  await mkdir(paper); await mkdir(literature);
+  await writeFile(join(paper, 'main.tex'), '\\documentclass{article}\\begin{document}\\cite{alpha2023,missing}\\bibliography{references}\\end{document}', 'utf8');
+  await writeFile(join(literature, 'sources.bib'), '@article{alpha2023,title={Alpha Study},author={Ada Alpha},year={2023},doi={10.1000/alpha}}\n@inproceedings{beta2024,title={Beta Study},author={Bob Beta},year={2024}}', 'utf8');
+  const scanned = await scanReferenceFolder(literature);
+  assert.equal(scanned.items.length, 2);
+  const referenceApp = createApp(paper, { workspaceRegistryFile: join(root, 'registry.json') });
+  const referenceServer = await new Promise((resolveListen) => {
+    const instance = referenceApp.listen(0, '127.0.0.1', () => resolveListen(instance));
+  });
+  const url = `http://127.0.0.1:${referenceServer.address().port}`;
+  const call = async (path, options = {}) => {
+    const response = await fetch(url + path, { method: options.method || 'GET', headers: { 'Content-Type': 'application/json' }, body: options.body ? JSON.stringify(options.body) : undefined });
+    return { response, data: await response.json() };
+  };
+  try {
+    let result = await call('/api/references/folders', { method: 'POST', body: { path: literature } });
+    assert.equal(result.response.status, 201);
+    assert.equal(result.data.state.items.length, 2);
+    result = await call('/api/references/bibliography', { method: 'POST' });
+    assert.equal(result.data.count, 2);
+    assert.match(await readFile(join(paper, 'references.bib'), 'utf8'), /alpha2023/);
+    result = await call('/api/references/check', { method: 'POST', body: { file: 'main.tex' } });
+    assert.deepEqual(result.data.missing, ['missing']);
+    result = await call('/api/references?q=beta');
+    assert.equal(result.data.items.length, 1);
+  } finally {
+    await new Promise((resolveClose) => referenceServer.close(resolveClose));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Zotero adapter detects Better BibTeX, searches collections, and reads PDF full text', async () => {
+  const fakeFetch = async (url, options = {}) => {
+    const value = String(url);
+    if (value.endsWith('/api/')) return new Response('{}', { headers: { 'Zotero-API-Version': '3', 'Zotero-Server-ID': 'test-server' } });
+    if (value.includes('/better-bibtex/')) {
+      const requestBody = JSON.parse(options.body);
+      return Response.json({ jsonrpc: '2.0', id: 1, result: requestBody.method === 'item.export' ? '@article{smith2025zotero,title={Zotero Paper},year={2025}}' : { zotero: '8.0', betterbibtex: '8.1' } });
+    }
+    if (value.includes('/collections?')) return Response.json([{ key: 'COLL0001', version: 2, data: { name: 'Paper Sources', parentCollection: false } }]);
+    if (value.includes('/items/top?')) return Response.json([{ key: 'ITEM0001', version: 3, data: { itemType: 'journalArticle', title: 'Zotero Paper', creators: [{ firstName: 'Jane', lastName: 'Smith' }], date: '2025', DOI: '10.1000/zotero', citationKey: 'smith2025zotero', publicationTitle: 'Test Journal' } }]);
+    if (value.endsWith('/items/ITEM0001/children')) return Response.json([{ key: 'PDF00001', data: { itemType: 'attachment', contentType: 'application/pdf', title: 'Full Text PDF' } }]);
+    if (value.endsWith('/items/PDF00001/fulltext')) return Response.json({ content: 'Indexed Zotero PDF content', indexedPages: 4, totalPages: 4 });
+    return new Response('not found', { status: 404 });
+  };
+  const options = { baseUrl: 'http://zotero.test', fetchImpl: fakeFetch };
+  const status = await getZoteroStatus(options);
+  assert.equal(status.connected, true);
+  assert.equal(status.betterBibtex.betterbibtex, '8.1');
+  assert.equal((await listZoteroCollections(options))[0].name, 'Paper Sources');
+  const items = await searchZoteroItems(options);
+  assert.equal(items[0].citekey, 'smith2025zotero');
+  const enriched = await enrichZoteroAttachment(items[0], options);
+  assert.equal(enriched.attachmentKey, 'PDF00001');
+  assert.match((await getZoteroFullText('PDF00001', options)).content, /Indexed Zotero/);
+  assert.match(await exportBetterBibTeX(['smith2025zotero'], options), /@article/);
 });
 
 test('initializeWorkspace adopts an existing TeX document', async () => {

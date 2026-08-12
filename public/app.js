@@ -63,6 +63,9 @@ let terminalView = null;
 let terminalFitAddon = null;
 let terminalEvents = null;
 let terminalResizeObserver = null;
+let referenceData = null;
+let zoteroReferenceResults = [];
+let selectedReferenceCitekeys = new Set();
 
 class ModificationIntent {
   constructor(annotation) {
@@ -1446,6 +1449,129 @@ async function openWorkspaceManager() {
   try { await loadWorkspaces(); } catch (error) { setWorkspaceManagerNote(error.message, 'error'); }
 }
 
+function setReferencesNote(message = '', type = '') {
+  const note = document.getElementById('references-note');
+  note.textContent = message;
+  note.className = type;
+}
+
+async function referenceRequest(path, options = {}) {
+  const res = await fetch(path, { ...options, headers: options.body ? { 'Content-Type': 'application/json', ...(options.headers || {}) } : options.headers });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Reference operation failed');
+  return data;
+}
+
+function renderReferenceFolders() {
+  const folders = referenceData?.folders || [];
+  document.getElementById('references-folders').innerHTML = folders.length
+    ? folders.map((folder) => `<div class="reference-folder"><code title="${escapeHtml(folder)}">${escapeHtml(folder)}</code><button type="button" data-remove-reference-folder="${escapeHtml(folder)}" aria-label="Remove">×</button></div>`).join('')
+    : `<div class="outline-empty">${escapeHtml(t('references.noFolders'))}</div>`;
+}
+
+function renderReferences() {
+  const items = referenceData?.items || [];
+  document.getElementById('references-count').textContent = `${items.length} reference${items.length === 1 ? '' : 's'}`;
+  document.getElementById('references-bib-file').textContent = referenceData?.bibliographyFile || 'references.bib';
+  renderReferenceFolders();
+  const list = document.getElementById('references-list');
+  if (!items.length) return void (list.innerHTML = '<div class="outline-empty">No references yet. Add a literature folder or connect Zotero.</div>');
+  list.innerHTML = items.map((item) => {
+    const selected = selectedReferenceCitekeys.has(item.citekey);
+    const status = item.status || 'needs-review';
+    return `<article class="reference-card ${escapeHtml(status)}" data-reference-id="${escapeHtml(item.id)}">
+      <label class="reference-select"><input type="checkbox" data-reference-select="${escapeHtml(item.citekey)}"${selected ? ' checked' : ''}><span></span></label>
+      <div class="reference-copy"><div class="reference-card-head"><strong>${escapeHtml(item.title || 'Untitled reference')}</strong><span class="reference-status">${escapeHtml(status.replace('-', ' '))}</span></div>
+      <p>${escapeHtml((item.authors || []).join('; ') || 'Unknown author')}${item.year ? ` · ${escapeHtml(item.year)}` : ''}</p>
+      <div class="reference-meta"><code>${escapeHtml(item.citekey)}</code><span>${escapeHtml(item.source)}</span>${item.doi ? `<span>DOI ${escapeHtml(item.doi)}</span>` : ''}${item.hasPdf ? '<span>PDF</span>' : ''}</div></div>
+      <div class="reference-actions"><button type="button" data-insert-cite="${escapeHtml(item.citekey)}">Insert</button><button type="button" data-edit-reference>Edit</button>${item.doi && item.status !== 'verified' ? '<button type="button" data-resolve-reference>Verify DOI</button>' : ''}<label><input type="checkbox" data-include-reference${item.included === false ? '' : ' checked'}> BibTeX</label></div>
+    </article>`;
+  }).join('');
+}
+
+async function loadReferences(query = '') {
+  referenceData = await referenceRequest('/api/references' + (query ? `?q=${encodeURIComponent(query)}` : ''));
+  renderReferences();
+  return referenceData;
+}
+
+async function openReferences() {
+  document.getElementById('references-overlay').classList.remove('hidden');
+  setReferencesNote();
+  try { await loadReferences(); } catch (error) { setReferencesNote(error.message, 'error'); }
+}
+
+function insertCitations(citekeys) {
+  const keys = [...new Set(citekeys)].filter(Boolean);
+  if (!keys.length) return setReferencesNote('Select at least one reference.', 'error');
+  setWorkspaceView('source');
+  editor.replaceSelection(`\\cite{${keys.join(',')}}`);
+  editor.focus();
+  schedulePromptContextPreview();
+  setReferencesNote(`Inserted \\cite{${keys.join(',')}}`, 'success');
+}
+
+function renderZoteroResults() {
+  const target = document.getElementById('zotero-results');
+  target.innerHTML = zoteroReferenceResults.length ? zoteroReferenceResults.map((item, index) => `<article class="zotero-result"><div><strong>${escapeHtml(item.title || 'Untitled')}</strong><p>${escapeHtml((item.authors || []).join('; ') || 'Unknown author')}${item.year ? ` · ${escapeHtml(item.year)}` : ''}</p><code>${escapeHtml(item.citekey)}</code></div><button type="button" data-import-zotero="${index}">Add</button></article>`).join('') : '<div class="outline-empty">No Zotero results.</div>';
+}
+
+async function searchZotero() {
+  const query = document.getElementById('zotero-search').value.trim();
+  const collectionKey = document.getElementById('zotero-collection').value;
+  document.getElementById('zotero-results').innerHTML = '<div class="outline-empty">Searching Zotero…</div>';
+  const data = await referenceRequest(`/api/references/zotero/items?q=${encodeURIComponent(query)}&collectionKey=${encodeURIComponent(collectionKey)}`);
+  zoteroReferenceResults = data.items || [];
+  renderZoteroResults();
+}
+
+async function connectZotero() {
+  const status = document.getElementById('zotero-status');
+  status.textContent = 'Connecting…';
+  try {
+    const data = await referenceRequest('/api/references/zotero/status');
+    status.textContent = data.status.betterBibtex ? 'Connected · Better BibTeX' : 'Connected';
+    status.className = 'connected';
+    const dataCollections = await referenceRequest('/api/references/zotero/collections');
+    const select = document.getElementById('zotero-collection');
+    select.innerHTML = `<option value="">${escapeHtml(t('references.allZotero'))}</option>` + dataCollections.collections.map((item) => `<option value="${escapeHtml(item.key)}">${escapeHtml(item.name)}</option>`).join('');
+    select.value = referenceData?.zotero?.collectionKey || '';
+    select.classList.remove('hidden');
+    document.getElementById('zotero-search-row').classList.remove('hidden');
+    await searchZotero();
+  } catch (error) { status.textContent = 'Unavailable'; status.className = 'error'; setReferencesNote(error.message, 'error'); }
+}
+
+async function importZoteroReference(index) {
+  const reference = zoteroReferenceResults[index];
+  if (!reference) return;
+  setReferencesNote('Importing Zotero reference…');
+  await referenceRequest('/api/references/zotero/import', { method: 'POST', body: JSON.stringify({ references: [reference] }) });
+  await referenceRequest('/api/references/bibliography', { method: 'POST' });
+  await loadReferences(document.getElementById('references-search').value.trim());
+  setReferencesNote(`Added ${reference.citekey} and updated the bibliography.`, 'success');
+}
+
+async function checkCurrentCitations() {
+  if (!await saveFile()) return;
+  const result = await referenceRequest('/api/references/check', { method: 'POST', body: JSON.stringify({ file: currentFile }) });
+  const target = document.getElementById('references-check-result');
+  target.classList.remove('hidden');
+  target.innerHTML = `<strong>${result.missing.length ? `${result.missing.length} missing citekey(s)` : 'All citation keys resolve'}</strong><p>${result.missing.length ? `Missing: ${escapeHtml(result.missing.join(', '))}` : `${result.cited.length} cited · ${result.uncited.length} uncited in bibliography`}</p>`;
+  document.getElementById('references-add-setup').classList.toggle('hidden', result.bibliographyConfigured);
+}
+
+function addBibliographySetup() {
+  const source = editor.getValue();
+  if (/\\(?:bibliography|addbibresource)\s*\{/.test(source)) return;
+  const bib = (referenceData?.bibliographyFile || 'references.bib').replace(/\.bib(?:tex)?$/i, '');
+  const setup = `\n\\bibliographystyle{plain}\n\\bibliography{${bib}}\n`;
+  const end = source.lastIndexOf('\\end{document}');
+  editor.setValue(end >= 0 ? source.slice(0, end) + setup + source.slice(end) : source + setup);
+  document.getElementById('references-add-setup').classList.add('hidden');
+  setReferencesNote('Bibliography setup added. Save and compile to verify it.', 'success');
+}
+
 async function switchWorkspaceRequest(url, options = {}) {
   setWorkspaceManagerNote(t('workspace.switching'));
   const saved = await saveFile();
@@ -1648,6 +1774,7 @@ async function refreshPromptContextPreview() {
         content: selectedId ? '' : editor.getValue(),
         temporaryPrompt: combinedTemporaryPrompt(),
         resourceIds: [...selectedResourceIds],
+        citekeys: [...selectedReferenceCitekeys],
       }),
     });
     const data = await res.json();
@@ -2978,8 +3105,8 @@ async function askAgent(composedPrompt = null, isComposed = Boolean(composedProm
       headers: { 'Content-Type': 'application/json' },
       signal: agentActivityController.signal,
       body: JSON.stringify(selectedId
-        ? { nodeId: selectedId, prompt, promptIsComposed: isComposed, resourceIds: [...selectedResourceIds], activityId: agentActivityId }
-        : { documentId: currentDocument?.id, content, prompt, promptIsComposed: isComposed, resourceIds: [...selectedResourceIds], activityId: agentActivityId }),
+        ? { nodeId: selectedId, prompt, promptIsComposed: isComposed, resourceIds: [...selectedResourceIds], citekeys: [...selectedReferenceCitekeys], activityId: agentActivityId }
+        : { documentId: currentDocument?.id, content, prompt, promptIsComposed: isComposed, resourceIds: [...selectedResourceIds], citekeys: [...selectedReferenceCitekeys], activityId: agentActivityId }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Agent request failed');
@@ -3154,6 +3281,7 @@ function init() {
   document.getElementById('navigator-tools-tab').addEventListener('click', () => setNavigatorTab('tools'));
   document.getElementById('tool-show-source').addEventListener('click', () => setWorkspaceView('source'));
   document.getElementById('tool-workspaces').addEventListener('click', openWorkspaceManager);
+  document.getElementById('tool-references').addEventListener('click', openReferences);
   document.getElementById('tool-terminal').addEventListener('click', openWorkspaceTerminal);
   document.getElementById('tool-compile').addEventListener('click', compileFile);
   document.getElementById('tool-change-history').addEventListener('click', openChangeHistory);
@@ -3228,6 +3356,109 @@ function init() {
       terminalSessionId = null;
       closeTerminalOverlay();
     } catch (error) { document.getElementById('terminal-status').textContent = error.message; }
+  });
+  const closeReferences = () => document.getElementById('references-overlay').classList.add('hidden');
+  document.getElementById('references-close').addEventListener('click', closeReferences);
+  document.getElementById('references-overlay').addEventListener('click', event => { if (event.target.id === 'references-overlay') closeReferences(); });
+  document.getElementById('references-search').addEventListener('input', event => loadReferences(event.target.value.trim()).catch(error => setReferencesNote(error.message, 'error')));
+  document.getElementById('references-folder-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const button = event.currentTarget.querySelector('button');
+    button.disabled = true; setReferencesNote('Scanning literature folder…');
+    try {
+      await referenceRequest('/api/references/folders', { method: 'POST', body: JSON.stringify({ path: document.getElementById('references-folder-path').value.trim() }) });
+      await loadReferences();
+      setReferencesNote('Folder scanned. Review uncertain PDF matches before citing them.', 'success');
+    } catch (error) { setReferencesNote(error.message, 'error'); }
+    finally { button.disabled = false; }
+  });
+  document.getElementById('references-folder-browse').addEventListener('click', async event => {
+    event.currentTarget.disabled = true;
+    try {
+      const data = await referenceRequest('/api/workspaces/pick-folder', { method: 'POST' });
+      document.getElementById('references-folder-path').value = data.path || '';
+    } catch (error) { setReferencesNote(error.message + ' You can paste an absolute path instead.', 'error'); }
+    finally { event.currentTarget.disabled = false; }
+  });
+  document.getElementById('references-rescan').addEventListener('click', async event => {
+    event.currentTarget.disabled = true; setReferencesNote('Rescanning folders…');
+    try { const data = await referenceRequest('/api/references/scan', { method: 'POST' }); await loadReferences(); setReferencesNote(`${data.scans.filter(item => item.ok).length} folder(s) scanned.`, 'success'); }
+    catch (error) { setReferencesNote(error.message, 'error'); }
+    finally { event.currentTarget.disabled = false; }
+  });
+  document.getElementById('references-folders').addEventListener('click', async event => {
+    const button = event.target.closest('[data-remove-reference-folder]');
+    if (!button) return;
+    try { await referenceRequest('/api/references/folders', { method: 'DELETE', body: JSON.stringify({ path: button.dataset.removeReferenceFolder }) }); await loadReferences(); }
+    catch (error) { setReferencesNote(error.message, 'error'); }
+  });
+  document.getElementById('references-list').addEventListener('click', async event => {
+    const insert = event.target.closest('[data-insert-cite]');
+    if (insert) return insertCitations([insert.dataset.insertCite]);
+    const edit = event.target.closest('[data-edit-reference]');
+    if (edit) {
+      const id = edit.closest('[data-reference-id]').dataset.referenceId;
+      const item = referenceData?.items?.find(reference => reference.id === id);
+      if (!item) return;
+      const title = prompt('Reference title', item.title || '');
+      if (title === null) return;
+      const authors = prompt('Authors, separated by semicolons', (item.authors || []).join('; '));
+      if (authors === null) return;
+      const year = prompt('Publication year', item.year || '');
+      if (year === null) return;
+      const doi = prompt('DOI (optional)', item.doi || '');
+      if (doi === null) return;
+      const citekey = prompt('Citation key', item.citekey || '');
+      if (citekey === null) return;
+      try {
+        await referenceRequest(`/api/references/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ title: title.trim(), authors: authors.split(';').map(value => value.trim()).filter(Boolean), year: year.trim(), doi: doi.trim(), citekey: citekey.trim(), status: 'verified' }) });
+        await loadReferences(document.getElementById('references-search').value.trim());
+        setReferencesNote('Reference metadata updated. Regenerate the bibliography when ready.', 'success');
+      } catch (error) { setReferencesNote(error.message, 'error'); }
+      return;
+    }
+    const verify = event.target.closest('[data-resolve-reference]');
+    if (!verify) return;
+    const id = verify.closest('[data-reference-id]').dataset.referenceId;
+    verify.disabled = true; setReferencesNote('Verifying DOI metadata…');
+    try { await referenceRequest(`/api/references/${encodeURIComponent(id)}/resolve`, { method: 'POST' }); await loadReferences(document.getElementById('references-search').value.trim()); setReferencesNote('Metadata verified with Crossref.', 'success'); }
+    catch (error) { setReferencesNote(error.message, 'error'); verify.disabled = false; }
+  });
+  document.getElementById('references-list').addEventListener('change', async event => {
+    if (event.target.matches('[data-reference-select]')) {
+      if (event.target.checked) selectedReferenceCitekeys.add(event.target.dataset.referenceSelect);
+      else selectedReferenceCitekeys.delete(event.target.dataset.referenceSelect);
+      schedulePromptContextPreview();
+      return;
+    }
+    if (!event.target.matches('[data-include-reference]')) return;
+    const id = event.target.closest('[data-reference-id]').dataset.referenceId;
+    try { await referenceRequest(`/api/references/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ included: event.target.checked }) }); }
+    catch (error) { event.target.checked = !event.target.checked; setReferencesNote(error.message, 'error'); }
+  });
+  document.getElementById('references-insert-selected').addEventListener('click', () => insertCitations([...selectedReferenceCitekeys]));
+  document.getElementById('references-write-bib').addEventListener('click', async event => {
+    event.currentTarget.disabled = true;
+    try { const data = await referenceRequest('/api/references/bibliography', { method: 'POST' }); setReferencesNote(`Wrote ${data.count} entries to ${data.file}.`, 'success'); await loadFileTree(); }
+    catch (error) { setReferencesNote(error.message, 'error'); }
+    finally { event.currentTarget.disabled = false; }
+  });
+  document.getElementById('references-check').addEventListener('click', () => checkCurrentCitations().catch(error => setReferencesNote(error.message, 'error')));
+  document.getElementById('references-add-setup').addEventListener('click', addBibliographySetup);
+  document.getElementById('zotero-connect').addEventListener('click', connectZotero);
+  document.getElementById('zotero-search-button').addEventListener('click', () => searchZotero().catch(error => setReferencesNote(error.message, 'error')));
+  document.getElementById('zotero-search').addEventListener('keydown', event => { if (event.key === 'Enter') searchZotero().catch(error => setReferencesNote(error.message, 'error')); });
+  document.getElementById('zotero-collection').addEventListener('change', async event => {
+    try {
+      const zotero = { ...(referenceData?.zotero || {}), collectionKey: event.target.value };
+      await referenceRequest('/api/references/config', { method: 'PUT', body: JSON.stringify({ zotero }) });
+      if (referenceData) referenceData.zotero = zotero;
+      await searchZotero();
+    } catch (error) { setReferencesNote(error.message, 'error'); }
+  });
+  document.getElementById('zotero-results').addEventListener('click', event => {
+    const button = event.target.closest('[data-import-zotero]');
+    if (button) importZoteroReference(Number(button.dataset.importZotero)).catch(error => setReferencesNote(error.message, 'error'));
   });
   document.getElementById('change-history-close').addEventListener('click', () => document.getElementById('change-history-overlay').classList.add('hidden'));
   document.getElementById('change-history-refresh').addEventListener('click', () => loadRecentChangeHistory());
@@ -3419,6 +3650,7 @@ function init() {
       document.getElementById('invoke-confirm-overlay').classList.add('hidden');
       document.getElementById('change-history-overlay').classList.add('hidden');
       document.getElementById('workspace-manager-overlay').classList.add('hidden');
+      document.getElementById('references-overlay').classList.add('hidden');
       closeTerminalOverlay();
       document.getElementById('pdf-edit-menu').classList.add('hidden');
       closeSentenceReader();

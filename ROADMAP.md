@@ -11,6 +11,7 @@ Papergod 是一个可通过 npm 安装和启动的、本地优先的 AI LaTeX �
 | npm 安装并启动本地网页 | 已实现 | 提供 `papergod` bin、`npx papergod [workspace]` 与首次初始化 |
 | 多论文工作区切换 | 已实现 | Tools 中集中添加/切换本地目录，论文、历史、写作库与 Agent 配置按目录隔离 |
 | 工作区目录浏览与终端 | 已实现 | 原生选择器失败时提供受限网页目录浏览；Tools 提供按 workspace 隔离的交互式 PTY/xterm |
+| 文献引用与 Zotero | 已实现（MVP） | 本地 BibTeX/PDF 文件夹扫描、Zotero Desktop/collection 搜索、可选 Better BibTeX 检测、统一 references.bib、citekey 检查与插入 |
 | Overleaf 风格编辑界面 | 已实现（Demo） | 文件栏、CodeMirror、PDF 预览、AI 面板 |
 | LaTeX 编辑、保存与编译 | 已实现（基础） | 支持 `.tex` 文件和多种本地引擎，含安全边界与错误反馈 |
 | Agent 建议、diff、接受/拒绝 | 已实现 | Mock/Codex/Claude Code/OpenCode 统一生成结构化建议，逐条接受或拒绝 |
@@ -28,7 +29,7 @@ Papergod 是一个可通过 npm 安装和启动的、本地优先的 AI LaTeX �
 | 自助 revise | 已实现 | 意见导入、计划执行、可编辑回复信、修改清单、编译复核、未处理检查和导出 |
 | 一键生成论文 | 已实现 | 核心/分层 Prompt、结构大纲和写作库受控生成，全文 diff 审阅后方可应用 |
 | 修改位置与历史 | 已实现 | 最近 5 次版本抽屉、逐块 diff、源码定位、持久 revision、恢复点、校验和与安全回滚 |
-| 自动化测试 | 已实现 | 100 项 API、结构、CLI、工作区切换/目录浏览/PTY 隔离、Agent 配置、写作库、评审、修订、生成、安全和编译测试通过 |
+| 自动化测试 | 已实现 | 103 项 API、结构、CLI、工作区/PTY、BibTeX/Zotero、Agent 配置、写作库、评审、修订、生成、安全和编译测试通过 |
 
 ## 目标架构
 

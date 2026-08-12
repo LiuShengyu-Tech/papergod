@@ -36,6 +36,14 @@ import { initializeWorkspace } from './workspace.js';
 import { createWorkspaceRegistry } from './workspace-registry.js';
 import { browseWorkspaceDirectories } from './workspace-browser.js';
 import { createWorkspaceTerminalManager } from './workspace-terminal.js';
+import {
+  addReferenceFolder, buildCitationContext, checkWorkspaceCitations, configureReferences, findUnknownAgentCitations, importReferences, parseBibTeX,
+  loadReferenceState, removeReferenceFolder, resolveStoredReference, scanAllReferenceFolders,
+  updateReference, writeBibliography,
+} from './references.js';
+import {
+  enrichZoteroAttachment, exportBetterBibTeX, getZoteroFullText, getZoteroStatus, listZoteroCollections, searchZoteroItems,
+} from './zotero.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, '../..');
@@ -192,6 +200,9 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
         workspaceRoot, commands: agentCommands, signal: controller.signal,
         onOutput: (stream, chunk) => appendAgentActivity(activity, stream, chunk),
       });
+      const referenceState = await loadReferenceState(workspaceRoot);
+      const unknownCitekeys = findUnknownAgentCitations(result.suggestions, content, referenceState.items);
+      if (unknownCitekeys.length) throw Object.assign(new Error(`Agent proposed unknown citation keys: ${unknownCitekeys.join(', ')}`), { status: 422, code: 'UNKNOWN_CITATION_KEY' });
       const suggestions = registerSuggestions(result.suggestions);
       attachSuggestionContext(suggestions, { ...context, selectedContent: content });
       await updateAgentRun(workspaceRoot, run.id, {
@@ -369,6 +380,104 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
     });
   });
 
+  const zoteroConnectionOptions = async (overrides = {}) => {
+    const state = await loadReferenceState(workspaceRoot);
+    return {
+      ...state.zotero, baseUrl: options.zoteroBaseUrl,
+      ...(options.zoteroFetch ? { fetchImpl: options.zoteroFetch } : {}), ...overrides,
+    };
+  };
+
+  app.get('/api/references', async (req, res) => {
+    await resourceResponse(res, async () => {
+      const state = await loadReferenceState(workspaceRoot);
+      const query = String(req.query.q || '').trim().toLowerCase();
+      const items = query ? state.items.filter((item) => [item.citekey, item.title, item.year, item.doi, ...(item.authors || [])].join(' ').toLowerCase().includes(query)) : state.items;
+      return { ...state, items };
+    });
+  });
+
+  app.put('/api/references/config', async (req, res) => {
+    await resourceResponse(res, async () => ({ state: await configureReferences(workspaceRoot, req.body || {}) }));
+  });
+
+  app.post('/api/references/folders', async (req, res) => {
+    await resourceResponse(res, async () => await addReferenceFolder(workspaceRoot, req.body?.path), 201);
+  });
+
+  app.delete('/api/references/folders', async (req, res) => {
+    await resourceResponse(res, async () => ({ state: await removeReferenceFolder(workspaceRoot, req.body?.path) }));
+  });
+
+  app.post('/api/references/scan', async (_req, res) => {
+    await resourceResponse(res, async () => await scanAllReferenceFolders(workspaceRoot));
+  });
+
+  app.post('/api/references/import', async (req, res) => {
+    await resourceResponse(res, async () => ({ state: await importReferences(workspaceRoot, req.body?.references) }), 201);
+  });
+
+  app.patch('/api/references/:id', async (req, res) => {
+    await resourceResponse(res, async () => await updateReference(workspaceRoot, req.params.id, req.body || {}));
+  });
+
+  app.post('/api/references/:id/resolve', async (req, res) => {
+    await resourceResponse(res, async () => await resolveStoredReference(workspaceRoot, req.params.id, options.referenceFetch ? { fetchImpl: options.referenceFetch } : {}));
+  });
+
+  app.post('/api/references/bibliography', async (_req, res) => {
+    await resourceResponse(res, async () => await writeBibliography(workspaceRoot));
+  });
+
+  app.post('/api/references/check', async (req, res) => {
+    await resourceResponse(res, async () => await checkWorkspaceCitations(workspaceRoot, req.body?.file));
+  });
+
+  app.get('/api/references/zotero/status', async (_req, res) => {
+    await resourceResponse(res, async () => ({ status: await getZoteroStatus(await zoteroConnectionOptions()) }));
+  });
+
+  app.get('/api/references/zotero/collections', async (_req, res) => {
+    await resourceResponse(res, async () => ({ collections: await listZoteroCollections(await zoteroConnectionOptions()) }));
+  });
+
+  app.get('/api/references/zotero/items', async (req, res) => {
+    await resourceResponse(res, async () => ({
+      items: await searchZoteroItems(await zoteroConnectionOptions({ query: String(req.query.q || ''), collectionKey: String(req.query.collectionKey || '') })),
+    }));
+  });
+
+  app.post('/api/references/zotero/import', async (req, res) => {
+    await resourceResponse(res, async () => {
+      if (!Array.isArray(req.body?.references)) throw Object.assign(new Error('references must be an array.'), { status: 400 });
+      const connection = await zoteroConnectionOptions();
+      const enriched = [];
+      for (const reference of req.body.references.slice(0, 100)) enriched.push(await enrichZoteroAttachment(reference, connection));
+      let imported = enriched;
+      try {
+        const status = await getZoteroStatus(connection);
+        if (status.betterBibtex) {
+          const bibtex = await exportBetterBibTeX(enriched.map((item) => item.citekey), connection);
+          const exported = parseBibTeX(bibtex, 'zotero://better-bibtex');
+          imported = enriched.map((item) => {
+            const match = exported.find((entry) => entry.citekey === item.citekey);
+            return match ? { ...item, ...match, id: item.id, source: 'zotero', sourceId: item.sourceId, hasPdf: item.hasPdf, attachmentKey: item.attachmentKey } : item;
+          });
+        }
+      } catch { imported = enriched; }
+      const state = await importReferences(workspaceRoot, imported);
+      return { state, imported: enriched.length };
+    }, 201);
+  });
+
+  app.get('/api/references/zotero/fulltext/:attachmentKey', async (req, res) => {
+    await resourceResponse(res, async () => {
+      const fulltext = await getZoteroFullText(req.params.attachmentKey, await zoteroConnectionOptions());
+      const content = String(fulltext.content || '');
+      return { ...fulltext, content: content.slice(0, 1_000_000), truncated: content.length > 1_000_000 };
+    });
+  });
+
   app.get('/api/agent/activity/:id', (req, res) => {
     const activity = agentActivityJobs.get(req.params.id);
     if (!activity) return res.status(404).json({ error: 'Agent activity not found' });
@@ -499,7 +608,7 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
   });
 
   app.post('/api/agent/context-preview', async (req, res) => {
-    const { nodeId, documentId, content = '', temporaryPrompt = '', resourceIds } = req.body || {};
+    const { nodeId, documentId, content = '', temporaryPrompt = '', resourceIds, citekeys = [] } = req.body || {};
     await resourceResponse(res, async () => {
       const project = await loadProject(workspaceRoot);
       let document = project.documents.find((item) => item.id === documentId) || null;
@@ -525,6 +634,8 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
         query: [node?.summary, node?.prompt, temporaryPrompt, targetContent].filter(Boolean).join(' '),
         sectionType: section?.title || (node?.type === 'section' ? node.title : ''), resourceIds,
       });
+      const referenceState = await loadReferenceState(workspaceRoot);
+      const citationContext = buildCitationContext(referenceState.items, Array.isArray(citekeys) ? citekeys : []);
       const scopeLabel = node?.type === 'section' ? `Section · ${node.title}`
         : node?.type === 'paragraph' ? 'Selected paragraph'
           : node?.type === 'sentence' ? 'Selected sentence' : `Document · ${document.title || document.file}`;
@@ -537,6 +648,7 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
         { name: 'Element prompt', value: node?.type !== 'document' ? node?.prompt : '' },
         { name: 'Summary / intent', value: [node?.summary, node?.intent].filter(Boolean).join('\n') },
         { name: 'Writing-library context', value: libraryContext.prompt },
+        { name: 'Reference context', value: citationContext },
       ].filter((item) => item.value);
       const temporaryLayer = temporaryPrompt ? { name: 'Temporary instruction', value: temporaryPrompt } : null;
       const sourceLayer = { name: 'Target source', value: targetContent };

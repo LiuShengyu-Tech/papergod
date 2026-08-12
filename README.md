@@ -32,6 +32,14 @@ Open **Tools → Workspaces** to register an existing local folder and switch pa
 
 The recent-workspace registry is stored in `~/.papergod/workspaces.json`. Paper content, prompts, revision history, writing libraries, and Agent profiles remain isolated in each folder's `.papergod/project.json`. Switching is refused while an Agent task is running, and the current source is saved before a browser-initiated switch. New or existing workspaces receive missing starter checklists, eight academic sentence patterns, and ten precision-focused vocabulary entries by stable ID; user-created entries are preserved.
 
+### References and Zotero
+
+Open **Tools → References** to build one searchable citation library from local literature folders and Zotero Desktop. Local folders are scanned recursively for `.bib`, `.bibtex`, and `.pdf` files. Existing BibTeX is treated as authoritative; PDF first pages are inspected for DOI/arXiv identifiers, and uncertain records remain visibly marked for review instead of being guessed. DOI records can be verified against Crossref on demand.
+
+Papergod connects to Zotero's read-only local API at `127.0.0.1:23119`, so ordinary local use requires no Zotero cloud key. In Zotero, enable **Settings → Advanced → Allow other applications on this computer to communicate with Zotero**, then use **Connect Zotero** to search the library or a collection. Better BibTeX is detected when installed but is optional. Imported entries, local entries, and citation status are indexed in `.papergod/references.json`; the compilable `references.bib` stays in the paper workspace and can be tracked with Git.
+
+Reference cards can be selected for two separate actions: **Insert selected** writes a `\cite{...}` command at the editor cursor, while selection also makes those verified records available to the Agent prompt. Citation checking reports missing citekeys and missing bibliography setup. Agent revisions that introduce a citekey absent from the managed bibliography are rejected before source is changed.
+
 ![Papergod demo](./papergod-demo.png)
 
 ## Architecture
@@ -56,6 +64,7 @@ Express server (127.0.0.1 only)
   ├── /api/generate/*    — prompt/library-controlled full-paper drafts
   ├── /api/workflow/*    — complete history and portable export bundles
   ├── /api/workspaces/*  — local workspace registration and runtime switching
+  ├── /api/references/*  — folders, Zotero, BibTeX generation, and citekey checks
   └── /workspace/*       — static serving of compiled PDFs
 ```
 
@@ -197,5 +206,5 @@ tests/
 - External Agent quality and availability depend on the user's installed/authenticated CLI
 - No concurrent editing / CRDT
 - No file upload (only pre-existing .tex files in workspace)
-- No bibliography / BibTeX support
+- PDF-only reference identification is best-effort; records without a reliable DOI, arXiv ID, or existing BibTeX require user confirmation
 - PDF-to-source targeting currently matches PDF.js text against parsed manuscript sentences and paragraphs. Complex macros, equations, repeated fragments, and transformed text may not map; SyncTeX-backed coordinate mapping is the planned precision upgrade.
