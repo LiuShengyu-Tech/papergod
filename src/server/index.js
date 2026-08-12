@@ -32,10 +32,14 @@ import {
   buildWorkflowExport, generatePaperRevision, generateRevisionPackage, getWorkflowHistory,
   updateRevisionResponseLetter, verifyAppliedRevision,
 } from './revise-workflow.js';
+import { initializeWorkspace } from './workspace.js';
+import { createWorkspaceRegistry } from './workspace-registry.js';
+import { browseWorkspaceDirectories } from './workspace-browser.js';
+import { createWorkspaceTerminalManager } from './workspace-terminal.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, '../..');
-const DEFAULT_WORKSPACE = join(PROJECT_ROOT, 'workspace');
+const DEFAULT_WORKSPACE = join(PROJECT_ROOT, 'example');
 const EXTERNAL_AGENT_PROVIDERS = AGENT_PROVIDERS.filter((item) => item !== 'mock');
 
 function publicErrorMessage(error) {
@@ -61,18 +65,37 @@ async function resourceResponse(res, operation, successStatus = 200) {
   }
 }
 
-export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
+export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}) {
+  let workspaceRoot = resolve(initialWorkspaceRoot);
   let provider = options.provider || 'mock';
-  const agentCommands = { ...(options.agentCommands || {}) };
+  const baseAgentCommands = { ...(options.agentCommands || {}) };
+  const agentCommands = { ...baseAgentCommands };
   const agentProbeJobs = new Map();
   const agentActivityJobs = new Map();
+  let activeWorkspaceRequests = 0;
+  const workspaceRegistry = createWorkspaceRegistry({ file: options.workspaceRegistryFile });
+  const terminalManager = options.terminalManager || createWorkspaceTerminalManager();
   const app = express();
+  app.locals.cleanup = () => terminalManager.closeAll();
   app.locals.config = { workspaceRoot, provider };
   app.use(express.json({ limit: '10mb' }));
   app.use(securityHeaders);
   app.use('/vendor/codemirror', express.static(join(PROJECT_ROOT, 'node_modules', 'codemirror'), { dotfiles: 'deny' }));
   app.use('/vendor/pdfjs-dist', express.static(join(PROJECT_ROOT, 'node_modules', 'pdfjs-dist'), { dotfiles: 'deny' }));
   app.use(express.static(join(PROJECT_ROOT, 'public')));
+  app.use('/api', (req, res, next) => {
+    if (req.path === '/workspaces' || req.path.startsWith('/workspaces/') || req.path === '/terminal' || req.path.startsWith('/terminal/')) return next();
+    activeWorkspaceRequests += 1;
+    let released = false;
+    const release = () => {
+      if (released) return;
+      released = true;
+      activeWorkspaceRequests = Math.max(0, activeWorkspaceRequests - 1);
+    };
+    res.once('finish', release);
+    res.once('close', release);
+    next();
+  });
 
   function beginAgentActivity(id, activeProvider) {
     if (typeof id !== 'string' || !/^[a-zA-Z0-9-]{8,80}$/.test(id)) return null;
@@ -96,9 +119,11 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
     activity.updatedAt = new Date().toISOString();
   }
 
-  async function hydrateAgentCommands(projectData = null) {
+  async function hydrateAgentCommands(projectData = null, { loadProvider = false } = {}) {
     const project = projectData || await loadProject(workspaceRoot);
     const profiles = project.project.agentProfiles || {};
+    for (const id of EXTERNAL_AGENT_PROVIDERS) delete agentCommands[id];
+    Object.assign(agentCommands, baseAgentCommands);
     for (const id of EXTERNAL_AGENT_PROVIDERS) {
       const profile = profiles[id];
       if (profile?.command?.trim()) {
@@ -109,7 +134,27 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
         };
       }
     }
+    if (loadProvider) {
+      provider = AGENT_PROVIDERS.includes(project.project.activeAgentProvider) ? project.project.activeAgentProvider : (options.provider || 'mock');
+      app.locals.config.provider = provider;
+    }
     return project;
+  }
+
+  async function switchWorkspace(target) {
+    const runningProbe = [...agentProbeJobs.values()].some((job) => ['queued', 'running'].includes(job.status));
+    const runningActivity = [...agentActivityJobs.values()].some((job) => job.status === 'running');
+    if (runningProbe || runningActivity || activeWorkspaceRequests > 0) {
+      throw Object.assign(new Error('Wait for the active paper task to finish before switching workspaces.'), { status: 409, code: 'WORKSPACE_BUSY' });
+    }
+    const entry = await workspaceRegistry.activate(target);
+    const initialization = await initializeWorkspace(entry.path);
+    workspaceRoot = entry.path;
+    app.locals.config.workspaceRoot = workspaceRoot;
+    agentProbeJobs.clear();
+    agentActivityJobs.clear();
+    await hydrateAgentCommands(initialization.project, { loadProvider: true });
+    return { entry, initialization };
   }
 
   async function requestSuggestions(content, prompt, req, context = {}) {
@@ -172,12 +217,22 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
 
   app.use('/workspace', (req, res, next) => {
     const relPath = req.path.replace(/^\//, '');
+    if (relPath.split('/').some((part) => part.startsWith('.'))) return res.status(403).json({ error: 'Access denied' });
     const safe = sanitizePath(relPath, workspaceRoot);
     if (!safe) return res.status(403).json({ error: 'Access denied' });
     req._safePath = safe;
     next();
   });
-  app.use('/workspace', express.static(workspaceRoot, { dotfiles: 'deny' }));
+  app.use('/workspace', async (req, res, next) => {
+    try {
+      const info = await stat(req._safePath);
+      if (!info.isFile()) return next();
+      res.sendFile(req._safePath);
+    } catch (error) {
+      if (error.code === 'ENOENT') return next();
+      next(error);
+    }
+  });
 
   app.get('/api/engines', async (_req, res) => {
     try {
@@ -188,8 +243,130 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
     }
   });
 
-  app.get('/api/config', (_req, res) => {
-    res.json({ provider, workspace: workspaceRoot });
+  app.get('/api/config', async (_req, res) => {
+    try {
+      await workspaceRegistry.add(workspaceRoot, { activate: true });
+      await hydrateAgentCommands(null, { loadProvider: true });
+      res.json({ provider, workspace: workspaceRoot });
+    } catch (error) {
+      res.status(error.status || 500).json({ error: publicErrorMessage(error), code: error.code });
+    }
+  });
+
+  app.get('/api/workspaces', async (_req, res) => {
+    await resourceResponse(res, async () => {
+      await workspaceRegistry.add(workspaceRoot, { activate: true });
+      const workspaces = await workspaceRegistry.list(workspaceRoot);
+      return { activePath: workspaceRoot, workspaces: workspaces.filter((item) => item.available || item.active) };
+    });
+  });
+
+  app.get('/api/workspaces/browse', async (req, res) => {
+    await resourceResponse(res, async () => await browseWorkspaceDirectories(req.query.path || ''));
+  });
+
+  app.post('/api/workspaces', async (req, res) => {
+    await resourceResponse(res, async () => {
+      await workspaceRegistry.add(workspaceRoot, { activate: true });
+      const registered = await workspaceRegistry.add(req.body?.path);
+      const { entry, initialization } = await switchWorkspace(registered.id);
+      return { workspace: entry, createdSample: initialization.createdSample };
+    }, 201);
+  });
+
+  app.post('/api/workspaces/:id/activate', async (req, res) => {
+    await resourceResponse(res, async () => {
+      const { entry, initialization } = await switchWorkspace(req.params.id);
+      return { workspace: entry, createdSample: initialization.createdSample };
+    });
+  });
+
+  app.post('/api/workspaces/pick-folder', async (_req, res) => {
+    if (typeof options.folderPicker === 'function') {
+      return resourceResponse(res, async () => ({ path: await options.folderPicker(workspaceRoot) }));
+    }
+    const candidates = process.platform === 'darwin'
+      ? [['osascript', ['-e', 'POSIX path of (choose folder with prompt "Choose a Papergod workspace")']]]
+      : [
+        ['zenity', ['--file-selection', '--directory', '--title=Choose a Papergod workspace']],
+        ['kdialog', ['--getexistingdirectory', workspaceRoot]],
+        ['python3', ['-c', 'import sys, tkinter as tk; from tkinter import filedialog; root=tk.Tk(); root.withdraw(); root.attributes("-topmost", True); root.update(); path=filedialog.askdirectory(parent=root, initialdir=sys.argv[1], title="Choose a Papergod workspace", mustexist=True); print(path); root.destroy()', workspaceRoot], false],
+      ];
+    const tryPicker = (index = 0) => new Promise((resolvePicker, rejectPicker) => {
+      if (!candidates[index]) return rejectPicker(Object.assign(new Error('No graphical folder picker is available. Paste an absolute folder path instead.'), { status: 501, code: 'PICKER_UNAVAILABLE' }));
+      const [command, args, cancelOnExitOne = true] = candidates[index];
+      const child = spawn(command, args, { shell: false, windowsHide: true });
+      let output = '';
+      let unavailable = false;
+      let timedOut = false;
+      const timeout = setTimeout(() => { timedOut = true; child.kill('SIGTERM'); }, 5 * 60_000);
+      child.stdout?.on('data', (chunk) => { output += chunk; });
+      child.once('error', (error) => {
+        clearTimeout(timeout);
+        unavailable = true;
+        if (error.code === 'ENOENT') tryPicker(index + 1).then(resolvePicker, rejectPicker);
+        else rejectPicker(error);
+      });
+      child.once('close', (code) => {
+        clearTimeout(timeout);
+        if (unavailable) return;
+        if (timedOut) return rejectPicker(Object.assign(new Error('Folder picker timed out.'), { status: 504, code: 'PICKER_TIMEOUT' }));
+        if (code === 0 && output.trim()) resolvePicker(output.trim());
+        else if (code === 0) rejectPicker(Object.assign(new Error('Folder selection was cancelled.'), { status: 409, code: 'PICKER_CANCELLED' }));
+        else if (code === 1 && cancelOnExitOne) rejectPicker(Object.assign(new Error('Folder selection was cancelled.'), { status: 409, code: 'PICKER_CANCELLED' }));
+        else if (code !== null) tryPicker(index + 1).then(resolvePicker, rejectPicker);
+      });
+    });
+    await resourceResponse(res, async () => ({ path: await tryPicker() }));
+  });
+
+  const requireCurrentTerminal = (id) => {
+    const session = terminalManager.get(id);
+    if (session.workspace !== workspaceRoot) throw Object.assign(new Error('Terminal belongs to another workspace.'), { status: 409, code: 'TERMINAL_WORKSPACE_MISMATCH' });
+    return session;
+  };
+
+  app.post('/api/terminal', async (_req, res) => {
+    await resourceResponse(res, async () => ({ session: terminalManager.start(workspaceRoot) }), 201);
+  });
+
+  app.get('/api/terminal/:id/events', (req, res) => {
+    try {
+      requireCurrentTerminal(req.params.id);
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache, no-transform');
+      res.setHeader('Connection', 'keep-alive');
+      res.flushHeaders?.();
+      const detach = terminalManager.attach(req.params.id, res);
+      const heartbeat = setInterval(() => res.write(': keepalive\n\n'), 15_000);
+      req.once('close', () => { clearInterval(heartbeat); detach(); });
+    } catch (error) {
+      res.status(error.status || 500).json({ error: publicErrorMessage(error), code: error.code });
+    }
+  });
+
+  app.post('/api/terminal/:id/input', async (req, res) => {
+    await resourceResponse(res, async () => {
+      requireCurrentTerminal(req.params.id);
+      terminalManager.input(req.params.id, req.body?.data);
+      return { ok: true };
+    });
+  });
+
+  app.post('/api/terminal/:id/resize', async (req, res) => {
+    await resourceResponse(res, async () => {
+      requireCurrentTerminal(req.params.id);
+      terminalManager.resize(req.params.id, req.body?.cols, req.body?.rows);
+      return { ok: true };
+    });
+  });
+
+  app.delete('/api/terminal/:id', async (req, res) => {
+    await resourceResponse(res, async () => {
+      requireCurrentTerminal(req.params.id);
+      terminalManager.close(req.params.id);
+      return { ok: true };
+    });
   });
 
   app.get('/api/agent/activity/:id', (req, res) => {
@@ -207,7 +384,7 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
 
   app.get('/api/agents', async (_req, res) => {
     await resourceResponse(res, async () => {
-      const project = await hydrateAgentCommands();
+      const project = await hydrateAgentCommands(null, { loadProvider: true });
       const detected = await detectAgentProviders({ commands: agentCommands });
       const detectedById = new Map(detected.map((item) => [item.provider, item]));
       const saved = project.project.agentProfiles || {};
@@ -241,6 +418,7 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
       await updateProject(workspaceRoot, (project) => {
         project.project.agentProfiles ||= {};
         project.project.agentProfiles[id] = { command, args, model };
+        if (activate) project.project.activeAgentProvider = id;
       });
       if (id !== 'mock' && command.trim()) agentCommands[id] = { command: command.trim(), args, model: model.trim() };
       if (activate) {
@@ -899,10 +1077,11 @@ export function createApp(workspaceRoot = DEFAULT_WORKSPACE, options = {}) {
   return app;
 }
 
-export async function startServer({ workspaceRoot = DEFAULT_WORKSPACE, port = 3000, provider = 'mock' } = {}) {
-  const app = createApp(workspaceRoot, { provider });
+export async function startServer({ workspaceRoot = DEFAULT_WORKSPACE, port = 3000, provider = 'mock', workspaceRegistryFile } = {}) {
+  const app = createApp(workspaceRoot, { provider, workspaceRegistryFile });
   return await new Promise((resolveServer, reject) => {
     const server = app.listen(port, '127.0.0.1', () => resolveServer(server));
+    server.once('close', () => app.locals.cleanup?.());
     server.once('error', reject);
   });
 }

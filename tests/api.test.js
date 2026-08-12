@@ -5,7 +5,7 @@ import { sanitizePath } from '../src/server/security.js';
 import { detectEngines } from '../src/server/latex.js';
 import { generateSuggestions, applySuggestionToContent } from '../src/server/agent.js';
 import { PROJECT_SCHEMA_VERSION, createDefaultProject, migrateProjectData, validateProject } from '../src/server/project-store.js';
-import { parseCliArgs } from '../src/cli.js';
+import { parseCliArgs, resolveStartupWorkspace } from '../src/cli.js';
 import { initializeWorkspace } from '../src/server/workspace.js';
 import { PAPER_GENERATION_OUTPUT_SCHEMA, REVIEW_ORCHESTRATION_OUTPUT_SCHEMA, SUGGESTION_OUTPUT_SCHEMA, detectAgentProviders, parseAgentJson, parsePaperGenerationJson, parseReviewAgentJson, parseReviewOrchestrationJson, runAcademicReviewAgent, runPaperGenerationAgent, runProcess, runReviewOrchestrationAgent, runWritingAgent, validatePaperGenerationResponse, validateReviewOrchestrationResponse, validateReviewResponse, validateSuggestionResponse } from '../src/server/agent-adapters.js';
 import { parseLatexDocument } from '../src/server/latex-structure.js';
@@ -20,7 +20,7 @@ import { tmpdir } from 'os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, '..');
-const SAMPLE_TEX = resolve(PROJECT_ROOT, 'workspace', 'main.tex');
+const SAMPLE_TEX = resolve(PROJECT_ROOT, 'example', 'main.tex');
 
 let server, baseUrl, tmpWorkspace;
 
@@ -43,7 +43,7 @@ before(async () => {
   await mkdir(join(tmpWorkspace, 'subdir'));
   await writeFile(join(tmpWorkspace, 'subdir', 'chapter.tex'), '\\documentclass{article}\\begin{document}Chapter\\end{document}', 'utf-8');
 
-  const app = createApp(tmpWorkspace);
+  const app = createApp(tmpWorkspace, { workspaceRegistryFile: join(tmpWorkspace, 'test-workspaces.json') });
   await new Promise((r) => {
     server = app.listen(0, '127.0.0.1', () => {
       const addr = server.address();
@@ -483,6 +483,13 @@ test('React workbench and legacy overlays expose the complete writing workflow',
   assert.ok(frontend.includes('id="outline-tree"'));
   assert.ok(workbench.includes('id="navigator-outline-tab"'));
   assert.ok(workbench.includes('id="navigator-tools-tab"'));
+  assert.ok(workbench.includes('id="tool-workspaces"'));
+  assert.ok(workbench.includes('id="tool-terminal"'));
+  assert.ok(html.includes('id="workspace-manager-overlay"'));
+  assert.ok(html.includes('id="workspace-add-form"'));
+  assert.ok(html.includes('id="workspace-browser"'));
+  assert.ok(html.includes('id="terminal-overlay"'));
+  assert.ok(html.includes('id="terminal-screen"'));
   assert.ok(workbench.includes('id="tool-open-folder"'));
   assert.ok(workbench.includes('id="tool-show-source"'));
   assert.ok(workbench.includes('id="tool-change-history"'));
@@ -630,9 +637,27 @@ test('CLI parses workspace, port, and Agent provider', () => {
   assert.equal(options.port, 4312);
   assert.equal(options.provider, 'codex');
   assert.equal(options.demo, true);
+  assert.equal(parseCliArgs(['--resume'], '/tmp').resume, true);
   assert.equal(parseCliArgs(['--agent', 'pi'], '/tmp').provider, 'pi');
+  assert.throws(() => parseCliArgs(['paper', '--resume']), /cannot be combined/);
+  assert.throws(() => parseCliArgs(['--resume', '--demo']), /cannot be combined/);
   assert.throws(() => parseCliArgs(['--agent', 'unknown']), /Agent must be one of/);
   assert.throws(() => parseCliArgs(['--port', '70000']), /Port must be an integer/);
+});
+
+test('CLI resume uses the last selected paper and only falls back to the built-in demo', async () => {
+  const selected = await resolveStartupWorkspace(parseCliArgs(['--resume']), {
+    registry: { getActive: async () => ({ path: '/papers/my-paper' }) },
+    fallbackWorkspace: '/papergod/demo',
+  });
+  assert.equal(selected.workspaceRoot, '/papers/my-paper');
+  assert.equal(selected.demo, false);
+  const firstRun = await resolveStartupWorkspace(parseCliArgs(['--resume']), {
+    registry: { getActive: async () => null },
+    fallbackWorkspace: '/papergod/demo',
+  });
+  assert.equal(firstRun.workspaceRoot, '/papergod/demo');
+  assert.equal(firstRun.demo, true);
 });
 
 test('initializeWorkspace creates a first-run paper and project', async () => {
@@ -643,6 +668,11 @@ test('initializeWorkspace creates a first-run paper and project', async () => {
   const content = await readFile(join(fresh, 'main.tex'), 'utf-8');
   assert.ok(content.includes('\\documentclass'));
   assert.ok(JSON.parse(await readFile(join(fresh, '.papergod', 'project.json'), 'utf-8')));
+  assert.ok(result.project.libraries.corpora.length >= 3);
+  assert.ok(result.project.libraries.sentencePatterns.length >= 8);
+  assert.ok(result.project.libraries.vocabulary.global.length >= 10);
+  const second = await initializeWorkspace(fresh);
+  assert.equal(second.project.libraries.sentencePatterns.length, result.project.libraries.sentencePatterns.length);
 });
 
 test('initializeWorkspace demo mode seeds a complete built-in testing workspace', async () => {
@@ -653,11 +683,92 @@ test('initializeWorkspace demo mode seeds a complete built-in testing workspace'
   assert.match(result.project.project.corePrompt, /evidence alignment/i);
   assert.ok(result.project.documents[0].corePrompt);
   assert.ok(result.project.documents[0].sections.every((section) => section.prompt));
-  assert.equal(result.project.libraries.corpora.length, 2);
-  assert.equal(result.project.libraries.sentencePatterns.length, 3);
-  assert.equal(result.project.libraries.vocabulary.global.length, 2);
+  assert.ok(result.project.libraries.corpora.length >= 5);
+  assert.ok(result.project.libraries.sentencePatterns.length >= 11);
+  assert.ok(result.project.libraries.vocabulary.global.length >= 12);
   assert.equal(result.project.libraries.vocabulary.session.length, 1);
   assert.equal(result.project.annotations.length, 2);
+});
+
+test('Workspace API switches local papers and keeps Agent selections isolated', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'papergod-workspaces-'));
+  const first = join(root, 'paper-one');
+  const second = join(root, 'paper-two');
+  const registryFile = join(root, 'registry.json');
+  await mkdir(first);
+  await mkdir(second);
+  await writeFile(join(first, 'main.tex'), '\\documentclass{article}\\begin{document}FIRST PAPER\\end{document}', 'utf8');
+  await writeFile(join(second, 'paper.tex'), '\\documentclass{article}\\begin{document}SECOND PAPER\\end{document}', 'utf8');
+  await initializeWorkspace(first);
+  const workspaceApp = createApp(first, { workspaceRegistryFile: registryFile });
+  const workspaceServer = await new Promise((resolveListen) => {
+    const instance = workspaceApp.listen(0, '127.0.0.1', () => resolveListen(instance));
+  });
+  const rootUrl = `http://127.0.0.1:${workspaceServer.address().port}`;
+  const request = async (path, options = {}) => {
+    const response = await fetch(rootUrl + path, { method: options.method || 'GET', headers: { 'Content-Type': 'application/json' }, body: options.body ? JSON.stringify(options.body) : undefined });
+    return { response, data: await response.json() };
+  };
+  try {
+    let result = await request('/api/agents/config', { method: 'PUT', body: { id: 'codex', command: 'codex', args: [], model: '', activate: true } });
+    assert.equal(result.response.status, 200);
+    result = await request('/api/workspaces', { method: 'POST', body: { path: second } });
+    assert.equal(result.response.status, 201);
+    assert.equal(result.data.workspace.path, second);
+    result = await request('/api/files/paper.tex');
+    assert.match(result.data.content, /SECOND PAPER/);
+    result = await request('/api/config');
+    assert.equal(result.data.provider, 'mock');
+    result = await request('/api/workspaces');
+    assert.equal(result.data.workspaces.length, 2);
+    const firstEntry = result.data.workspaces.find((item) => item.path === first);
+    result = await request(`/api/workspaces/${firstEntry.id}/activate`, { method: 'POST' });
+    assert.equal(result.response.status, 200);
+    result = await request('/api/config');
+    assert.equal(result.data.provider, 'codex');
+    const staticPaper = await fetch(`${rootUrl}/workspace/main.tex`);
+    assert.match(await staticPaper.text(), /FIRST PAPER/);
+  } finally {
+    await new Promise((resolveClose) => workspaceServer.close(resolveClose));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Workspace folder browser lists home directories and blocks paths outside home', async () => {
+  let result = await api('/api/workspaces/browse?path=' + encodeURIComponent(PROJECT_ROOT));
+  assert.equal(result.status, 200);
+  assert.equal(result.data.currentPath, PROJECT_ROOT);
+  assert.ok(Array.isArray(result.data.entries));
+  assert.ok(result.data.entries.some((entry) => entry.name === 'src'));
+  result = await api('/api/workspaces/browse?path=' + encodeURIComponent('/tmp'));
+  assert.equal(result.status, 403);
+  assert.equal(result.data.code, 'BROWSE_OUTSIDE_ROOT');
+});
+
+test('Workspace terminal runs an interactive command in the active workspace', async () => {
+  const started = await api('/api/terminal', { method: 'POST' });
+  assert.equal(started.status, 201);
+  assert.equal(started.data.session.workspace, tmpWorkspace);
+  const id = started.data.session.id;
+  const controller = new AbortController();
+  const events = await fetch(`${baseUrl}/api/terminal/${encodeURIComponent(id)}/events`, { signal: controller.signal });
+  assert.equal(events.status, 200);
+  const input = await api(`/api/terminal/${encodeURIComponent(id)}/input`, { method: 'POST', body: { data: "printf 'PAPERGOD_TERMINAL_OK\\n'\r" } });
+  assert.equal(input.status, 200);
+  const reader = events.body.getReader();
+  const decoder = new TextDecoder();
+  let output = '';
+  const deadline = Date.now() + 5000;
+  while (!output.includes('PAPERGOD_TERMINAL_OK') && Date.now() < deadline) {
+    const result = await Promise.race([reader.read(), new Promise((resolveRead) => setTimeout(() => resolveRead({ timeout: true }), 250))]);
+    if (result.timeout) continue;
+    if (result.done) break;
+    output += decoder.decode(result.value, { stream: true });
+  }
+  controller.abort();
+  assert.match(output, /PAPERGOD_TERMINAL_OK/);
+  const stopped = await api(`/api/terminal/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  assert.equal(stopped.status, 200);
 });
 
 test('initializeWorkspace adopts an existing TeX document', async () => {
@@ -674,8 +785,10 @@ test('package manifest exposes publishable papergod binary', async () => {
   assert.equal(packageData.bin.papergod, './src/cli.js');
   assert.ok(packageData.files.includes('public'));
   assert.ok(packageData.files.includes('src'));
+  assert.ok(packageData.files.includes('example/main.tex'));
   assert.ok(packageData.files.includes('papergod-demo.png'));
-  assert.match(packageData.scripts.papergod, /--demo/);
+  assert.match(packageData.scripts.papergod, /--resume/);
+  assert.doesNotMatch(packageData.scripts.papergod, /\bworkspace\b/);
 });
 
 test('papergod CLI executes through an npm-style bin symlink', async () => {
@@ -689,7 +802,7 @@ test('papergod CLI executes through an npm-style bin symlink', async () => {
 test('startServer runs an initialized workspace with selected provider', async () => {
   const workspace = join(tmpWorkspace, 'cli-start-paper');
   await initializeWorkspace(workspace);
-  const cliServer = await startServer({ workspaceRoot: workspace, port: 0, provider: 'opencode' });
+  const cliServer = await startServer({ workspaceRoot: workspace, port: 0, provider: 'opencode', workspaceRegistryFile: join(tmpWorkspace, 'cli-workspaces.json') });
   try {
     const address = cliServer.address();
     const response = await fetch(`http://127.0.0.1:${address.port}/api/config`);

@@ -88,8 +88,52 @@ body {
 #navigator-tabs button.active { color: var(--text); background: var(--bg-panel); box-shadow: 0 1px 3px rgba(0,0,0,.12); }
 .navigator-panel { min-height: 0; overflow: auto; }
 .tool-list { display: grid; gap: 5px; padding: 6px 8px 12px; }
-.tool-list button { border: 1px solid var(--border); border-radius: 6px; padding: 9px; color: var(--text); background: var(--bg-panel); text-align: left; font-size: 10px; cursor: pointer; }
+.tool-list button { display: flex; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: 6px; padding: 9px; color: var(--text); background: var(--bg-panel); text-align: left; font-size: 10px; cursor: pointer; }
 .tool-list button:hover { border-color: var(--accent); }
+
+#active-workspace-name { max-width: 180px; overflow: hidden; padding-left: 8px; color: var(--text-dim); border-left: 1px solid var(--border); font-size: 10px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
+
+#workspace-manager-dialog { width: min(720px, 94vw); }
+.workspace-manager-body { display: grid; gap: 14px; padding: 16px; overflow-y: auto; }
+#workspace-current-card { display: grid; gap: 4px; padding: 12px; border: 1px solid #bfdbfe; border-radius: 8px; background: #f8fbff; }
+#workspace-current-card > span { color: #2563eb; font-size: 9px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+#workspace-current-card strong { color: var(--text); font-size: 13px; }
+#workspace-current-card code { overflow: hidden; color: var(--text-dim); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+#workspace-list { display: grid; gap: 6px; max-height: 290px; overflow-y: auto; }
+.workspace-list-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px 11px; border: 1px solid var(--border); border-radius: 7px; background: #fff; }
+.workspace-list-item.active { border-color: #bfdbfe; background: #f8fbff; }
+.workspace-list-copy { min-width: 0; }
+.workspace-list-copy strong, .workspace-list-copy code { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-list-copy strong { color: var(--text); font-size: 11px; }
+.workspace-list-copy code { margin-top: 3px; color: var(--text-dim); font-size: 8px; }
+.workspace-list-item button { padding: 6px 9px; border: 1px solid var(--border); border-radius: 6px; color: var(--text); background: #fff; font-size: 9px; cursor: pointer; }
+.workspace-list-item button:hover { border-color: var(--accent); }
+.workspace-list-item button:disabled { color: var(--text-dim); cursor: default; }
+#workspace-add-form { display: grid; gap: 7px; padding-top: 13px; border-top: 1px solid var(--border); }
+#workspace-add-form label { color: var(--text); font-size: 11px; font-weight: 650; }
+#workspace-add-form > p { margin: 0; color: var(--text-dim); font-size: 9px; line-height: 1.5; }
+.workspace-path-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
+.workspace-path-row input { min-width: 0; padding: 8px 9px; border: 1px solid var(--border); border-radius: 6px; font: 10px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.workspace-path-row button, #workspace-add { padding: 8px 11px; border: 1px solid var(--border); border-radius: 6px; font-size: 10px; cursor: pointer; }
+#workspace-add { justify-self: start; border-color: var(--accent); color: #fff; background: var(--accent); }
+#workspace-manager-note.error { color: #b91c1c; }
+#workspace-manager-note.success { color: #166534; }
+#workspace-browser { overflow: hidden; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-panel); }
+.workspace-browser-head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 6px; align-items: center; padding: 7px; border-bottom: 1px solid var(--border); }
+.workspace-browser-head code { overflow: hidden; color: var(--text-dim); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-browser-head button { padding: 5px 8px; border: 1px solid var(--border); border-radius: 5px; color: var(--text); background: var(--bg-input); font-size: 9px; cursor: pointer; }
+#workspace-browser-list { max-height: 220px; overflow-y: auto; padding: 5px; }
+.workspace-browser-entry { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; gap: 6px; align-items: center; width: 100%; padding: 7px 8px; border: 0; border-radius: 5px; color: var(--text); background: transparent; text-align: left; font-size: 10px; cursor: pointer; }
+.workspace-browser-entry:hover { background: var(--bg-input); }
+.workspace-browser-entry span:nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workspace-browser-entry small { color: var(--text-dim); font-size: 8px; }
+
+#terminal-dialog { width: min(980px, 96vw); height: min(680px, 90vh); }
+.terminal-header-actions { display: flex; align-items: center; gap: 6px; }
+.terminal-header-actions #terminal-stop { padding: 6px 9px; border: 1px solid var(--border); border-radius: 6px; color: var(--text-dim); background: transparent; font-size: 9px; }
+#terminal-screen { flex: 1; min-height: 0; padding: 10px; overflow: hidden; background: #101114; }
+#terminal-screen .xterm { height: 100%; }
+#terminal-status { padding: 6px 10px; color: var(--text-dim); border-top: 1px solid var(--border); font-size: 9px; }
 .tool-files-heading { margin-top: 8px; }
 
 .sidebar-heading {

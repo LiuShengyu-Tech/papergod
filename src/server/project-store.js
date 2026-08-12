@@ -459,6 +459,7 @@ export function validateProject(data) {
     validateString(data.project.id, 'project.id', errors, { allowEmpty: false });
     validateString(data.project.name, 'project.name', errors, { allowEmpty: false });
     validateString(data.project.corePrompt, 'project.corePrompt', errors);
+    if (data.project.activeAgentProvider !== undefined) validateEnum(data.project.activeAgentProvider, ['mock', 'codex', 'claude-code', 'opencode', 'pi'], 'project.activeAgentProvider', errors);
     validateString(data.project.createdAt, 'project.createdAt', errors, { allowEmpty: false });
     validateString(data.project.updatedAt, 'project.updatedAt', errors, { allowEmpty: false });
   }

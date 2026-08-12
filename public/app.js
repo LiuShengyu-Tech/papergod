@@ -57,6 +57,12 @@ let historyPdfLoadingTask = null;
 let historyPdfRenderGeneration = 0;
 let historyDiffMarks = [];
 let activeHistoryDiffIndex = 0;
+let workspaceManagerData = null;
+let terminalSessionId = null;
+let terminalView = null;
+let terminalFitAddon = null;
+let terminalEvents = null;
+let terminalResizeObserver = null;
 
 class ModificationIntent {
   constructor(annotation) {
@@ -1308,9 +1314,147 @@ async function loadConfig() {
     const res = await fetch('/api/config');
     const data = await res.json();
     currentProvider = data.provider || 'mock';
+    const workspaceName = String(data.workspace || '').split(/[\\/]/).filter(Boolean).at(-1) || 'Workspace';
+    const workspaceLabel = document.getElementById('active-workspace-name');
+    if (workspaceLabel) { workspaceLabel.textContent = workspaceName; workspaceLabel.title = data.workspace || workspaceName; }
     const quickSelect = document.getElementById('agent-provider-quick');
     if (quickSelect?.querySelector(`option[value="${currentProvider}"]`)) quickSelect.value = currentProvider;
   } catch {}
+}
+
+function setWorkspaceManagerNote(message = '', type = '') {
+  const note = document.getElementById('workspace-manager-note');
+  note.textContent = message;
+  note.className = type;
+}
+
+function renderWorkspaces(data) {
+  workspaceManagerData = data;
+  const active = data.workspaces?.find((item) => item.active) || {};
+  document.getElementById('workspace-current-name').textContent = active.name || '—';
+  document.getElementById('workspace-current-path').textContent = active.path || data.activePath || '—';
+  const list = document.getElementById('workspace-list');
+  if (!data.workspaces?.length) {
+    list.innerHTML = `<div class="outline-empty">${escapeHtml(t('workspace.empty'))}</div>`;
+    return;
+  }
+  list.innerHTML = data.workspaces.map((item) => `<article class="workspace-list-item${item.active ? ' active' : ''}${item.available ? '' : ' unavailable'}">
+    <div class="workspace-list-copy"><strong>${escapeHtml(item.name)}</strong><code title="${escapeHtml(item.path)}">${escapeHtml(item.path)}</code></div>
+    <button type="button" data-workspace-id="${escapeHtml(item.id)}"${item.active || !item.available ? ' disabled' : ''}>${escapeHtml(t(item.active ? 'workspace.active' : 'workspace.switch'))}</button>
+  </article>`).join('');
+}
+
+async function browseWorkspaceFolder(path = '') {
+  const browser = document.getElementById('workspace-browser');
+  const list = document.getElementById('workspace-browser-list');
+  browser.classList.remove('hidden');
+  list.innerHTML = `<div class="outline-empty">${escapeHtml(t('workspace.loadingFolders'))}</div>`;
+  const res = await fetch(`/api/workspaces/browse?path=${encodeURIComponent(path)}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Could not browse folders');
+  browser.dataset.currentPath = data.currentPath;
+  browser.dataset.parentPath = data.parentPath || '';
+  document.getElementById('workspace-browser-path').textContent = data.currentPath;
+  document.getElementById('workspace-browser-path').title = data.currentPath;
+  document.getElementById('workspace-browser-up').disabled = !data.parentPath;
+  list.innerHTML = data.entries.length ? data.entries.map((entry) => `<button class="workspace-browser-entry" type="button" data-folder-path="${escapeHtml(entry.path)}"><span aria-hidden="true">${entry.git ? '◆' : '▸'}</span><span>${escapeHtml(entry.name)}</span><small>${entry.git ? escapeHtml(t('workspace.gitRepo')) : ''}</small></button>`).join('') : `<div class="outline-empty">${escapeHtml(t('workspace.emptyFolder'))}</div>`;
+}
+
+function disposeTerminalView() {
+  terminalEvents?.close();
+  terminalEvents = null;
+  terminalResizeObserver?.disconnect();
+  terminalResizeObserver = null;
+  terminalView?.dispose();
+  terminalView = null;
+  terminalFitAddon = null;
+  document.getElementById('terminal-screen').replaceChildren();
+}
+
+function closeTerminalOverlay() {
+  document.getElementById('terminal-overlay').classList.add('hidden');
+  disposeTerminalView();
+}
+
+async function postTerminal(path, body = {}) {
+  const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || t('terminal.failed'));
+  return data;
+}
+
+async function openWorkspaceTerminal() {
+  const overlay = document.getElementById('terminal-overlay');
+  const status = document.getElementById('terminal-status');
+  overlay.classList.remove('hidden');
+  status.textContent = t('terminal.connecting');
+  document.getElementById('terminal-workspace').textContent = document.getElementById('active-workspace-name').title || document.getElementById('active-workspace-name').textContent;
+  disposeTerminalView();
+  try {
+    const { session } = await postTerminal('/api/terminal');
+    terminalSessionId = session.id;
+    const terminalApi = await globalThis.loadPapergodTerminal?.();
+    if (!terminalApi) throw new Error('Terminal renderer is unavailable.');
+    terminalView = new terminalApi.Terminal({
+      cursorBlink: true, convertEol: false, fontSize: 13, scrollback: 5000,
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+      theme: { background: '#101114', foreground: '#e4e4e7', cursor: '#93c5fd', selectionBackground: '#334155' },
+    });
+    terminalFitAddon = new terminalApi.FitAddon();
+    terminalView.loadAddon(terminalFitAddon);
+    terminalView.open(document.getElementById('terminal-screen'));
+    requestAnimationFrame(() => { terminalFitAddon.fit(); postTerminal(`/api/terminal/${encodeURIComponent(session.id)}/resize`, { cols: terminalView.cols, rows: terminalView.rows }).catch(() => {}); terminalView.focus(); });
+    terminalView.onData((data) => postTerminal(`/api/terminal/${encodeURIComponent(session.id)}/input`, { data }).catch((error) => { status.textContent = error.message; }));
+    terminalEvents = new EventSource(`/api/terminal/${encodeURIComponent(session.id)}/events`);
+    terminalEvents.addEventListener('ready', event => {
+      const payload = JSON.parse(event.data);
+      if (payload.history) terminalView?.write(payload.history);
+      status.textContent = t('terminal.connected');
+    });
+    terminalEvents.addEventListener('output', event => terminalView?.write(JSON.parse(event.data).data || ''));
+    terminalEvents.addEventListener('exit', event => {
+      const payload = JSON.parse(event.data);
+      status.textContent = t('terminal.exited', { code: payload.exitCode ?? '—' });
+      terminalEvents?.close();
+      terminalEvents = null;
+    });
+    terminalEvents.onerror = () => { if (terminalView) status.textContent = t('terminal.connecting'); };
+    terminalResizeObserver = new ResizeObserver(() => {
+      if (!terminalView || !terminalFitAddon || overlay.classList.contains('hidden')) return;
+      terminalFitAddon.fit();
+      postTerminal(`/api/terminal/${encodeURIComponent(session.id)}/resize`, { cols: terminalView.cols, rows: terminalView.rows }).catch(() => {});
+    });
+    terminalResizeObserver.observe(document.getElementById('terminal-screen'));
+  } catch (error) {
+    status.textContent = error.message || t('terminal.failed');
+  }
+}
+
+async function loadWorkspaces() {
+  const list = document.getElementById('workspace-list');
+  list.innerHTML = `<div class="outline-empty">${escapeHtml(t('workspace.loading'))}</div>`;
+  const res = await fetch('/api/workspaces');
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || t('workspace.failed'));
+  renderWorkspaces(data);
+  return data;
+}
+
+async function openWorkspaceManager() {
+  document.getElementById('workspace-manager-overlay').classList.remove('hidden');
+  setWorkspaceManagerNote();
+  try { await loadWorkspaces(); } catch (error) { setWorkspaceManagerNote(error.message, 'error'); }
+}
+
+async function switchWorkspaceRequest(url, options = {}) {
+  setWorkspaceManagerNote(t('workspace.switching'));
+  const saved = await saveFile();
+  if (!saved) { setWorkspaceManagerNote('Save the current paper before switching.', 'error'); return; }
+  const res = await fetch(url, options);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || t('workspace.failed'));
+  setWorkspaceManagerNote(t('workspace.switching'), 'success');
+  window.location.reload();
 }
 
 function renderQuickAgentSelector() {
@@ -3009,11 +3153,82 @@ function init() {
   document.getElementById('navigator-outline-tab').addEventListener('click', () => setNavigatorTab('outline'));
   document.getElementById('navigator-tools-tab').addEventListener('click', () => setNavigatorTab('tools'));
   document.getElementById('tool-show-source').addEventListener('click', () => setWorkspaceView('source'));
+  document.getElementById('tool-workspaces').addEventListener('click', openWorkspaceManager);
+  document.getElementById('tool-terminal').addEventListener('click', openWorkspaceTerminal);
   document.getElementById('tool-compile').addEventListener('click', compileFile);
   document.getElementById('tool-change-history').addEventListener('click', openChangeHistory);
   document.getElementById('history-open').addEventListener('click', openChangeHistory);
   document.getElementById('tool-libraries').addEventListener('click', () => document.getElementById('library-open').click());
   document.getElementById('tool-agent-config').addEventListener('click', () => document.getElementById('agent-config-open').click());
+  const closeWorkspaceManager = () => document.getElementById('workspace-manager-overlay').classList.add('hidden');
+  document.getElementById('workspace-manager-close').addEventListener('click', closeWorkspaceManager);
+  document.getElementById('workspace-manager-overlay').addEventListener('click', event => {
+    if (event.target.id === 'workspace-manager-overlay') closeWorkspaceManager();
+  });
+  document.getElementById('workspace-list').addEventListener('click', async event => {
+    const button = event.target.closest('[data-workspace-id]');
+    if (!button || button.disabled) return;
+    button.disabled = true;
+    try {
+      await switchWorkspaceRequest(`/api/workspaces/${encodeURIComponent(button.dataset.workspaceId)}/activate`, { method: 'POST' });
+    } catch (error) { button.disabled = false; setWorkspaceManagerNote(error.message, 'error'); }
+  });
+  document.getElementById('workspace-add-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const button = document.getElementById('workspace-add');
+    button.disabled = true;
+    try {
+      await switchWorkspaceRequest('/api/workspaces', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: document.getElementById('workspace-path').value.trim() }),
+      });
+    } catch (error) { button.disabled = false; setWorkspaceManagerNote(error.message, 'error'); }
+  });
+  document.getElementById('workspace-browse').addEventListener('click', async event => {
+    event.currentTarget.disabled = true;
+    setWorkspaceManagerNote();
+    try {
+      const res = await fetch('/api/workspaces/pick-folder', { method: 'POST' });
+      const data = await res.json();
+      if (!res.ok) {
+        if (data.code !== 'PICKER_UNAVAILABLE') throw new Error(data.error || 'Folder selection failed');
+        setWorkspaceManagerNote(t('workspace.pickerFallback'));
+        const initialPath = document.getElementById('workspace-path').value.trim() || workspaceManagerData?.activePath || '';
+        try { await browseWorkspaceFolder(initialPath); } catch { await browseWorkspaceFolder(''); }
+        return;
+      }
+      document.getElementById('workspace-path').value = data.path || '';
+      document.getElementById('workspace-path').focus();
+    } catch (error) { setWorkspaceManagerNote(error.message || t('workspace.pickerFallback'), 'error'); }
+    finally { event.currentTarget.disabled = false; }
+  });
+  document.getElementById('workspace-browser-list').addEventListener('click', event => {
+    const entry = event.target.closest('[data-folder-path]');
+    if (entry) browseWorkspaceFolder(entry.dataset.folderPath).catch(error => setWorkspaceManagerNote(error.message, 'error'));
+  });
+  document.getElementById('workspace-browser-up').addEventListener('click', () => {
+    const path = document.getElementById('workspace-browser').dataset.parentPath;
+    if (path) browseWorkspaceFolder(path).catch(error => setWorkspaceManagerNote(error.message, 'error'));
+  });
+  document.getElementById('workspace-browser-select').addEventListener('click', () => {
+    const browser = document.getElementById('workspace-browser');
+    document.getElementById('workspace-path').value = browser.dataset.currentPath || '';
+    browser.classList.add('hidden');
+    setWorkspaceManagerNote();
+  });
+  document.getElementById('terminal-close').addEventListener('click', closeTerminalOverlay);
+  document.getElementById('terminal-overlay').addEventListener('click', event => { if (event.target.id === 'terminal-overlay') closeTerminalOverlay(); });
+  document.getElementById('terminal-stop').addEventListener('click', async () => {
+    if (!terminalSessionId) return closeTerminalOverlay();
+    try {
+      const res = await fetch(`/api/terminal/${encodeURIComponent(terminalSessionId)}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || t('terminal.failed'));
+      document.getElementById('terminal-status').textContent = t('terminal.stopped');
+      terminalSessionId = null;
+      closeTerminalOverlay();
+    } catch (error) { document.getElementById('terminal-status').textContent = error.message; }
+  });
   document.getElementById('change-history-close').addEventListener('click', () => document.getElementById('change-history-overlay').classList.add('hidden'));
   document.getElementById('change-history-refresh').addEventListener('click', () => loadRecentChangeHistory());
   document.getElementById('change-history-overlay').addEventListener('click', event => {
@@ -3203,6 +3418,8 @@ function init() {
       document.getElementById('prompt-preview-overlay').classList.add('hidden');
       document.getElementById('invoke-confirm-overlay').classList.add('hidden');
       document.getElementById('change-history-overlay').classList.add('hidden');
+      document.getElementById('workspace-manager-overlay').classList.add('hidden');
+      closeTerminalOverlay();
       document.getElementById('pdf-edit-menu').classList.add('hidden');
       closeSentenceReader();
       clearPdfScopeHighlight();

@@ -10,22 +10,26 @@
     "src",
     "frontend",
     "public",
+    "example/main.tex",
     "papergod-demo.png",
     "README.md",
     "ROADMAP.md"
   ],
   "scripts": {
-    "papergod": "node src/cli.js workspace --demo",
+    "papergod": "node src/cli.js --resume",
     "build:web": "vite build --config frontend/vite.config.js",
     "prepack": "npm run build:web",
     "test": "node --test tests/api.test.js"
   },
   "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "codemirror": "^5.65.16",
     "express": "^4.21.0",
     "lucide-react": "^1.31.0",
+    "node-pty": "^1.1.0",
     "pdfjs-dist": "^4.8.69",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",

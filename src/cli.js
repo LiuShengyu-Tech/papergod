@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { resolve } from 'path';
+import { dirname, resolve } from 'path';
 import process from 'process';
 import { readFile } from 'fs/promises';
 import { fileURLToPath } from 'url';
@@ -8,10 +8,12 @@ import { realpathSync } from 'fs';
 import { initializeWorkspace } from './server/workspace.js';
 import { startServer } from './server/index.js';
 import { AGENT_PROVIDERS } from './server/agent-adapters.js';
+import { createWorkspaceRegistry } from './server/workspace-registry.js';
 
 const PACKAGE_FILE = fileURLToPath(new URL('../package.json', import.meta.url));
+const BUILT_IN_DEMO_WORKSPACE = resolve(dirname(PACKAGE_FILE), 'example');
 export function parseCliArgs(argv, cwd = process.cwd()) {
-  const options = { workspaceRoot: null, port: 3000, provider: 'mock', demo: false, help: false, version: false };
+  const options = { workspaceRoot: null, port: 3000, provider: 'mock', demo: false, resume: false, help: false, version: false };
   const positional = [];
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -25,12 +27,19 @@ export function parseCliArgs(argv, cwd = process.cwd()) {
     else if (argument === '--workspace' || argument === '-w') options.workspaceRoot = argv[++index];
     else if (argument.startsWith('--workspace=')) options.workspaceRoot = argument.slice('--workspace='.length);
     else if (argument === '--demo') options.demo = true;
+    else if (argument === '--resume') options.resume = true;
     else if (argument.startsWith('-')) throw new Error(`Unknown option: ${argument}`);
     else positional.push(argument);
   }
 
   if (positional.length > 1 || (positional.length === 1 && options.workspaceRoot)) {
     throw new Error('Provide one workspace as either a positional argument or --workspace');
+  }
+  if (options.resume && (positional.length > 0 || options.workspaceRoot)) {
+    throw new Error('--resume cannot be combined with an explicit workspace');
+  }
+  if (options.resume && options.demo) {
+    throw new Error('--resume cannot be combined with --demo');
   }
   options.workspaceRoot = resolve(cwd, options.workspaceRoot || positional[0] || '.');
   if (!Number.isInteger(options.port) || options.port < 0 || options.port > 65535) {
@@ -53,13 +62,27 @@ Options:
   -p, --port <number>     Local HTTP port (default: 3000; 0 selects a free port)
       --agent <provider>  mock, codex, claude-code, opencode, or pi (default: mock)
       --demo              Seed built-in prompts, libraries, vocabulary, and demo paper
+      --resume            Reopen the last selected paper (built-in demo on first run)
   -h, --help              Show help
   -v, --version           Show version
 `;
 }
 
+export async function resolveStartupWorkspace(options, {
+  registry = createWorkspaceRegistry(),
+  fallbackWorkspace = BUILT_IN_DEMO_WORKSPACE,
+} = {}) {
+  if (!options.resume) return options;
+  const active = await registry.getActive();
+  return {
+    ...options,
+    workspaceRoot: active?.path || fallbackWorkspace,
+    demo: !active,
+  };
+}
+
 export async function run(argv = process.argv.slice(2)) {
-  const options = parseCliArgs(argv);
+  let options = parseCliArgs(argv);
   if (options.help) {
     process.stdout.write(helpText());
     return null;
@@ -69,6 +92,8 @@ export async function run(argv = process.argv.slice(2)) {
     process.stdout.write(`${packageData.version}\n`);
     return null;
   }
+
+  options = await resolveStartupWorkspace(options);
 
   const initialization = await initializeWorkspace(options.workspaceRoot, { demo: options.demo });
   const server = await startServer(options);

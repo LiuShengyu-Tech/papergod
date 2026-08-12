@@ -11,7 +11,7 @@ npm run papergod
 
 Open http://127.0.0.1:3000 in your browser.
 
-`npm run papergod` starts the built-in demo workspace and safely fills any missing demo prompts, corpora, sentence patterns, vocabulary, and sample review comments. To seed another disposable workspace explicitly, use `papergod ./demo-paper --demo`. Ordinary `papergod ./my-paper` runs never add demo metadata.
+`npm run papergod` reopens the paper workspace most recently selected in the app. On the very first run, when no workspace has been recorded yet, it falls back to the built-in demo and safely fills its missing demo content. To seed another disposable workspace explicitly, use `papergod ./demo-paper --demo`. Ordinary `papergod ./my-paper` runs add only the non-destructive starter writing library; existing resources are never overwritten.
 
 When installed as a package, run Papergod in any paper directory:
 
@@ -21,6 +21,16 @@ npx papergod ./my-paper --port 4312 --agent codex
 ```
 
 The CLI initializes `main.tex` when the workspace contains no TeX files and stores Papergod metadata in `.papergod/project.json`. Agent choices are `mock`, `codex`, `claude-code`, `opencode`, and `pi`. External providers require an installed and authenticated CLI; Papergod invokes them non-interactively with structured output, timeouts, output limits, and analysis-only permissions.
+
+### Multiple paper workspaces
+
+Open **Tools → Workspaces** to register an existing local folder and switch papers without restarting the server. A folder may be a normal directory or a repository created with `git clone`; Papergod does not take over Git credentials or change the repository workflow, so commit and push with Git as usual. The browser reloads after a successful switch to discard stale PDF and editor state.
+
+**Browse…** first attempts a local operating-system picker (`zenity`, `kdialog`, then Python/Tk on Linux and WSL). If none is available, Papergod automatically opens an in-browser directory navigator rooted at the user's home directory; paths outside that browsing boundary can still be entered explicitly and are validated before use.
+
+**Tools → Terminal** opens a real PTY shell whose working directory is the current paper workspace. It supports ANSI output, interactive input, resizing, scrollback, reconnecting after the dialog is closed, and an explicit stop action. Terminal code is loaded only when the tool is opened, so it does not increase the main workbench JavaScript payload.
+
+The recent-workspace registry is stored in `~/.papergod/workspaces.json`. Paper content, prompts, revision history, writing libraries, and Agent profiles remain isolated in each folder's `.papergod/project.json`. Switching is refused while an Agent task is running, and the current source is saved before a browser-initiated switch. New or existing workspaces receive missing starter checklists, eight academic sentence patterns, and ten precision-focused vocabulary entries by stable ID; user-created entries are preserved.
 
 ![Papergod demo](./papergod-demo.png)
 
@@ -45,6 +55,7 @@ Express server (127.0.0.1 only)
   ├── /api/revisions/*   — reviewable plans, decisions, apply, and rollback
   ├── /api/generate/*    — prompt/library-controlled full-paper drafts
   ├── /api/workflow/*    — complete history and portable export bundles
+  ├── /api/workspaces/*  — local workspace registration and runtime switching
   └── /workspace/*       — static serving of compiled PDFs
 ```
 
@@ -174,7 +185,7 @@ frontend/
   src/components/ — React workbench and shadcn-style UI primitives
   src/theme.css   — White lightweight design tokens and compatibility theme
   vite.config.js  — Production build into public/react
-workspace/
+example/
   main.tex      — Sample LaTeX document
 tests/
   api.test.js   — Integration tests

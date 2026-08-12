@@ -73,6 +73,57 @@ function demoResourceBase(id, timestamp) {
   return { id, createdAt: timestamp, updatedAt: timestamp };
 }
 
+const STARTER_CORPORA = [
+  ['starter_corpus_claim_evidence', 'Claim–evidence checklist', 'Check that every substantive claim is supported at the right strength.', 'Distinguish observations, interpretations, and causal claims. Attach quantitative claims to reported measurements; qualify generalization beyond the evaluated sample; never invent evidence or citations.', ['evidence', 'claims', 'review']],
+  ['starter_corpus_reproducibility', 'Reproducibility checklist', 'A compact checklist for empirical and computational papers.', 'Report data selection, preprocessing, sample size, baselines, hyperparameters, evaluation metrics, uncertainty, implementation assumptions, and threats to external validity.', ['methods', 'reproducibility', 'evaluation']],
+  ['starter_corpus_structure', 'Section-purpose checklist', 'Keep each paper section focused on its rhetorical job.', 'Introduction: problem, prior capability, gap, and contribution. Methods: auditable procedure. Results: measured findings without interpretation inflation. Discussion: explanation, implications, and limitations. Conclusion: answer the research question without introducing new evidence.', ['structure', 'academic-writing']],
+];
+
+const STARTER_PATTERNS = [
+  ['starter_pattern_gap', 'Research gap', 'Although {{prior_work}}, existing approaches do not {{unresolved_gap}}.', 'Position an unresolved limitation without dismissing prior work.', ['introduction', 'gap'], ['Introduction'], [['prior_work', 'Capability already established'], ['unresolved_gap', 'Specific unresolved limitation']]],
+  ['starter_pattern_contribution', 'Contribution statement', 'This work contributes {{contribution}} by {{mechanism}}, enabling {{outcome}}.', 'State what is new, how it is achieved, and why it matters.', ['introduction', 'contribution'], ['Introduction'], [['contribution', 'Concrete contribution'], ['mechanism', 'Method or design that realizes it'], ['outcome', 'Supported benefit or capability']]],
+  ['starter_pattern_protocol', 'Evaluation protocol', 'We evaluate {{system}} on {{sample}} using {{metric}}, with {{control}}.', 'Summarize an auditable evaluation design.', ['methods', 'evaluation'], ['Methods'], [['system', 'Evaluated system'], ['sample', 'Evaluation sample'], ['metric', 'Outcome measure'], ['control', 'Baseline, control, or reliability procedure']]],
+  ['starter_pattern_result', 'Quantitative comparison', '{{method}} changed {{metric}} from {{baseline}} to {{result}} ({{uncertainty_or_effect}}).', 'Report a comparison with uncertainty or effect size.', ['results', 'quantitative'], ['Results'], [['method', 'Compared method'], ['metric', 'Measured outcome'], ['baseline', 'Baseline value'], ['result', 'Observed value'], ['uncertainty_or_effect', 'Uncertainty interval or effect size']]],
+  ['starter_pattern_negative_result', 'Null or negative result', 'We found no evidence that {{factor}} improved {{outcome}} under {{conditions}} ({{estimate}}).', 'Report a null result without claiming proof of no effect.', ['results', 'negative-result'], ['Results'], [['factor', 'Tested factor'], ['outcome', 'Measured outcome'], ['conditions', 'Evaluation conditions'], ['estimate', 'Estimate and uncertainty']]],
+  ['starter_pattern_limitation', 'Limitation and scope', 'This study is limited by {{limitation}}, which may affect {{scope}}; future work should {{next_step}}.', 'Connect a concrete limitation to its consequence and next step.', ['discussion', 'limitations'], ['Discussion', 'Conclusion'], [['limitation', 'Specific limitation'], ['scope', 'Affected inference or generalization'], ['next_step', 'Actionable follow-up']]],
+  ['starter_pattern_implication', 'Evidence-bounded implication', 'These findings suggest that {{implication}} when {{condition}}, but they do not establish {{excluded_claim}}.', 'State an implication while preserving the evidence boundary.', ['discussion', 'evidence'], ['Discussion'], [['implication', 'Supported implication'], ['condition', 'Conditions under which it applies'], ['excluded_claim', 'Stronger unsupported conclusion']]],
+  ['starter_pattern_contrast', 'Contrast transition', 'Whereas {{first_case}}, {{second_case}}; this difference reflects {{explanation}}.', 'Connect two findings with an explicit basis for contrast.', ['transition', 'cohesion'], ['Results', 'Discussion'], [['first_case', 'First result or condition'], ['second_case', 'Contrasting result or condition'], ['explanation', 'Evidence-supported explanation']]],
+];
+
+const STARTER_VOCABULARY = [
+  ['starter_vocab_show', 'show', 'demonstrate', 'Use “demonstrate” for direct evidence; use “indicate” or “suggest” when evidence is weaker.', ['indicate', 'suggest', 'reveal'], 'The ablation results demonstrate the contribution of the retrieval module.'],
+  ['starter_vocab_prove', 'prove', 'support', 'Empirical results usually support a claim rather than prove it universally.', ['provide evidence for', 'corroborate'], 'The results support the hypothesis under the evaluated conditions.'],
+  ['starter_vocab_very', 'very important', 'important', 'Replace vague intensifiers with the specific consequence whenever possible.', ['substantive', 'consequential'], 'This distinction is important because it changes the evaluation protocol.'],
+  ['starter_vocab_lot', 'a lot of', 'many', 'Prefer a count or proportion when available; otherwise use a precise quantifier.', ['numerous', 'a substantial proportion of'], 'Many sampled papers omitted uncertainty estimates.'],
+  ['starter_vocab_get', 'get', 'obtain', 'Prefer a verb that names the operation or outcome.', ['derive', 'retrieve', 'achieve'], 'We obtain the final representation by mean pooling.'],
+  ['starter_vocab_better', 'better', 'higher', 'Name the exact dimension of improvement and report its measure.', ['lower', 'more accurate', 'more efficient'], 'The revised method achieved a higher reviewer acceptance rate.'],
+  ['starter_vocab_bad', 'bad', 'limited', 'Describe the observed deficiency rather than applying a broad judgment.', ['inaccurate', 'unstable', 'insufficient'], 'Performance was limited on out-of-domain samples.'],
+  ['starter_vocab_obviously', 'obviously', 'notably', 'Avoid implying that a claim is self-evident; state the evidence instead.', ['as expected', 'consistent with'], 'Notably, the effect persisted across all three datasets.'],
+  ['starter_vocab_causes', 'causes', 'is associated with', 'Use causal language only when the study design identifies a causal effect.', ['correlates with', 'coincides with'], 'Longer prompts were associated with higher completion latency.'],
+  ['starter_vocab_significant', 'significant', 'statistically significant', 'Specify whether significance is statistical or practical and report the criterion.', ['substantial', 'meaningful'], 'The difference was statistically significant at the prespecified threshold.'],
+];
+
+export async function seedStarterLibraries(workspaceRoot) {
+  const timestamp = new Date().toISOString();
+  const { project } = await updateProject(workspaceRoot, (data) => {
+    const addMissing = (target, records) => {
+      const ids = new Set(target.map((item) => item.id));
+      for (const record of records) if (!ids.has(record.id)) target.push(record);
+    };
+    addMissing(data.libraries.corpora, STARTER_CORPORA.map(([id, name, description, content, tags]) => ({
+      ...demoResourceBase(id, timestamp), name, description, content, tags, source: 'Papergod starter library',
+    })));
+    addMissing(data.libraries.sentencePatterns, STARTER_PATTERNS.map(([id, name, template, description, tags, sectionTypes, slots]) => ({
+      ...demoResourceBase(id, timestamp), name, template, description, tags, sectionTypes, source: 'Papergod starter library',
+      slots: slots.map(([slotName, slotDescription]) => ({ name: slotName, description: slotDescription, required: true })),
+    })));
+    addMissing(data.libraries.vocabulary.global, STARTER_VOCABULARY.map(([id, term, preferred, definition, alternatives, example]) => ({
+      ...demoResourceBase(id, timestamp), term, preferred, definition, alternatives, examples: [example], tags: ['academic', 'precision'], source: 'Papergod starter library',
+    })));
+  });
+  return project;
+}
+
 export async function seedDemoWorkspace(workspaceRoot, file = 'main.tex') {
   const document = await syncDocumentStructure(workspaceRoot, file);
   const timestamp = new Date().toISOString();
@@ -167,5 +218,6 @@ export async function initializeWorkspace(workspaceRoot, { demo = false } = {}) 
     project = await saveProject(workspaceRoot, project);
   }
   if (demo) project = await seedDemoWorkspace(workspaceRoot, selectedFile);
+  project = await seedStarterLibraries(workspaceRoot);
   return { createdSample, project };
 }
