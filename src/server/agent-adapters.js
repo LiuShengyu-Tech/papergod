@@ -1,6 +1,6 @@
 import { spawn } from 'child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'fs/promises';
-import { existsSync, readdirSync } from 'fs';
+import { existsSync, readFileSync, readdirSync } from 'fs';
 import { basename, dirname, extname, join } from 'path';
 import { tmpdir } from 'os';
 
@@ -673,6 +673,72 @@ function parsePiProvider(output) {
   return null;
 }
 
+function parsePiModelTable(output) {
+  const clean = String(output || '').replace(/\x1b\[[0-9;]*m/g, '').replace(/[│├└┌─┐┘]/g, '');
+  const models = [];
+  for (const rawLine of clean.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || /^provider\s/i.test(line) || /^-+/.test(line)) continue;
+    const columns = line.split(/\s{2,}/).map((value) => value.trim()).filter(Boolean);
+    const provider = columns[0];
+    const model = columns[1];
+    if (!provider || !model || provider === 'provider') continue;
+    models.push({
+      id: `${provider}/${model}`,
+      label: `${provider} · ${model}`,
+      provider,
+      model,
+      context: columns[2] || '',
+      thinking: columns[4] || '',
+    });
+  }
+  return models;
+}
+
+function codexConfiguredModel() {
+  const configFile = join(process.env.USERPROFILE || '', '.codex', 'config.toml');
+  try {
+    const content = readFileSync(configFile, 'utf-8');
+    const match = content.match(/^\s*model\s*=\s*"([^"]+)"/m);
+    return match?.[1] || '';
+  } catch {
+    return '';
+  }
+}
+
+// Best-effort model list per provider. Never throws; failures return an empty
+// list so the UI falls back to a free-text model field.
+export async function listProviderModels(provider, spec, { commands = {} } = {}) {
+  try {
+    if (provider === 'pi') {
+      const result = await runProcess(spec.command, [...spec.prefixArgs, '--list-models'], { timeoutMs: 10_000, allowFailure: true });
+      if (result.code !== 0) return [];
+      return parsePiModelTable(result.stdout);
+    }
+    if (provider === 'codex') {
+      const configured = codexConfiguredModel();
+      return configured ? [{ id: configured, label: `${configured} (configured)`, provider: 'codex', model: configured, context: '', thinking: '' }] : [];
+    }
+    if (provider === 'opencode') {
+      const result = await runProcess(spec.command, [...spec.prefixArgs, 'models'], { timeoutMs: 10_000, allowFailure: true });
+      if (result.code !== 0) return [];
+      const clean = String(result.stdout).replace(/\x1b\[[0-9;]*m/g, '');
+      const models = [];
+      for (const rawLine of clean.split(/\r?\n/)) {
+        const line = rawLine.trim();
+        if (!line || /^(id|name)\s/i.test(line) || /^-+/.test(line)) continue;
+        const columns = line.split(/\s{2,}/).map((value) => value.trim()).filter(Boolean);
+        const id = columns[0];
+        if (id && !/^(Model|ID|Name)$/i.test(id)) models.push({ id, label: columns[1] ? `${id} · ${columns[1]}` : id, provider: 'opencode', model: id, context: '', thinking: '' });
+      }
+      return models;
+    }
+    return [];
+  } catch {
+    return [];
+  }
+}
+
 async function runPi(request, options) {
   return runPiStructured(withOutputSchema(buildPrompt(request), SUGGESTION_OUTPUT_SCHEMA), parseAgentJson, options);
 }
@@ -732,9 +798,10 @@ export async function detectAgentProviders({ commands = {}, providers = AGENT_PR
           }
         }
       } catch {}
-      return { provider, available: true, authenticated, authStatus, version: (version.stdout || version.stderr).trim() };
+      const models = await listProviderModels(provider, spec, { commands });
+      return { provider, available: true, authenticated, authStatus, version: (version.stdout || version.stderr).trim(), models };
     } catch (error) {
-      return { provider, available: false, authenticated: false, authStatus: 'CLI unavailable', version: null, error: error.code === 'ENOENT' ? 'Not installed' : error.message };
+      return { provider, available: false, authenticated: false, authStatus: 'CLI unavailable', version: null, models: [], error: error.code === 'ENOENT' ? 'Not installed' : error.message };
     }
   };
   const externalProviders = providers.filter((item) => item !== 'mock' && AGENT_PROVIDERS.includes(item));

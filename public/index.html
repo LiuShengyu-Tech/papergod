@@ -124,7 +124,8 @@
           <label for="agent-config-command" data-i18n="agentConfig.command">CLI command</label>
           <input id="agent-config-command" placeholder="codex">
           <label for="agent-config-model" data-i18n="agentConfig.model">Model override</label>
-          <input id="agent-config-model" placeholder="Use the CLI default">
+          <input id="agent-config-model" list="agent-model-list" placeholder="Use the CLI default">
+          <datalist id="agent-model-list"></datalist>
           <label for="agent-config-args" data-i18n="agentConfig.args">Prefix args (one per line)</label>
           <textarea id="agent-config-args" rows="3"></textarea>
           <p id="agent-config-note" aria-live="polite"></p>

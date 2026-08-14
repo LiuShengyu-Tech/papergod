@@ -1669,9 +1669,20 @@ function fillAgentConfigForm() {
   document.getElementById('agent-config-command').value = profile.command || '';
   document.getElementById('agent-config-model').value = profile.model || '';
   document.getElementById('agent-config-args').value = (profile.args || []).join('\n');
+  const datalist = document.getElementById('agent-model-list');
+  datalist.replaceChildren();
+  for (const model of profile.models || []) {
+    const option = document.createElement('option');
+    option.value = model.id;
+    option.label = model.label || model.id;
+    datalist.appendChild(option);
+  }
+  const activeModel = profile.model
+    ? ` · model: ${profile.model}`
+    : (profile.models?.length ? ' · model: CLI default (choose below)' : '');
   const note = profile.id === 'mock'
     ? t('agent.mockNote')
-    : `${profile.available ? t('agent.cliDetected') : t('agent.cliMissing')} ${profile.authStatus || t('agent.authUnchecked')}${profile.id === currentProvider ? ' ' + t('agent.currentUse') : ' ' + t('agent.saveActivate')}`;
+    : `${profile.available ? t('agent.cliDetected') : t('agent.cliMissing')} ${profile.authStatus || t('agent.authUnchecked')}${activeModel}${profile.id === currentProvider ? ' ' + t('agent.currentUse') : ' ' + t('agent.saveActivate')}`;
   setAgentConfigNote(note, profile.id === 'mock' || profile.available && profile.authenticated ? 'success' : profile.available ? 'warning' : 'error');
   document.getElementById('agent-config-probe').textContent = profile.id === 'mock' ? t('agent.checkMock') : t('agent.checkSetup', { name: profile.label });
   document.getElementById('agent-config-save').textContent = profile.id === currentProvider ? t('agent.saveSettings') : t('agent.use', { name: profile.label });
