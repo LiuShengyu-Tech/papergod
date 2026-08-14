@@ -1,6 +1,6 @@
 import { loadProject } from './project-store.js';
 import { getNodeSourceContext, syncDocumentStructure } from './document-structure.js';
-import { findStructureNode, isAbbreviationAt } from './latex-structure.js';
+import { findStructureNode, isAbbreviationAt, sentenceEndIndex } from './latex-structure.js';
 
 // ---------------------------------------------------------------------------
 // Descriptive statistics over sentence/paragraph lengths (word counts)
@@ -47,14 +47,16 @@ export function splitSentences(text) {
   for (let cursor = 0; cursor < source.length; cursor += 1) {
     const character = source[cursor];
     if (!'.?!'.includes(character)) continue;
-    const next = source[cursor + 1];
     const previous = source[cursor - 1];
-    if (/\d/.test(previous || '') && /\d/.test(next || '')) continue; // decimal
-    if (next && !/\s/.test(next)) continue; // glued to following text
+    const boundary = sentenceEndIndex(source, cursor);
+    if (boundary === -1) continue; // glued to following word/command
+    const follower = source[boundary];
+    if (/\d/.test(previous || '') && /\d/.test(follower || '')) continue; // decimal
     if (character === '.' && isAbbreviationAt(source, cursor)) continue; // e.g. i.e. cf.
-    const sentence = cleanText(source.slice(sentenceStart, cursor + 1));
+    const sentence = cleanText(source.slice(sentenceStart, boundary));
     if (sentence) sentences.push(sentence);
-    sentenceStart = cursor + 1;
+    sentenceStart = boundary;
+    cursor = boundary - 1;
   }
   const tail = cleanText(source.slice(sentenceStart));
   if (tail) sentences.push(tail);

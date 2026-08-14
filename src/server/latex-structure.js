@@ -113,8 +113,26 @@ export function isAbbreviationAt(source, dotIndex) {
   while (start >= 0 && /[A-Za-z.]/.test(source[start])) start -= 1;
   const token = source.slice(start + 1, dotIndex);
   if (!token) return false;
-  if (/^[A-Z]$/.test(token)) return true; // initial in a name: A. M. Turing
+  if (/^[A-Z]$/.test(token)) {
+    // A single capital before the period is an initial (A. M. Turing) only when
+    // it is followed by another initial; a sentence-final "do X." is a boundary.
+    return /^\s*(?:['\u2019\u201D"\u201C»›)\]}]*\s*)*[A-Z]\s*\./.test(source.slice(dotIndex + 1));
+  }
   return SENTENCE_ABBREVIATIONS.has(token.toLowerCase());
+}
+
+// Closing quotes/brackets that may legally follow a sentence-final period.
+const CLOSING_PUNCTUATION = '"' + "'" + ')\]}' + '\u2019\u201D\u201C\u2018»›';
+
+// Given the index of a sentence-final character (.?!), return the index just
+// past any trailing closing quotes/brackets, or -1 when the character is glued
+// to a following word/command (i.e. not a boundary).
+export function sentenceEndIndex(source, punctIndex, end = source.length) {
+  let cursor = punctIndex + 1;
+  while (cursor < end && CLOSING_PUNCTUATION.includes(source[cursor])) cursor += 1;
+  const follower = source[cursor];
+  if (cursor < end && follower !== undefined && !/\s/.test(follower)) return -1; // glued
+  return cursor;
 }
 
 function sentenceRanges(source, start, end) {
@@ -126,14 +144,16 @@ function sentenceRanges(source, start, end) {
     if (character === '{' && !isEscaped(source, cursor)) braceDepth += 1;
     else if (character === '}' && !isEscaped(source, cursor)) braceDepth = Math.max(0, braceDepth - 1);
     if (!'.?!'.includes(character) || isEscaped(source, cursor) || braceDepth > 0) continue;
-    const next = source[cursor + 1];
     const previous = source[cursor - 1];
-    if (/\d/.test(previous || '') && /\d/.test(next || '')) continue; // decimal number
-    if (next && !/\s/.test(next)) continue; // period glued to a command, citation, etc.
+    const boundary = sentenceEndIndex(source, cursor, end);
+    if (boundary === -1) continue; // glued to command, citation, etc.
+    const follower = source[boundary];
+    if (/\d/.test(previous || '') && /\d/.test(follower || '')) continue; // decimal number
     if (character === '.' && isAbbreviationAt(source, cursor)) continue; // e.g. i.e. cf. A. M.
-    const range = trimRange(source, sentenceStart, cursor + 1);
+    const range = trimRange(source, sentenceStart, boundary);
     if (range.end > range.start) ranges.push(range);
-    sentenceStart = cursor + 1;
+    sentenceStart = boundary;
+    cursor = boundary - 1;
   }
   const tail = trimRange(source, sentenceStart, end);
   if (tail.end > tail.start) ranges.push(tail);

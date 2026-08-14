@@ -404,17 +404,23 @@ test('LaTeX structure parser ignores commented headings and decimal punctuation'
   assert.equal(parsed.sections[0].children[0].children.length, 2);
 });
 
-test('Sentence splitting keeps abbreviations, initials, and decimals intact', () => {
-  const source = '\\begin{document}\\section{Intro}\nWe use, e.g., the imitation game, cf. Turing (1950), and i.e. not a proof. A. M. Turing proposed this test. Accuracy is 3.14 and Fig. 5 is shown. That is the end.\n\\end{document}';
+test('Sentence splitting keeps abbreviations, quote-wrapped ends, and decimals intact', () => {
+  // "e.g." "cf." "i.e." stay glued; a single-letter placeholder ending "X." is a
+  // real boundary; decimals and "Fig. 5" survive; the period + closing quote
+  // ("think?") is followed by a new sentence.
+  const source = '\\begin{document}\\section{Intro}\nWe use, e.g., the imitation game, cf. Turing (1950), and i.e. not a proof. Choose variable X. Then the question, "Can machines think?" This is a new sentence. Accuracy is 3.14 and Fig. 5 is shown. That is the end.\n\\end{document}';
   const parsed = parseLatexDocument(source, { id: 'document_abbr', sections: [] });
   const sentences = parsed.sections[0].children[0].children.map((sentence) => sentence.text);
-  assert.equal(sentences.length, 4);
+  assert.equal(sentences.length, 6);
   assert.ok(sentences[0].includes('e.g.'));
   assert.ok(sentences[0].includes('cf. Turing'));
   assert.ok(sentences[0].includes('i.e. not'));
-  assert.ok(sentences[1].startsWith('A. M. Turing'));
-  assert.ok(sentences[2].includes('3.14'));
-  assert.ok(sentences[2].includes('Fig. 5'));
+  assert.ok(sentences[1].startsWith('Choose variable X.'));
+  assert.ok(sentences[2].includes('Can machines think?'));
+  assert.ok(/think\?"$|think\?"\s*$/.test(sentences[2]));
+  assert.ok(sentences[3].startsWith('This is a new sentence'));
+  assert.ok(sentences[4].includes('3.14'));
+  assert.ok(sentences[4].includes('Fig. 5'));
 });
 
 test('Paragraph analysis splits sentences abbreviation-aware and strips LaTeX for word count', async () => {
