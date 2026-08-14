@@ -1077,6 +1077,29 @@ process.stdout.write(JSON.stringify(out));
   await rm(workspace, { recursive: true, force: true });
 });
 
+test('Review and orchestration prompts also switch to workspace index when a target is set', async () => {
+  const fakeCli = join(tmpWorkspace, 'fake-review-ws.mjs');
+  await writeFile(fakeCli, `
+import { readFileSync, writeFileSync } from 'fs';
+const args = process.argv.slice(2);
+const requestIdx = args.findIndex((a) => a.startsWith('@'));
+const prompt = readFileSync(args[requestIdx].slice(1), 'utf-8');
+writeFileSync('captured-review-ws.txt', prompt);
+const out = { summary: 'ok', verdict: 'minor-revision', confidence: 0.7, items: [{ rubricId: 'rigor', kind: 'concern', category: 'style', severity: 'minor', body: 'x', suggestedFix: '', quote: 'very important' }] };
+process.stdout.write(JSON.stringify(out));
+`, 'utf-8');
+  const workspace = await mkdtemp(join(tmpdir(), 'papergod-review-ws-'));
+  await writeFile(join(workspace, 'main.tex'), '\\documentclass{article}\\begin{document}This result is very important.\\end{document}', 'utf-8');
+  const commands = { pi: { command: process.execPath, args: [fakeCli] } };
+  const reviewer = { name: 'R', role: 'domain', focus: 'f', prompt: '' };
+  const rubric = [{ id: 'rigor', title: 'Rigor', instruction: 'Check', weight: 1 }];
+  await runAcademicReviewAgent('pi', { content: 'This result is very important.', reviewer, rubric, workspace: { file: 'main.tex', start: 0, end: 14 } }, { workspaceRoot: workspace, commands });
+  const reviewPrompt = await readFile(join(workspace, 'captured-review-ws.txt'), 'utf-8');
+  assert.doesNotMatch(reviewPrompt, /very important/);
+  assert.match(reviewPrompt, /TARGET document/);
+  await rm(workspace, { recursive: true, force: true });
+});
+
 test('Codex, Claude Code, OpenCode, and Pi peer-review adapters enforce structured reports', async () => {
   const fakeCli = join(tmpWorkspace, 'fake-review-agent.mjs');
   await writeFile(fakeCli, `

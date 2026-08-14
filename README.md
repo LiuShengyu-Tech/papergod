@@ -91,6 +91,7 @@ Express server (127.0.0.1 only)
 - LaTeX compilation uses `execFile` with `shell: false`, shell escape disabled, a 30s timeout, and `SIGKILL` on overrun
 - Only `.tex` files can be written or compiled
 - Dotfiles denied in static serving
+- External Agents read only the current workspace and never receive the manuscript or library body in their prompt (workspace-index mode); their output quotes are validated against the in-memory source, and any write still flows through the visible diff review
 - CodeMirror is installed locally from npm; the editor does not depend on a public CDN
 
 ### Agent System
@@ -106,7 +107,9 @@ Express server (127.0.0.1 only)
 - Preview the complete invocation context assembled from project/document/element prompts, summaries, sentence intent, selected libraries, temporary instructions, and target source
 - **Mock agent**: deterministic suggestions based on pattern matching (passive voice, "very + adjective", short conclusions)
 - **CLI agents**: Codex, Claude Code, OpenCode, and Pi Agent run non-interactively with validated structured output, analysis-only execution, timeouts, cancellation, and audit records
-- **Provider isolation**: Codex uses a read-only ephemeral execution; OpenCode runs in a temporary directory with permissions denied; Pi runs in JSON mode with tools, sessions, project context, extensions, and skills disabled
+- **Provider isolation**: Codex uses a read-only ephemeral execution; OpenCode runs in a temporary directory with permissions denied; Pi runs in JSON mode with sessions, project context, extensions, and skills disabled
+- **Workspace-index context**: for suggest, peer-review, and review-orchestration runs, the prompt inlines only the workspace absolute path, a flat directory/file listing, the target file's byte range `[start, end)`, and the `.papergod/library/*` paths — the manuscript body and library text are never sent. The Agent reads the files it needs on demand, and its `originalText`/`quote` outputs are still validated against the in-memory target as exact contiguous substrings
+- **On-demand read access**: Pi runs with `--tools read`, Claude Code with `--tools Read,Grep,Glob`, OpenCode with `--dir <workspace>` plus read-only permissions, and Codex with its read-only sandbox pointed at the workspace, so each CLI can read the paper and library files without being able to write them
 - **Structured workflows**: editing, review orchestration, peer review, and full-paper generation each use a dedicated validated JSON protocol
 - **Accept/Reject**: both decisions are persisted; accepted edits use atomic revisions and checksum recovery points
 - **Element scope**: select a section, paragraph, or sentence from the outline to constrain prompts and diffs to that exact source range

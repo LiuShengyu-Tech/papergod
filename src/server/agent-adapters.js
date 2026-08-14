@@ -507,21 +507,45 @@ function buildSuggestionPrompt(request, options) {
   return buildPrompt(request);
 }
 
-function buildReviewPrompt({ content, reviewer, rubric }) {
-  return `You are an independent academic peer reviewer. Review only the supplied LaTeX manuscript from your assigned perspective. Do not edit files. Return only JSON matching the required schema. A quote must be an exact contiguous substring of the manuscript or an empty string. Keep each item atomic and assign it to one supplied rubricId.
+// Returns the workspace index text when the request targets a workspace file,
+// or null to fall back to inline mode.
+function workspaceIndexMaybe(request, options) {
+  if (request.workspace && options?.workspaceRoot) {
+    return buildWorkspaceIndex(options.workspaceRoot, {
+      file: request.workspace.file || '',
+      start: request.workspace.start ?? 0,
+      end: request.workspace.end ?? 0,
+    });
+  }
+  return null;
+}
 
-Reviewer profile:
+function buildReviewPrompt(request, options) {
+  const reviewer = request.reviewer;
+  const rubric = request.rubric || [];
+  const profile = `Reviewer profile:
 Name: ${reviewer.name}
 Role: ${reviewer.role}
 Focus: ${reviewer.focus}
 Additional instruction: ${reviewer.prompt || 'None'}
 
 Review rubric:
-${rubric.map((item) => `- ${item.id}: ${item.title} — ${item.instruction} (weight ${item.weight})`).join('\n')}
+${rubric.map((item) => `- ${item.id}: ${item.title} — ${item.instruction} (weight ${item.weight})`).join('\n')}`;
+  const index = workspaceIndexMaybe(request, options);
+  if (index) {
+    return `You are an independent academic peer reviewer. Read the TARGET document in the workspace and review it from your assigned perspective. Return only JSON matching the required schema. A quote must be an exact contiguous substring of the manuscript or an empty string. Keep each item atomic and assign it to one supplied rubricId. Do not edit files.
+
+${profile}
+
+${index}`;
+  }
+  return `You are an independent academic peer reviewer. Review only the supplied LaTeX manuscript from your assigned perspective. Do not edit files. Return only JSON matching the required schema. A quote must be an exact contiguous substring of the manuscript or an empty string. Keep each item atomic and assign it to one supplied rubricId.
+
+${profile}
 
 LaTeX manuscript:
 <document>
-${content}
+${request.content}
 </document>`;
 }
 
@@ -540,20 +564,29 @@ ${outlineContext || 'Use a conventional abstract, introduction, methods, results
 ${resourceContext || 'No writing library resources were provided. Return usedResourceIds as an empty array.'}`;
 }
 
-function buildReviewOrchestrationPrompt({ feedback, content, outlineContext = '' }) {
-  return `You are an academic revision orchestrator. Convert the supplied reviewer feedback into atomic, non-duplicated opinions. Return only JSON matching the required schema. For each opinion, quote an exact contiguous manuscript substring when it targets specific text; otherwise use an empty quote for a document-level task. suggestedFix may be empty when author judgment or new evidence is required. dependsOn contains one-based opinion numbers that must be completed first. Do not edit files.
-
-Reviewer feedback:
+function buildReviewOrchestrationPrompt(request, options) {
+  const feedback = `Reviewer feedback:
 <feedback>
-${feedback}
+${request.feedback}
 </feedback>
 
 Manuscript outline:
-${outlineContext || 'No outline metadata.'}
+${request.outlineContext || 'No outline metadata.'}`;
+  const index = workspaceIndexMaybe(request, options);
+  if (index) {
+    return `You are an academic revision orchestrator. Convert the supplied reviewer feedback into atomic, non-duplicated opinions. Read the TARGET document in the workspace. Return only JSON matching the required schema. For each opinion, quote an exact contiguous manuscript substring when it targets specific text; otherwise use an empty quote for a document-level task. suggestedFix may be empty when author judgment or new evidence is required. dependsOn contains one-based opinion numbers that must be completed first. Do not edit files.
+
+${feedback}
+
+${index}`;
+  }
+  return `You are an academic revision orchestrator. Convert the supplied reviewer feedback into atomic, non-duplicated opinions. Return only JSON matching the required schema. For each opinion, quote an exact contiguous manuscript substring when it targets specific text; otherwise use an empty quote for a document-level task. suggestedFix may be empty when author judgment or new evidence is required. dependsOn contains one-based opinion numbers that must be completed first. Do not edit files.
+
+${feedback}
 
 LaTeX manuscript:
 <document>
-${content}
+${request.content}
 </document>`;
 }
 
@@ -600,7 +633,7 @@ async function runClaude(request, options) {
 }
 
 async function runClaudeReview(request, options) {
-  return runClaudeStructured(buildReviewPrompt(request), REVIEW_OUTPUT_SCHEMA, parseReviewAgentJson, options);
+  return runClaudeStructured(buildReviewPrompt(request, options), REVIEW_OUTPUT_SCHEMA, parseReviewAgentJson, options);
 }
 
 async function runClaudePaperGeneration(request, options) {
@@ -608,7 +641,7 @@ async function runClaudePaperGeneration(request, options) {
 }
 
 async function runClaudeReviewOrchestration(request, options) {
-  return runClaudeStructured(buildReviewOrchestrationPrompt(request), REVIEW_ORCHESTRATION_OUTPUT_SCHEMA, parseReviewOrchestrationJson, options);
+  return runClaudeStructured(buildReviewOrchestrationPrompt(request, options), REVIEW_ORCHESTRATION_OUTPUT_SCHEMA, parseReviewOrchestrationJson, options);
 }
 
 async function runCodex(request, options) {
@@ -662,7 +695,7 @@ async function runCodexReview(request, options) {
     await writeFile(schemaFile, JSON.stringify(REVIEW_OUTPUT_SCHEMA), 'utf-8');
     const spec = commandSpec('codex', options.commands);
     const args = [...spec.prefixArgs, 'exec', ...modelArgs(spec), '--sandbox', 'read-only', '--skip-git-repo-check', '--ephemeral', '--color', 'never', '--output-schema', schemaFile, '--output-last-message', outputFile, '-'];
-    await runProcess(spec.command, args, { cwd: options.workspaceRoot, input: buildReviewPrompt(request), timeoutMs: options.timeoutMs, signal: options.signal });
+    await runProcess(spec.command, args, { cwd: options.workspaceRoot, input: buildReviewPrompt(request, options), timeoutMs: options.timeoutMs, signal: options.signal });
     return parseReviewAgentJson(await readFile(outputFile, 'utf-8'));
   } finally {
     await rm(temporary, { recursive: true, force: true });
@@ -670,7 +703,7 @@ async function runCodexReview(request, options) {
 }
 
 async function runOpenCodeReview(request, options) {
-  return runOpenCodeStructured(withOutputSchema(buildReviewPrompt(request), REVIEW_OUTPUT_SCHEMA), parseReviewAgentJson, options, 'Perform the independent peer review and return only the required JSON.');
+  return runOpenCodeStructured(withOutputSchema(buildReviewPrompt(request, options), REVIEW_OUTPUT_SCHEMA), parseReviewAgentJson, options, 'Perform the independent peer review and return only the required JSON.');
 }
 
 async function runCodexPaperGeneration(request, options) {
@@ -700,13 +733,13 @@ async function runCodexReviewOrchestration(request, options) {
     await writeFile(schemaFile, JSON.stringify(REVIEW_ORCHESTRATION_OUTPUT_SCHEMA), 'utf-8');
     const spec = commandSpec('codex', options.commands);
     const args = [...spec.prefixArgs, 'exec', ...modelArgs(spec), '--sandbox', 'read-only', '--skip-git-repo-check', '--ephemeral', '--color', 'never', '--output-schema', schemaFile, '--output-last-message', outputFile, '-'];
-    await runProcess(spec.command, args, { cwd: options.workspaceRoot, input: buildReviewOrchestrationPrompt(request), timeoutMs: options.timeoutMs, signal: options.signal });
+    await runProcess(spec.command, args, { cwd: options.workspaceRoot, input: buildReviewOrchestrationPrompt(request, options), timeoutMs: options.timeoutMs, signal: options.signal });
     return parseReviewOrchestrationJson(await readFile(outputFile, 'utf-8'));
   } finally { await rm(temporary, { recursive: true, force: true }); }
 }
 
 async function runOpenCodeReviewOrchestration(request, options) {
-  return runOpenCodeStructured(withOutputSchema(buildReviewOrchestrationPrompt(request), REVIEW_ORCHESTRATION_OUTPUT_SCHEMA), parseReviewOrchestrationJson, options, 'Orchestrate the review feedback and return only the required JSON.');
+  return runOpenCodeStructured(withOutputSchema(buildReviewOrchestrationPrompt(request, options), REVIEW_ORCHESTRATION_OUTPUT_SCHEMA), parseReviewOrchestrationJson, options, 'Orchestrate the review feedback and return only the required JSON.');
 }
 
 async function runPiStructured(prompt, parser, options) {
@@ -816,7 +849,7 @@ async function runPi(request, options) {
 }
 
 async function runPiReview(request, options) {
-  return runPiStructured(withOutputSchema(buildReviewPrompt(request), REVIEW_OUTPUT_SCHEMA), parseReviewAgentJson, options);
+  return runPiStructured(withOutputSchema(buildReviewPrompt(request, options), REVIEW_OUTPUT_SCHEMA), parseReviewAgentJson, options);
 }
 
 async function runPiPaperGeneration(request, options) {
@@ -824,7 +857,7 @@ async function runPiPaperGeneration(request, options) {
 }
 
 async function runPiReviewOrchestration(request, options) {
-  return runPiStructured(withOutputSchema(buildReviewOrchestrationPrompt(request), REVIEW_ORCHESTRATION_OUTPUT_SCHEMA), parseReviewOrchestrationJson, options);
+  return runPiStructured(withOutputSchema(buildReviewOrchestrationPrompt(request, options), REVIEW_ORCHESTRATION_OUTPUT_SCHEMA), parseReviewOrchestrationJson, options);
 }
 
 export async function detectAgentProviders({ commands = {}, providers = AGENT_PROVIDERS } = {}) {
@@ -910,7 +943,7 @@ export async function runAcademicReviewAgent(provider, request, options = {}) {
   }
   const promptSize = JSON.stringify({ reviewer: request.reviewer, rubric: request.rubric }).length;
   if (request.content.length + promptSize > MAX_INPUT_CHARS) throw new Error('Agent input exceeds 500,000 characters');
-  const runtime = { workspaceRoot: options.workspaceRoot, commands: options.commands || {}, timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS, signal: options.signal };
+  const runtime = { workspaceRoot: options.workspaceRoot, commands: options.commands || {}, timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS, signal: options.signal, readFromWorkspace: Boolean(request.workspace && options.workspaceRoot) };
   const response = provider === 'codex' ? await runCodexReview(request, runtime)
     : provider === 'claude-code' ? await runClaudeReview(request, runtime)
       : provider === 'opencode' ? await runOpenCodeReview(request, runtime)
@@ -946,7 +979,7 @@ export async function runReviewOrchestrationAgent(provider, request, options = {
   if (!AGENT_PROVIDERS.includes(provider) || provider === 'mock') throw new Error(`External adapter unavailable for provider: ${provider}`);
   if (typeof request?.feedback !== 'string' || typeof request?.content !== 'string') throw new Error('feedback and content must be strings');
   if (request.feedback.length + request.content.length + String(request.outlineContext || '').length > MAX_INPUT_CHARS) throw new Error('Agent input exceeds 500,000 characters');
-  const runtime = { workspaceRoot: options.workspaceRoot, commands: options.commands || {}, timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS, signal: options.signal };
+  const runtime = { workspaceRoot: options.workspaceRoot, commands: options.commands || {}, timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS, signal: options.signal, readFromWorkspace: Boolean(request.workspace && options.workspaceRoot) };
   const response = provider === 'codex' ? await runCodexReviewOrchestration(request, runtime)
     : provider === 'claude-code' ? await runClaudeReviewOrchestration(request, runtime)
       : provider === 'opencode' ? await runOpenCodeReviewOrchestration(request, runtime)

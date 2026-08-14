@@ -32,7 +32,8 @@ Papergod 是一个可通过 npm 安装和启动的、本地优先的 AI LaTeX �
 | 自助 revise | 已实现 | 意见导入、计划执行、可编辑回复信、修改清单、编译复核、未处理检查和导出 |
 | 一键生成论文 | 已实现 | 核心/分层 Prompt、结构大纲和写作库受控生成，全文 diff 审阅后方可应用 |
 | 修改位置与历史 | 已实现 | 最近 5 次版本抽屉、逐块 diff、源码定位、持久 revision、恢复点、校验和与安全回滚 |
-| 自动化测试 | 已实现 | 117 项 API、结构、CLI、工作区/PTY、BibTeX/Zotero、Agent 配置、写作库、评审、修订、生成、编排、统计分析、综述、PDF 提取、安全和编译测试通过 |
+| 自动化测试 | 已实现 | 125 项 API、结构、CLI、工作区/PTY、BibTeX/Zotero、Agent 配置、写作库、评审、修订、生成、编排、统计分析、综述、PDF 提取、安全和编译测试通过 |
+| Agent 上下文工程（文件索引 + 按需读取） | 已实现 | 写作库物化为 `.papergod/library/` 可读文件，prompt 仅注入项目绝对路径、目录清单、目标文件字节范围与库路径；各外部 CLI 放开 workspace 只读访问，正文与库全文不再进入 prompt |
 
 ## 目标架构
 
@@ -148,6 +149,17 @@ Local workspace
 - [x] 第一版仅编排用户已经配置好的本地 CLI，不自动创建或登录账号
 
 验收：用户能在画布上连接多个本地 Agent，运行一次可追踪协作流程，并定位每一步的输入、输出和失败原因。
+
+### M10：Agent 上下文工程（文件索引 + 按需读取）
+
+- [x] 把写作库（语料/句型/词汇）物化为 workspace 内可读文件（`.papergod/library/corpus.md`、`patterns.md`、`vocabulary-global.md`、`vocabulary-session.md` 与 `.papergod/index.json`），外部 Agent 调用前落盘
+- [x] 精简 Agent prompt：只注入项目绝对路径、各层目录清单、目标文件字节范围 `[start, end)` 与库文件路径，不再注入文档正文与库全文
+- [x] 摘要、评审、意见编排等结构化工作流统一走 workspace-index 分支；编排器内对非文件输入仍保留内联（节点输入原文即 prompt，非文件）
+- [x] 放开各外部 CLI 在 workspace 内的只读访问：Pi `--tools read`、Claude Code `--tools Read,Grep,Glob`、OpenCode `--dir workspaceRoot` + 只读权限、Codex 只读沙箱读取当前工作目录
+- [x] Mock 与既有建议/评审/段落/全文生成/编排/综述/PDF 提取工作流兼容新协议，自动化测试通过
+- [x] 保留安全边界：建议/评审的 `originalText`/`quote` 仍以内存中的 `request.content` 校验为精确连续子串，写入仍走可见 diff 审阅
+
+验收：外部 Agent 通过路径自行读取论文与库文件后返回结构化建议，prompt 中不再出现正文全文；所有工作流测试通过且安全边界不变。
 
 ## 实现原则
 

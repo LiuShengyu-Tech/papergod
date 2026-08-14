@@ -7,6 +7,7 @@ import { syncDocumentStructure } from './document-structure.js';
 import { getHistoricalRevisionSource } from './change-history.js';
 import { createAgentRun, updateAgentRun } from './project-resources.js';
 import { runReviewOrchestrationAgent } from './agent-adapters.js';
+import { materializeLibraries } from './library-files.js';
 
 const revisionQueues = new Map();
 
@@ -209,7 +210,11 @@ export async function orchestrateReviewOpinions(workspaceRoot, { documentId, tex
     input: JSON.stringify({ documentId, feedbackCharacters: text.length, manuscriptCharacters: content.length }), output: '', error: '', startedAt, finishedAt: '',
   });
   try {
-    const result = await runReviewOrchestrationAgent(provider, { feedback: text, content, outlineContext: outlineForAgent(document) }, {
+    await materializeLibraries(workspaceRoot);
+    const result = await runReviewOrchestrationAgent(provider, {
+      feedback: text, content, outlineContext: outlineForAgent(document),
+      workspace: { file: document.file, start: 0, end: content.length },
+    }, {
       workspaceRoot, commands: options.commands || {}, signal: options.signal,
     });
     const timestamp = now();

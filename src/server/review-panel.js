@@ -6,6 +6,7 @@ import { createAgentRun, updateAgentRun } from './project-resources.js';
 import { syncDocumentStructure } from './document-structure.js';
 import { runAcademicReviewAgent } from './agent-adapters.js';
 import { createRevisionPlan } from './revision-engine.js';
+import { materializeLibraries } from './library-files.js';
 
 const REVIEW_ROLES = ['methodology', 'statistics', 'writing', 'domain', 'reproducibility'];
 const VERDICTS = ['accept', 'minor-revision', 'major-revision', 'reject'];
@@ -158,7 +159,7 @@ export function synthesizePeerReviews(reports) {
   };
 }
 
-async function runOneReviewer(workspaceRoot, provider, content, reviewer, rubric, options) {
+async function runOneReviewer(workspaceRoot, provider, content, reviewer, rubric, options, file = '') {
   const startedAt = now();
   const run = await createAgentRun(workspaceRoot, {
     provider, operation: 'peer-review', status: provider === 'mock' ? 'queued' : 'running',
@@ -167,7 +168,10 @@ async function runOneReviewer(workspaceRoot, provider, content, reviewer, rubric
   });
   try {
     const result = provider === 'mock' ? generateMockPeerReview(content, reviewer, rubric)
-      : await runAcademicReviewAgent(provider, { content, reviewer, rubric }, options);
+      : await runAcademicReviewAgent(provider, {
+        content, reviewer, rubric,
+        workspace: file ? { file, start: 0, end: content.length } : null,
+      }, options);
     const report = {
       id: id('review_report'), reviewerId: reviewer.id, runId: run.id, status: 'complete',
       summary: result.summary, verdict: result.verdict, confidence: result.confidence,
@@ -203,9 +207,10 @@ export async function runReviewRound(workspaceRoot, reviewId, options = {}) {
   });
   const controller = new AbortController();
   options.signal?.addEventListener('abort', () => controller.abort(), { once: true });
+  if (review.provider !== 'mock') await materializeLibraries(workspaceRoot);
   const reports = await Promise.all(review.reviewers.map((reviewer) => runOneReviewer(workspaceRoot, review.provider, content, reviewer, review.rubric, {
     workspaceRoot, commands: options.commands || {}, signal: controller.signal,
-  })));
+  }, currentDocument.file)));
   const successful = reports.filter((report) => report.status === 'complete');
   const synthesis = synthesizePeerReviews(successful);
   const { result } = await updateProject(workspaceRoot, (draft) => {
