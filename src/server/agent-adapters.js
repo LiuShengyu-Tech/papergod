@@ -96,11 +96,13 @@ const knownWindowsPaths = new Map();
 
 function discoverKnownWindowsPath(provider) {
   if (process.platform !== 'win32') return null;
-  if (knownWindowsPaths.has(provider)) return knownWindowsPaths.get(provider);
+  const cached = knownWindowsPaths.get(provider);
+  if (cached && existsSync(cached)) return cached;
   let found = null;
   if (provider === 'codex') {
     // Codex CLI installs under %LOCALAPPDATA%\OpenAI\Codex\bin\<hash>\codex.exe
-    // without registering itself on PATH.
+    // without registering itself on PATH. The hash directory changes on every
+    // Codex update, so re-scan whenever the cached path is gone.
     const base = join(process.env.LOCALAPPDATA || '', 'OpenAI', 'Codex', 'bin');
     let entries;
     try { entries = readdirSync(base); } catch { entries = []; }
@@ -120,9 +122,19 @@ function commandSpec(provider, overrides = {}) {
     const known = discoverKnownWindowsPath(provider);
     return { command: known || defaultCommand, prefixArgs: [], model: '' };
   }
-  if (typeof override === 'string') return { command: override, prefixArgs: [], model: '' };
+  if (typeof override === 'string') {
+    const command = override === defaultCommand ? (discoverKnownWindowsPath(provider) || defaultCommand) : override;
+    return { command, prefixArgs: [], model: '' };
+  }
+  // A saved profile that only repeats the default command name (e.g. "codex")
+  // must not disable automatic discovery: the Codex CLI moves between hash
+  // directories on update and is often not on PATH at all.
+  const configuredCommand = override.command || defaultCommand;
+  const command = configuredCommand === defaultCommand
+    ? (discoverKnownWindowsPath(provider) || defaultCommand)
+    : configuredCommand;
   return {
-    command: override.command || defaultCommand,
+    command,
     prefixArgs: Array.isArray(override.args) ? override.args : [],
     model: typeof override.model === 'string' ? override.model.trim() : '',
   };
@@ -636,7 +648,7 @@ async function runPiStructured(prompt, parser, options) {
     const spec = commandSpec('pi', options.commands);
     const args = [
       ...spec.prefixArgs,
-      '--mode', 'json', '--no-session', '--no-tools', '--no-context-files',
+      '--print', '--mode', 'json', '--no-session', '--no-tools', '--no-context-files',
       '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-themes', '--no-approve',
       ...modelArgs(spec), `@${requestFile}`,
       'Follow the attached academic writing request. Return only the required JSON.',
@@ -648,6 +660,17 @@ async function runPiStructured(prompt, parser, options) {
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
+}
+
+function parsePiProvider(output) {
+  const clean = String(output || '').replace(/\x1b\[[0-9;]*m/g, '').replace(/[│├└┌─┐┘]/g, '');
+  for (const rawLine of clean.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || /^provider\s/i.test(line)) continue;
+    const match = line.match(/^(\S+)\s+/);
+    if (match) return match[1];
+  }
+  return null;
 }
 
 async function runPi(request, options) {
@@ -693,6 +716,20 @@ export async function detectAgentProviders({ commands = {}, providers = AGENT_PR
           const models = await runProcess(spec.command, [...spec.prefixArgs, '--list-models'], { timeoutMs: 10_000, allowFailure: true });
           authenticated = false;
           authStatus = models.code === 0 ? 'Installed · run live test to verify credentials' : 'Installed · configure credentials in Pi';
+          if (models.code === 0) {
+            // Pi: confirm provider readiness with `pi auth check --provider <name> --json`.
+            const providerName = parsePiProvider(models.stdout) || 'opencode-go';
+            const check = await runProcess(spec.command, [...spec.prefixArgs, 'auth', 'check', '--provider', providerName, '--json'], { timeoutMs: 10_000, allowFailure: true });
+            if (check.code === 0) {
+              try {
+                const parsed = JSON.parse(check.stdout.trim());
+                authenticated = parsed.status === 'ready';
+                authStatus = authenticated ? `Ready · ${parsed.authType || 'authenticated'} (${providerName})` : `Sign-in required (${providerName})`;
+              } catch {
+                authStatus = `Installed · ${providerName}`;
+              }
+            }
+          }
         }
       } catch {}
       return { provider, available: true, authenticated, authStatus, version: (version.stdout || version.stderr).trim() };
