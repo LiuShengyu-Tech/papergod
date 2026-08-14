@@ -1,6 +1,6 @@
 import { loadProject } from './project-store.js';
 import { getNodeSourceContext, syncDocumentStructure } from './document-structure.js';
-import { findStructureNode } from './latex-structure.js';
+import { findStructureNode, isAbbreviationAt } from './latex-structure.js';
 
 // ---------------------------------------------------------------------------
 // Descriptive statistics over sentence/paragraph lengths (word counts)
@@ -23,16 +23,42 @@ function cleanText(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
 }
 
+// Strip LaTeX markup before counting words and splitting sentences so that
+// commands and math do not inflate sentence lengths or break sentence pauses.
+function cleanLatexForText(value) {
+  return cleanText(value)
+    .replace(/(?<!\\)%.*$/gm, ' ')
+    .replace(/\\(?:cite|ref|label|footnote|emph|textbf|textit|texttt)\*?(?:\[[^\]]*\])?\{([^{}]*)\}/g, '$1')
+    .replace(/\\[a-zA-Z@]+\*?(?:\[[^\]]*\])?/g, ' ')
+    .replace(/[{}]/g, ' ')
+    .replace(/\$+[^$]*\$+/g, ' equation ');
+}
+
 export function wordCount(text) {
-  const cleaned = cleanText(text);
-  return cleaned ? cleaned.split(' ').length : 0;
+  const cleaned = cleanLatexForText(text);
+  return cleaned ? cleaned.split(/\s+/).filter(Boolean).length : 0;
 }
 
 export function splitSentences(text) {
-  return cleanText(text)
-    .split(/(?<=[.!?])\s+/)
-    .map((sentence) => sentence.trim())
-    .filter(Boolean);
+  const source = cleanLatexForText(text);
+  if (!source) return [];
+  const sentences = [];
+  let sentenceStart = 0;
+  for (let cursor = 0; cursor < source.length; cursor += 1) {
+    const character = source[cursor];
+    if (!'.?!'.includes(character)) continue;
+    const next = source[cursor + 1];
+    const previous = source[cursor - 1];
+    if (/\d/.test(previous || '') && /\d/.test(next || '')) continue; // decimal
+    if (next && !/\s/.test(next)) continue; // glued to following text
+    if (character === '.' && isAbbreviationAt(source, cursor)) continue; // e.g. i.e. cf.
+    const sentence = cleanText(source.slice(sentenceStart, cursor + 1));
+    if (sentence) sentences.push(sentence);
+    sentenceStart = cursor + 1;
+  }
+  const tail = cleanText(source.slice(sentenceStart));
+  if (tail) sentences.push(tail);
+  return sentences;
 }
 
 function round(value, digits = 2) {

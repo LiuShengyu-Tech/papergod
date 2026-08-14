@@ -97,6 +97,26 @@ function plainText(raw) {
     .trim();
 }
 
+// Common Latin/English abbreviations whose trailing period is not a sentence
+// boundary. Keys include multi-character sequences such as "e.g" where the
+// intermediate period is part of the token.
+export const SENTENCE_ABBREVIATIONS = new Set([
+  'e.g', 'i.e', 'etc', 'cf', 'vs', 'viz', 'ca', 'approx', 'resp', 'ibid', 'loc', 'cit', 'op',
+  'fig', 'figs', 'sec', 'secs', 'eq', 'eqn', 'eqns', 'ref', 'refs', 'no', 'nos', 'vol', 'vols',
+  'pp', 'p', 'ch', 'chap', 'app', 'appx', 'dr', 'mr', 'mrs', 'ms', 'prof', 'st', 'rev', 'gen',
+  'gov', 'dept', 'univ', 'inc', 'ltd', 'ed', 'eds', 'al', 'jr', 'sr', 'ph', 'th',
+]);
+
+export function isAbbreviationAt(source, dotIndex) {
+  if (typeof source !== 'string' || !Number.isInteger(dotIndex)) return false;
+  let start = dotIndex - 1;
+  while (start >= 0 && /[A-Za-z.]/.test(source[start])) start -= 1;
+  const token = source.slice(start + 1, dotIndex);
+  if (!token) return false;
+  if (/^[A-Z]$/.test(token)) return true; // initial in a name: A. M. Turing
+  return SENTENCE_ABBREVIATIONS.has(token.toLowerCase());
+}
+
 function sentenceRanges(source, start, end) {
   const ranges = [];
   let sentenceStart = start;
@@ -108,8 +128,9 @@ function sentenceRanges(source, start, end) {
     if (!'.?!'.includes(character) || isEscaped(source, cursor) || braceDepth > 0) continue;
     const next = source[cursor + 1];
     const previous = source[cursor - 1];
-    if (/\d/.test(previous || '') && /\d/.test(next || '')) continue;
-    if (next && !/\s/.test(next)) continue;
+    if (/\d/.test(previous || '') && /\d/.test(next || '')) continue; // decimal number
+    if (next && !/\s/.test(next)) continue; // period glued to a command, citation, etc.
+    if (character === '.' && isAbbreviationAt(source, cursor)) continue; // e.g. i.e. cf. A. M.
     const range = trimRange(source, sentenceStart, cursor + 1);
     if (range.end > range.start) ranges.push(range);
     sentenceStart = cursor + 1;

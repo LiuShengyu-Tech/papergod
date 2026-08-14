@@ -404,6 +404,34 @@ test('LaTeX structure parser ignores commented headings and decimal punctuation'
   assert.equal(parsed.sections[0].children[0].children.length, 2);
 });
 
+test('Sentence splitting keeps abbreviations, initials, and decimals intact', () => {
+  const source = '\\begin{document}\\section{Intro}\nWe use, e.g., the imitation game, cf. Turing (1950), and i.e. not a proof. A. M. Turing proposed this test. Accuracy is 3.14 and Fig. 5 is shown. That is the end.\n\\end{document}';
+  const parsed = parseLatexDocument(source, { id: 'document_abbr', sections: [] });
+  const sentences = parsed.sections[0].children[0].children.map((sentence) => sentence.text);
+  assert.equal(sentences.length, 4);
+  assert.ok(sentences[0].includes('e.g.'));
+  assert.ok(sentences[0].includes('cf. Turing'));
+  assert.ok(sentences[0].includes('i.e. not'));
+  assert.ok(sentences[1].startsWith('A. M. Turing'));
+  assert.ok(sentences[2].includes('3.14'));
+  assert.ok(sentences[2].includes('Fig. 5'));
+});
+
+test('Paragraph analysis splits sentences abbreviation-aware and strips LaTeX for word count', async () => {
+  const { data } = await api('/api/analysis/structure', {
+    method: 'POST',
+    body: { content: 'We use, e.g., a method that cites \\cite{alpha2023} and math $x^2 + y^2 = z^2$. Next sentence arrives. See Eq. 5 and Fig. 3. End.' },
+  });
+  const analysis = data.analysis;
+  assert.equal(analysis.unit.sentenceCount, 4);
+  const texts = analysis.sentences.map((sentence) => sentence.text);
+  assert.ok(texts[0].includes('e.g.'));
+  assert.ok(texts[1].startsWith('Next sentence'));
+  assert.ok(texts[2].includes('Eq. 5'));
+  // The math formula is normalized, not dumped as raw LaTeX in the text layer
+  assert.doesNotMatch(texts[0], /\\cite|\^2/);
+});
+
 test('Document structure APIs synchronize and update layered metadata', async () => {
   const file = 'structure-api.tex';
   await writeFile(join(tmpWorkspace, file), '\\title{Structure API Paper}\\begin{document}\n\\section{Introduction}\nFirst sentence. Second claim follows.\n\n\\section{Methods}\nMethod sentence one. Method sentence two.\n\\end{document}', 'utf-8');
