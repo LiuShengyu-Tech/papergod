@@ -46,6 +46,7 @@ import {
 } from './zotero.js';
 import { generateLiteratureReview } from './literature-review.js';
 import { extractTextCandidates } from './text-extraction.js';
+import { materializeLibraries } from './library-files.js';
 import {
   createOrchestration, createOrchestrationManager, deleteOrchestration, getOrchestration,
   listOrchestrations, resetOrchestration, updateOrchestration,
@@ -194,6 +195,7 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
       };
     }
     await hydrateAgentCommands();
+    await materializeLibraries(workspaceRoot);
     const startedAt = new Date().toISOString();
     const run = await createAgentRun(workspaceRoot, {
       provider, operation: 'suggest', status: 'running', prompt,
