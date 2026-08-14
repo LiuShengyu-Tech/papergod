@@ -1669,14 +1669,7 @@ function fillAgentConfigForm() {
   document.getElementById('agent-config-command').value = profile.command || '';
   document.getElementById('agent-config-model').value = profile.model || '';
   document.getElementById('agent-config-args').value = (profile.args || []).join('\n');
-  const datalist = document.getElementById('agent-model-list');
-  datalist.replaceChildren();
-  for (const model of profile.models || []) {
-    const option = document.createElement('option');
-    option.value = model.id;
-    option.label = model.label || model.id;
-    datalist.appendChild(option);
-  }
+  renderAgentModelDropdown(profile.models || [], profile.model || '');
   const activeModel = profile.model
     ? ` · model: ${profile.model}`
     : (profile.models?.length ? ' · model: CLI default (choose below)' : '');
@@ -1686,6 +1679,43 @@ function fillAgentConfigForm() {
   setAgentConfigNote(note, profile.id === 'mock' || profile.available && profile.authenticated ? 'success' : profile.available ? 'warning' : 'error');
   document.getElementById('agent-config-probe').textContent = profile.id === 'mock' ? t('agent.checkMock') : t('agent.checkSetup', { name: profile.label });
   document.getElementById('agent-config-save').textContent = profile.id === currentProvider ? t('agent.saveSettings') : t('agent.use', { name: profile.label });
+}
+
+function agentModelFilterValue() {
+  const input = document.getElementById('agent-config-model');
+  const profile = selectedAgentProfile();
+  if (!profile) return '';
+  const query = input.value.trim().toLowerCase();
+  return query && profile.models?.find((model) => model.id === input.value.trim()) ? '' : query;
+}
+
+function renderAgentModelDropdown(models, selectedId = '') {
+  const dropdown = document.getElementById('agent-model-dropdown');
+  dropdown.replaceChildren();
+  const query = agentModelFilterValue();
+  const items = (models || []).filter((model) => {
+    if (!query) return true;
+    return `${model.id} ${model.label || ''}`.toLowerCase().includes(query);
+  });
+  if (!items.length) {
+    dropdown.classList.add('hidden');
+    return;
+  }
+  for (const model of items) {
+    const option = document.createElement('button');
+    option.type = 'button';
+    option.className = 'agent-model-option' + (model.id === selectedId ? ' selected' : '');
+    option.setAttribute('role', 'option');
+    option.innerHTML = `<span class="agent-model-id">${escapeHtml(model.id)}</span>${model.context ? `<span class="agent-model-ctx">${escapeHtml(model.context)}</span>` : ''}`;
+    option.addEventListener('mousedown', (event) => {
+      event.preventDefault();
+      document.getElementById('agent-config-model').value = model.id;
+      dropdown.classList.add('hidden');
+      document.getElementById('agent-config-model').focus();
+    });
+    dropdown.appendChild(option);
+  }
+  dropdown.classList.remove('hidden');
 }
 
 function renderAgentConfiguration() {
@@ -4749,6 +4779,25 @@ function init() {
   document.getElementById('agent-config-provider').addEventListener('change', event => selectAgentProvider(event.target.value));
   document.getElementById('agent-config-form').addEventListener('submit', saveAgentConfiguration);
   document.getElementById('agent-config-probe').addEventListener('click', probeAgentConfiguration);
+  const modelInput = document.getElementById('agent-config-model');
+  const modelDropdown = document.getElementById('agent-model-dropdown');
+  const openAgentModelDropdown = () => {
+    const profile = selectedAgentProfile();
+    if (profile?.models?.length) {
+      renderAgentModelDropdown(profile.models, modelInput.value);
+    }
+  };
+  modelInput.addEventListener('focus', openAgentModelDropdown);
+  modelInput.addEventListener('input', openAgentModelDropdown);
+  modelInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') modelDropdown.classList.add('hidden');
+    if (event.key === 'Enter') modelDropdown.classList.add('hidden');
+  });
+  document.addEventListener('click', (event) => {
+    if (!modelDropdown.classList.contains('hidden') && !event.target.closest('.agent-model-picker')) {
+      modelDropdown.classList.add('hidden');
+    }
+  });
   document.getElementById('prompt-preview-open').addEventListener('click', async () => {
     await refreshPromptContextPreview();
     document.getElementById('prompt-preview-overlay').classList.remove('hidden');
