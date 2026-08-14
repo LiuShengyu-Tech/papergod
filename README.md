@@ -40,6 +40,20 @@ Papergod connects to Zotero's read-only local API at `127.0.0.1:23119`, so ordin
 
 Reference cards can be selected for two separate actions: **Insert selected** writes a `\cite{...}` command at the editor cursor, while selection also makes those verified records available to the Agent prompt. Citation checking reports missing citekeys and missing bibliography setup. Agent revisions that introduce a citekey absent from the managed bibliography are rejected before source is changed.
 
+**Generate a review paragraph**: select several references (local or imported from Zotero), optionally describe what the paragraph should cover, and run **Generate review paragraph**. Papergod composes a draft that cites each selected record with `\citep{...}` (Mock synthesizes deterministically from bibliographic metadata; a configured external Agent writes a substantive synthesis). The draft stays reviewable until **Insert at cursor** applies it through the same atomic revision flow.
+
+### Paragraph Analysis
+
+- Click the **📊** button next to any paragraph in the outline, or use **Tools → Paragraph analysis** to analyze the whole paper
+- Every analysis reports sentence lengths (in words), and document/section analyses also report paragraph lengths
+- Statistics include the mean μ, sample standard deviation s, coefficient of variation CV = s/μ, median, range, IQR, adjacent-sentence change Δ, and the normalized change Δ/μ — all with the exact formulas shown in the panel
+- A 0–100 **variation index** VI = 100·(0.6·min(1, CV/0.5) + 0.4·min(1, (Δ/μ)/0.8)) combines CV and adjacent change into a single rhythm score
+- The verdict reads the score for you: highly uniform rhythms (low VI) are typical of template-generated text, while high variation resembles organic human drafting — uniformity alone is not proof of AI writing
+
+### Writing Libraries
+
+- **Extract from PDF** reads the text layer of any PDF in the workspace, extracts reusable academic sentence patterns (deterministic rules for Mock, structured Agent extraction for external providers), and lets you add each confirmed candidate to the sentence-pattern library
+
 ![Papergod demo](./papergod-demo.png)
 
 ## Architecture
@@ -64,7 +78,9 @@ Express server (127.0.0.1 only)
   ├── /api/generate/*    — prompt/library-controlled full-paper drafts
   ├── /api/workflow/*    — complete history and portable export bundles
   ├── /api/workspaces/*  — local workspace registration and runtime switching
-  ├── /api/references/*  — folders, Zotero, BibTeX generation, and citekey checks
+  ├── /api/references/*  — folders, Zotero, BibTeX generation, citekey checks, and review paragraphs
+  ├── /api/analysis/*    — sentence/paragraph rhythm statistics (mean, stddev, CV, variation index)
+  ├── /api/orchestrations/* — multi-agent graphs, gates, runs, and audit records
   └── /workspace/*       — static serving of compiled PDFs
 ```
 
@@ -99,6 +115,7 @@ Express server (127.0.0.1 only)
 
 - LaTeX sections, paragraphs, and sentences are mapped to stable IDs and exact source ranges
 - The outline exposes editable document/element prompts, summaries, and sentence intents
+- Clicking any outline node highlights and scrolls to the matching text in the compiled PDF (text-layer matching with graceful fallback to the source editor); recompile to refresh the PDF text layer
 - **Focus Annotation** opens an immersive three-column reader: paper outline on the left, one paragraph and its revision prompt in the center, and sentence-by-sentence reading with intent and prompt fields on the right
 - Paragraph and sentence navigation automatically preserves draft annotations; **Open in editor** returns the selected paragraph to CodeMirror
 - Sentence-level Agent requests inherit both the parent paragraph prompt and the sentence prompt, so focused annotations become actionable revision context
@@ -145,6 +162,16 @@ Express server (127.0.0.1 only)
 - Browse a unified history of Agent runs, peer reviews, and revisions
 - Download source, annotations, reports, revisions, responses, change lists, history, and recovery metadata as a portable JSON bundle
 
+### Multi-Agent Orchestration
+
+- Open **Tools → Agent orchestration** to arrange configured local Agents on a native canvas
+- Agent nodes declare a provider (Mock or any configured local CLI) and a task: suggest edits, peer review, draft a paragraph, or generate a full paper
+- Approval-gate nodes pause the run until a human approves or rejects; rejection stops the run and skips downstream nodes
+- Nodes run in parallel whenever their dependencies are satisfied; serial review loops are just chains with gates
+- Every node output is stored as a structured record, every edge carries the input summary passed downstream, and each node execution writes an audited Agent run
+- A cyclic graph is rejected before running; edits and deletions are refused while a run is active
+- Only locally configured CLIs are orchestrated — Papergod never creates or logs into accounts
+
 ### LaTeX Compilation
 
 - Auto-detects available engines in order: tectonic → pdflatex → xelatex → lualatex
@@ -185,6 +212,10 @@ src/server/
   revision-engine.js — Opinion extraction, revision planning, atomic apply, and safe rollback
   review-panel.js — Reviewer profiles, independent reports, synthesis, and revision handoff
   revise-workflow.js — Response letters, verification, full-paper generation, history, and export
+  orchestration-engine.js — Multi-agent graphs, gate execution, and audit records
+  paragraph-analysis.js — Sentence/paragraph rhythm statistics and the variation index
+  literature-review.js — Reference synthesis paragraphs with citable \citep output
+  text-extraction.js — PDF text to reusable sentence-pattern candidates
 public/
   index.html    — Static entry and workflow overlay compatibility layer
   style.css     — Legacy workflow layout styles

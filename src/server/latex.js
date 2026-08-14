@@ -3,13 +3,14 @@ import { resolve as pathResolve, dirname, basename } from 'path';
 
 const ENGINE_ORDER = ['tectonic', 'pdflatex', 'xelatex', 'lualatex'];
 const COMPILE_TIMEOUT_MS = 30000;
+const FIND_COMMAND = process.platform === 'win32' ? 'where' : 'which';
 
 export async function detectEngines() {
   const available = [];
   for (const engine of ENGINE_ORDER) {
     try {
       await new Promise((res, rej) => {
-        execFile('which', [engine], { timeout: 5000, shell: false }, (err) => {
+        execFile(FIND_COMMAND, [engine], { timeout: 5000, shell: false }, (err) => {
           if (err) rej(err);
           else res();
         });

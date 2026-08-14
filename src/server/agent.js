@@ -6,9 +6,9 @@ function resetStore() {
   nextId = 1;
 }
 
-export function generateSuggestions(content, prompt) {
-  resetStore();
+export function composeMockSuggestions(content, prompt) {
   const results = [];
+  let nextId = 1;
 
   const patterns = [
     {
@@ -67,30 +67,30 @@ export function generateSuggestions(content, prompt) {
 
       if (!original || !suggested || original === suggested) continue;
 
-      const sug = { id, category: pat.category, description: pat.makeDesc(match[0]), originalText: original, suggestedText: suggested };
-      suggestionStore.set(id, sug);
-      results.push(sug);
+      results.push({ id, category: pat.category, description: pat.makeDesc(match[0]), originalText: original, suggestedText: suggested });
     }
   }
 
   if (results.length === 0 && content.trim().length > 0) {
     const id = `sug_${nextId++}`;
-    const sug = {
-      id,
-      category: 'style',
-      description: 'Consider refining the academic tone of this document',
-      originalText: content.split('\n').find((l) => l.trim().length > 20) || content.split('\n')[0],
-      suggestedText: (content.split('\n').find((l) => l.trim().length > 20) || content.split('\n')[0])
-        .replace(/\bcan be\b/gi, 'is')
-        .replace(/\bhave been\b/gi, 'were')
-        .replace(/\bis being\b/gi, 'is'),
-    };
-    if (sug.originalText !== sug.suggestedText) {
-      suggestionStore.set(id, sug);
-      results.push(sug);
-    }
+    const original = content.split('\n').find((l) => l.trim().length > 20) || content.split('\n')[0];
+    const suggested = original
+      .replace(/\bcan be\b/gi, 'is')
+      .replace(/\bhave been\b/gi, 'were')
+      .replace(/\bis being\b/gi, 'is');
+    if (original !== suggested) results.push({
+      id, category: 'style', description: 'Consider refining the academic tone of this document',
+      originalText: original, suggestedText: suggested,
+    });
   }
 
+  return results;
+}
+
+export function generateSuggestions(content, prompt) {
+  resetStore();
+  const results = composeMockSuggestions(content, prompt);
+  for (const item of results) suggestionStore.set(item.id, item);
   return results;
 }
 

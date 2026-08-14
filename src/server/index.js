@@ -44,6 +44,13 @@ import {
 import {
   enrichZoteroAttachment, exportBetterBibTeX, getZoteroFullText, getZoteroStatus, listZoteroCollections, searchZoteroItems,
 } from './zotero.js';
+import { generateLiteratureReview } from './literature-review.js';
+import { extractTextCandidates } from './text-extraction.js';
+import {
+  createOrchestration, createOrchestrationManager, deleteOrchestration, getOrchestration,
+  listOrchestrations, resetOrchestration, updateOrchestration,
+} from './orchestration-engine.js';
+import { analyzeStructure, ANALYSIS_FORMULAS } from './paragraph-analysis.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, '../..');
@@ -83,9 +90,11 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
   let activeWorkspaceRequests = 0;
   const workspaceRegistry = createWorkspaceRegistry({ file: options.workspaceRegistryFile });
   const terminalManager = options.terminalManager || createWorkspaceTerminalManager();
+  const orchestrationManager = createOrchestrationManager();
   const app = express();
   app.locals.cleanup = () => terminalManager.closeAll();
   app.locals.config = { workspaceRoot, provider };
+  app.locals.orchestrations = orchestrationManager;
   app.use(express.json({ limit: '10mb' }));
   app.use(securityHeaders);
   app.use('/vendor/codemirror', express.static(join(PROJECT_ROOT, 'node_modules', 'codemirror'), { dotfiles: 'deny' }));
@@ -152,7 +161,7 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
   async function switchWorkspace(target) {
     const runningProbe = [...agentProbeJobs.values()].some((job) => ['queued', 'running'].includes(job.status));
     const runningActivity = [...agentActivityJobs.values()].some((job) => job.status === 'running');
-    if (runningProbe || runningActivity || activeWorkspaceRequests > 0) {
+    if (runningProbe || runningActivity || activeWorkspaceRequests > 0 || orchestrationManager.anyRunning()) {
       throw Object.assign(new Error('Wait for the active paper task to finish before switching workspaces.'), { status: 409, code: 'WORKSPACE_BUSY' });
     }
     const entry = await workspaceRegistry.activate(target);
@@ -429,6 +438,13 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
     await resourceResponse(res, async () => await writeBibliography(workspaceRoot));
   });
 
+  app.post('/api/references/review', async (req, res) => {
+    await resourceResponse(res, async () => {
+      await hydrateAgentCommands();
+      return await generateLiteratureReview(workspaceRoot, req.body || {}, { provider, commands: agentCommands });
+    }, 201);
+  });
+
   app.post('/api/references/check', async (req, res) => {
     await resourceResponse(res, async () => await checkWorkspaceCitations(workspaceRoot, req.body?.file));
   });
@@ -668,6 +684,70 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
     await resourceResponse(res, async () => ({ runs: await listAgentRuns(workspaceRoot) }));
   });
 
+  app.get('/api/analysis/formulas', (_req, res) => {
+    res.json({ formulas: ANALYSIS_FORMULAS });
+  });
+
+  app.post('/api/analysis/structure', async (req, res) => {
+    await resourceResponse(res, async () => ({
+      analysis: await analyzeStructure(workspaceRoot, req.body || {}),
+    }));
+  });
+
+  app.get('/api/orchestrations', async (_req, res) => {
+    await resourceResponse(res, async () => {
+      await orchestrationManager.normalizeStaleRuns(workspaceRoot);
+      return { orchestrations: await listOrchestrations(workspaceRoot) };
+    });
+  });
+
+  app.post('/api/orchestrations', async (req, res) => {
+    await resourceResponse(res, async () => ({ orchestration: await createOrchestration(workspaceRoot, req.body || {}) }), 201);
+  });
+
+  app.get('/api/orchestrations/:id', async (req, res) => {
+    await resourceResponse(res, async () => {
+      if (!orchestrationManager.isRunning(req.params.id)) await orchestrationManager.normalizeStaleRuns(workspaceRoot);
+      return { orchestration: await getOrchestration(workspaceRoot, req.params.id) };
+    });
+  });
+
+  app.put('/api/orchestrations/:id', async (req, res) => {
+    await resourceResponse(res, async () => ({
+      orchestration: await updateOrchestration(workspaceRoot, req.params.id, req.body || {}),
+    }));
+  });
+
+  app.delete('/api/orchestrations/:id', async (req, res) => {
+    await resourceResponse(res, async () => {
+      await deleteOrchestration(workspaceRoot, req.params.id);
+      return { ok: true };
+    });
+  });
+
+  app.post('/api/orchestrations/:id/reset', async (req, res) => {
+    await resourceResponse(res, async () => ({ orchestration: await resetOrchestration(workspaceRoot, req.params.id) }));
+  });
+
+  app.post('/api/orchestrations/:id/run', async (req, res) => {
+    await resourceResponse(res, async () => {
+      await hydrateAgentCommands();
+      return await orchestrationManager.runOrchestration(workspaceRoot, req.params.id, { commands: agentCommands });
+    }, 202);
+  });
+
+  app.post('/api/orchestrations/:id/cancel', async (req, res) => {
+    await resourceResponse(res, async () => await orchestrationManager.cancelOrchestration(req.params.id));
+  });
+
+  app.post('/api/orchestrations/:id/gates/:nodeId/decide', async (req, res) => {
+    await resourceResponse(res, async () => ({
+      orchestration: await orchestrationManager.decideGate(
+        workspaceRoot, req.params.id, req.params.nodeId, req.body?.decision, req.body?.note,
+      ),
+    }));
+  });
+
   app.get('/api/project', async (_req, res) => {
     try {
       res.json({ project: await loadProject(workspaceRoot) });
@@ -751,6 +831,13 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
     await resourceResponse(res, async () => ({
       candidates: extractLibraryCandidates(await readFile(safe, 'utf-8'), file),
     }));
+  });
+
+  app.post('/api/libraries/extract-text', async (req, res) => {
+    await resourceResponse(res, async () => {
+      await hydrateAgentCommands();
+      return await extractTextCandidates(workspaceRoot, req.body || {}, { provider, commands: agentCommands });
+    }, 201);
   });
 
   app.post('/api/libraries/vocabulary/:scope', async (req, res) => {
@@ -976,7 +1063,8 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
     try {
       const entries = await readdir(workspaceRoot);
       const files = entries.filter((f) => f.endsWith('.tex'));
-      res.json({ files });
+      const pdfs = entries.filter((f) => f.endsWith('.pdf'));
+      res.json({ files, pdfs });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }

@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto';
 import { basename, join } from 'path';
 import { mkdir, readFile, rename, writeFile } from 'fs/promises';
 
-export const PROJECT_SCHEMA_VERSION = 2;
+export const PROJECT_SCHEMA_VERSION = 3;
 
 const PROJECT_DIR = '.papergod';
 const PROJECT_FILE = 'project.json';
@@ -49,6 +49,7 @@ export function createDefaultProject(workspaceRoot) {
     reviews: [],
     revisions: [],
     agentRuns: [],
+    orchestrations: [],
   };
 }
 
@@ -60,7 +61,7 @@ export function migrateProjectData(input, workspaceRoot) {
   }
 
   const sourceVersion = Number.isInteger(input.schemaVersion) ? input.schemaVersion : 0;
-  if (![0, 1].includes(sourceVersion)) throw new Error(`No migration path from project schema ${sourceVersion}`);
+  if (![0, 1, 2].includes(sourceVersion)) throw new Error(`No migration path from project schema ${sourceVersion}`);
 
   const defaults = createDefaultProject(workspaceRoot);
   const sourceLibraries = isObject(input.libraries) ? input.libraries : {};
@@ -92,6 +93,7 @@ export function migrateProjectData(input, workspaceRoot) {
       reviews: Array.isArray(input.reviews) ? input.reviews.map((review) => migrateReview(review)) : [],
       revisions: Array.isArray(input.revisions) ? input.revisions : [],
       agentRuns: Array.isArray(input.agentRuns) ? input.agentRuns : [],
+      orchestrations: Array.isArray(input.orchestrations) ? input.orchestrations : [],
     },
   };
 }
@@ -399,6 +401,115 @@ function validateAgentRun(item, path, errors) {
   validateString(item.finishedAt, `${path}.finishedAt`, errors);
 }
 
+const ORCHESTRATION_NODE_KINDS = ['agent', 'gate'];
+const ORCHESTRATION_NODE_STATUSES = ['idle', 'queued', 'running', 'complete', 'failed', 'waiting', 'skipped'];
+const ORCHESTRATION_CAPABILITIES = ['suggest', 'review', 'paragraph', 'generate'];
+const ORCHESTRATION_PROVIDERS = ['mock', 'codex', 'claude-code', 'opencode', 'pi'];
+const ORCHESTRATION_REVIEW_ROLES = ['methodology', 'statistics', 'writing', 'domain', 'reproducibility'];
+
+function validateOrchestrationNode(node, path, errors) {
+  if (!isObject(node)) return errors.push(`${path} must be an object`);
+  validateString(node.id, `${path}.id`, errors, { allowEmpty: false });
+  validateEnum(node.kind, ORCHESTRATION_NODE_KINDS, `${path}.kind`, errors);
+  validateString(node.label, `${path}.label`, errors);
+  if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) errors.push(`${path}.x and y must be numbers`);
+  validateString(node.prompt, `${path}.prompt`, errors);
+  validateEnum(node.status, ORCHESTRATION_NODE_STATUSES, `${path}.status`, errors);
+  validateString(node.runId, `${path}.runId`, errors);
+  validateString(node.error, `${path}.error`, errors);
+  validateString(node.startedAt, `${path}.startedAt`, errors);
+  validateString(node.finishedAt, `${path}.finishedAt`, errors);
+  if (node.kind === 'agent') {
+    validateEnum(node.provider, ORCHESTRATION_PROVIDERS, `${path}.provider`, errors);
+    validateEnum(node.capability, ORCHESTRATION_CAPABILITIES, `${path}.capability`, errors);
+  }
+  if (node.kind === 'gate') {
+    if (node.decision !== undefined) validateEnum(node.decision, ['pending', 'approved', 'rejected'], `${path}.decision`, errors);
+    validateString(node.note, `${path}.note`, errors);
+  }
+  if (node.source !== undefined) {
+    if (!isObject(node.source)) errors.push(`${path}.source must be an object`);
+    else {
+      validateEnum(node.source.type, ['manual', 'upstream'], `${path}.source.type`, errors);
+      validateString(node.source.nodeId, `${path}.source.nodeId`, errors);
+      validateString(node.source.text, `${path}.source.text`, errors);
+    }
+  }
+  if (node.output !== undefined && node.output !== null) {
+    if (!isObject(node.output)) errors.push(`${path}.output must be an object or null`);
+    else {
+      validateString(node.output.summary, `${path}.output.summary`, errors);
+      validateString(node.output.data, `${path}.output.data`, errors);
+      validateString(node.output.contentType, `${path}.output.contentType`, errors);
+    }
+  }
+  if (node.reviewer !== undefined && node.reviewer !== null) {
+    if (!isObject(node.reviewer)) errors.push(`${path}.reviewer must be an object or null`);
+    else {
+      for (const field of ['name', 'focus', 'prompt']) validateString(node.reviewer[field], `${path}.reviewer.${field}`, errors);
+      validateEnum(node.reviewer.role, ORCHESTRATION_REVIEW_ROLES, `${path}.reviewer.role`, errors);
+    }
+  }
+  if (node.rubric !== undefined) {
+    if (!Array.isArray(node.rubric)) errors.push(`${path}.rubric must be an array`);
+    else node.rubric.forEach((criterion, index) => {
+      const criterionPath = `${path}.rubric[${index}]`;
+      if (!isObject(criterion)) return errors.push(`${criterionPath} must be an object`);
+      for (const field of ['id', 'title', 'instruction']) validateString(criterion[field], `${criterionPath}.${field}`, errors, { allowEmpty: false });
+      if (!Number.isFinite(criterion.weight) || criterion.weight <= 0) errors.push(`${criterionPath}.weight must be a positive number`);
+    });
+  }
+}
+
+function validateOrchestration(item, path, errors) {
+  if (!validateRecordBase(item, path, errors)) return;
+  validateString(item.name, `${path}.name`, errors, { allowEmpty: false });
+  validateEnum(item.status, ['draft', 'running', 'complete', 'failed', 'cancelled'], `${path}.status`, errors);
+  const nodeIds = new Set();
+  if (!Array.isArray(item.nodes)) {
+    errors.push(`${path}.nodes must be an array`);
+  } else if (item.nodes.length > 50) {
+    errors.push(`${path}.nodes must contain at most 50 nodes`);
+  } else {
+    item.nodes.forEach((node, index) => {
+      const nodePath = `${path}.nodes[${index}]`;
+      validateOrchestrationNode(node, nodePath, errors);
+      if (typeof node?.id === 'string' && node.id) {
+        if (nodeIds.has(node.id)) errors.push(`${nodePath}.id is duplicated`);
+        nodeIds.add(node.id);
+      }
+    });
+    item.nodes.forEach((node, index) => {
+      if (node?.source?.type === 'upstream' && node.source.nodeId && !nodeIds.has(node.source.nodeId)) {
+        errors.push(`${path}.nodes[${index}].source.nodeId does not reference a node`);
+      }
+    });
+  }
+  if (!Array.isArray(item.edges)) {
+    errors.push(`${path}.edges must be an array`);
+  } else if (item.edges.length > 200) {
+    errors.push(`${path}.edges must contain at most 200 edges`);
+  } else {
+    const pairs = new Set();
+    item.edges.forEach((edge, index) => {
+      const edgePath = `${path}.edges[${index}]`;
+      if (!isObject(edge)) return errors.push(`${edgePath} must be an object`);
+      validateString(edge.id, `${edgePath}.id`, errors, { allowEmpty: false });
+      validateString(edge.source, `${edgePath}.source`, errors, { allowEmpty: false });
+      validateString(edge.target, `${edgePath}.target`, errors, { allowEmpty: false });
+      validateString(edge.summary, `${edgePath}.summary`, errors);
+      if (edge.source !== 'start' && !nodeIds.has(edge.source)) errors.push(`${edgePath}.source does not reference a node`);
+      if (edge.target !== 'end' && !nodeIds.has(edge.target)) errors.push(`${edgePath}.target does not reference a node`);
+      if (edge.target === 'start') errors.push(`${edgePath}.target cannot be the start`);
+      if (edge.source === 'end') errors.push(`${edgePath}.source cannot be the end`);
+      if (edge.source === edge.target && edge.source !== 'start' && edge.source !== 'end') errors.push(`${edgePath} cannot be a self loop`);
+      const pair = `${edge.source}->${edge.target}`;
+      if (pairs.has(pair)) errors.push(`${edgePath} duplicates an existing edge`);
+      pairs.add(pair);
+    });
+  }
+}
+
 function validateNode(node, type, path, errors) {
   if (!isObject(node)) {
     errors.push(`${path} must be an object`);
@@ -576,6 +687,12 @@ export function validateProject(data) {
     validateAgentRun(item, `agentRuns[${index}]`, errors);
     registerId(item?.id, `agentRuns[${index}].id`);
   });
+  if (!Array.isArray(data.orchestrations)) errors.push('orchestrations must be an array');
+  else data.orchestrations.forEach((item, index) => {
+    const path = `orchestrations[${index}]`;
+    validateOrchestration(item, path, errors);
+    registerId(item?.id, `${path}.id`);
+  });
 
   return { ok: errors.length === 0, errors };
 }
@@ -621,7 +738,17 @@ export async function saveProject(workspaceRoot, data) {
 
   await mkdir(directory, { recursive: true });
   await writeFile(temporary, `${JSON.stringify(stored, null, 2)}\n`, { encoding: 'utf-8', mode: 0o600 });
-  await rename(temporary, file);
+  // On Windows the atomic rename can transiently fail with EPERM/EBUSY when another
+  // handle briefly holds the destination (e.g. a concurrent read during Agent runs).
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      await rename(temporary, file);
+      break;
+    } catch (error) {
+      if (!['EPERM', 'EBUSY', 'EACCES'].includes(error.code) || attempt > 10) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 20 * attempt));
+    }
+  }
   return stored;
 }
 

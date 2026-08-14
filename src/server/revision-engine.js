@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'crypto';
-import { basename, dirname, join } from 'path';
+import { basename, dirname, join, sep } from 'path';
 import { mkdir, readFile, rename, writeFile } from 'fs/promises';
 import { sanitizePath } from './security.js';
 import { loadProject, updateProject } from './project-store.js';
@@ -378,7 +378,7 @@ export async function applyRevision(workspaceRoot, revisionId) {
 
     const recoveryId = id('recovery');
     const recoveryDirectory = join(workspaceRoot, '.papergod', 'recovery');
-    const recoveryRelative = join('.papergod', 'recovery', `${recoveryId}.tex`);
+    const recoveryRelative = join('.papergod', 'recovery', `${recoveryId}.tex`).split(sep).join('/');
     const recoveryFile = join(workspaceRoot, recoveryRelative);
     await mkdir(recoveryDirectory, { recursive: true });
     await writeFile(recoveryFile, original, { encoding: 'utf-8', flag: 'wx', mode: 0o600 });
@@ -569,7 +569,7 @@ export async function insertGeneratedParagraph(workspaceRoot, { documentId, inde
   const project = await loadProject(workspaceRoot);
   const document = project.documents.find((item) => item.id === documentId);
   if (!document) throw problem('Document not found', 404);
-  const generationRun = runId ? project.agentRuns.find((run) => run.id === runId && run.operation === 'generate-paragraph' && run.status === 'complete') : null;
+  const generationRun = runId ? project.agentRuns.find((run) => run.id === runId && ['generate-paragraph', 'literature-review'].includes(run.operation) && run.status === 'complete') : null;
   if (runId && !generationRun) {
     throw problem('Paragraph generation run not found', 404);
   }

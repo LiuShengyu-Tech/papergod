@@ -49,6 +49,10 @@
         <button id="references-check" type="button" data-i18n="references.check">Check citations</button>
         <button id="references-insert-selected" class="primary" type="button" data-i18n="references.insertSelected">Insert selected</button>
       </div>
+      <div class="references-review-row">
+        <input id="references-review-prompt" type="text" data-i18n-placeholder="references.reviewPrompt" placeholder="What should the review paragraph cover? (optional)">
+        <button id="references-review" type="button" data-i18n="references.reviewButton">Generate review paragraph</button>
+      </div>
       <div class="references-body">
         <aside class="references-sources">
           <section><h3 data-i18n="references.folderSource">Literature folders</h3><p data-i18n="references.folderHelp">Scan BibTeX and PDF files recursively. Uncertain PDF matches remain marked for review.</p>
@@ -66,6 +70,7 @@
         <main class="references-library">
           <div class="references-summary"><span id="references-count">0 references</span><span id="references-bib-file">references.bib</span></div>
           <div id="references-check-result" class="hidden"></div>
+          <div id="references-review-result" class="hidden"></div>
           <button id="references-add-setup" class="hidden" type="button" data-i18n="references.addSetup">Add bibliography setup to paper</button>
           <div id="references-list"><div class="outline-empty" data-i18n="references.loading">Loading references…</div></div>
         </main>
@@ -74,8 +79,14 @@
     </section>
   </div>
 
-  <div id="pdf-edit-menu" class="hidden" role="dialog" aria-label="PDF revision comment">
-    <div class="pdf-scope-options"><button data-pdf-scope="word" data-i18n="pdf.word">Word</button><button data-pdf-scope="sentence" data-i18n="pdf.sentence">Sentence</button><button data-pdf-scope="paragraph" data-i18n="pdf.paragraph">Paragraph</button><button id="pdf-sentence-reader-open" type="button" data-i18n="pdf.reader">Sentence reader</button></div>
+  <div id="pdf-scope-menu" class="hidden pdf-menu" role="menu" aria-label="PDF annotation scope">
+    <button data-pdf-scope="word" type="button" data-i18n="pdf.word">Word</button>
+    <button data-pdf-scope="sentence" type="button" data-i18n="pdf.sentence">Sentence</button>
+    <button data-pdf-scope="paragraph" type="button" data-i18n="pdf.paragraph">Paragraph</button>
+    <button id="pdf-sentence-reader-open" type="button" data-i18n="pdf.reader">Sentence reader</button>
+  </div>
+
+  <div id="pdf-edit-menu" class="hidden pdf-menu" role="dialog" aria-label="PDF revision comment">
     <blockquote id="pdf-edit-quote"></blockquote>
     <textarea id="pdf-edit-comment" rows="3" placeholder="What should the AI change?" data-i18n-placeholder="pdf.commentPlaceholder"></textarea>
     <div class="pdf-edit-actions"><button id="pdf-edit-cancel" type="button" data-i18n="pdf.cancel">Cancel</button><button id="pdf-edit-submit" class="primary" type="button" data-i18n="pdf.queue">Add to revision queue</button></div>
@@ -213,6 +224,12 @@
         </select>
         <input id="library-search" type="search" placeholder="Search this library...">
         <button id="library-extract">Extract from paper</button>
+        <button id="library-extract-pdf" type="button" data-i18n="library.extractPdf">Extract from PDF</button>
+      </div>
+      <div id="pdf-extract-row" class="hidden">
+        <select id="pdf-file-select" aria-label="PDF file"></select>
+        <button id="pdf-extract-run" class="primary" type="button" data-i18n="library.extractPdfRun">Extract patterns</button>
+        <button id="pdf-extract-cancel" type="button" data-i18n="library.cancel">Cancel</button>
       </div>
       <div class="library-body">
         <form id="library-form">
@@ -349,6 +366,81 @@
         <main class="panel-results">
           <div class="review-section-head"><div><h3>Review rounds</h3><span id="peer-review-count">0 rounds</span></div><button id="refresh-peer-reviews">Refresh</button></div>
           <div id="peer-review-list"><div class="outline-empty">No review rounds yet</div></div>
+        </main>
+      </div>
+    </section>
+  </div>
+
+  <div id="orchestration-overlay" class="hidden" role="dialog" aria-modal="true" aria-labelledby="orchestration-title">
+    <section id="orchestration-dialog">
+      <div class="library-header">
+        <div><h2 id="orchestration-title" data-i18n="orch.title">Agent orchestration</h2><p data-i18n="orch.subtitle">Connect configured local Agents into reviewable multi-step workflows with approval gates. Every node output and edge summary is audited.</p></div>
+        <div class="orch-header-actions">
+          <select id="orchestration-select" aria-label="Orchestration"></select>
+          <button id="orchestration-new" type="button" data-i18n="orch.new">New</button>
+          <button id="orchestration-delete" type="button" data-i18n="orch.delete">Delete</button>
+          <button id="orchestration-close" type="button" aria-label="Close">×</button>
+        </div>
+      </div>
+      <div id="orchestration-body">
+        <aside id="orchestration-palette">
+          <h3 data-i18n="orch.palette">Palette</h3>
+          <button id="orch-add-agent" type="button" data-i18n="orch.addAgent">+ Agent node</button>
+          <button id="orch-add-gate" type="button" data-i18n="orch.addGate">+ Approval gate</button>
+          <hr>
+          <button id="orch-connect-toggle" type="button" data-i18n="orch.connect">Connect nodes</button>
+          <button id="orch-delete-selected" type="button" data-i18n="orch.deleteSelected">Delete selected</button>
+          <button id="orch-clear" type="button" data-i18n="orch.clear">Clear results</button>
+          <p class="orch-hint" data-i18n="orch.hint">Drag nodes to arrange them. Click Connect, then two nodes in order to link them.</p>
+        </aside>
+        <main id="orchestration-canvas-wrap">
+          <div id="orchestration-canvas">
+            <svg id="orchestration-edges" aria-hidden="true"></svg>
+            <div id="orchestration-nodes"></div>
+          </div>
+          <div id="orchestration-statusbar">
+            <span id="orchestration-status" class="orch-status" data-i18n="orch.draft">Draft</span>
+            <span id="orchestration-status-detail"></span>
+            <span class="orch-status-actions"><button id="orchestration-reset" type="button" data-i18n="orch.reset">Reset</button><button id="orchestration-cancel" class="hidden" type="button" data-i18n="orch.cancelRun">Cancel run</button><button id="orchestration-run" class="primary" type="button" data-i18n="orch.run">Run</button></span>
+          </div>
+        </main>
+        <aside id="orchestration-inspector">
+          <div class="orch-inspector-head"><h3 data-i18n="orch.inspector">Inspector</h3><span id="orch-inspector-hint">Select a node or edge</span></div>
+          <div id="orchestration-inspector-body"></div>
+        </aside>
+      </div>
+      <div id="orchestration-note" role="status" aria-live="polite"></div>
+    </section>
+  </div>
+
+  <div id="analysis-overlay" class="hidden compact-overlay" role="dialog" aria-modal="true" aria-labelledby="analysis-title">
+    <section id="analysis-dialog" class="compact-dialog analysis-dialog">
+      <div class="library-header">
+        <div><h2 id="analysis-title" data-i18n="analysis.title">Paragraph analysis</h2><p id="analysis-target-name" data-i18n="analysis.loading">Analyzing…</p></div>
+        <button id="analysis-close" type="button" aria-label="Close">×</button>
+      </div>
+      <div id="analysis-body">
+        <aside id="analysis-sidebar">
+          <h3 data-i18n="analysis.units">Units</h3>
+          <div id="analysis-target-list"><div class="outline-empty" data-i18n="analysis.loading">Loading…</div></div>
+        </aside>
+        <main id="analysis-main">
+          <div id="analysis-verdict" class="hidden"></div>
+          <section class="analysis-section">
+            <div class="analysis-section-head"><h3 data-i18n="analysis.sentenceChart">Sentence lengths</h3><span id="analysis-chart-caption"></span></div>
+            <div id="analysis-chart" aria-label="Sentence length bar chart"></div>
+          </section>
+          <section class="analysis-section">
+            <div class="analysis-section-head"><h3 data-i18n="analysis.stats">Statistics</h3></div>
+            <div id="analysis-stats"></div>
+          </section>
+          <section class="analysis-section">
+            <details class="analysis-formulas">
+              <summary data-i18n="analysis.formulas">Formulas used</summary>
+              <div id="analysis-formula-list"></div>
+            </details>
+          </section>
+          <div id="analysis-note" role="status" aria-live="polite"></div>
         </main>
       </div>
     </section>

@@ -1,6 +1,7 @@
 import { spawn } from 'child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'fs/promises';
-import { join } from 'path';
+import { existsSync, readdirSync } from 'fs';
+import { basename, dirname, extname, join } from 'path';
 import { tmpdir } from 'os';
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -91,10 +92,34 @@ function safeEnvironment() {
   return Object.fromEntries(Object.entries(process.env).filter(([key]) => !blocked.test(key)));
 }
 
+const knownWindowsPaths = new Map();
+
+function discoverKnownWindowsPath(provider) {
+  if (process.platform !== 'win32') return null;
+  if (knownWindowsPaths.has(provider)) return knownWindowsPaths.get(provider);
+  let found = null;
+  if (provider === 'codex') {
+    // Codex CLI installs under %LOCALAPPDATA%\OpenAI\Codex\bin\<hash>\codex.exe
+    // without registering itself on PATH.
+    const base = join(process.env.LOCALAPPDATA || '', 'OpenAI', 'Codex', 'bin');
+    let entries;
+    try { entries = readdirSync(base); } catch { entries = []; }
+    for (const entry of entries) {
+      const candidate = join(base, entry, 'codex.exe');
+      if (existsSync(candidate)) { found = candidate; break; }
+    }
+  }
+  knownWindowsPaths.set(provider, found);
+  return found;
+}
+
 function commandSpec(provider, overrides = {}) {
   const override = overrides[provider];
   const defaultCommand = provider === 'claude-code' ? 'claude' : provider;
-  if (!override) return { command: defaultCommand, prefixArgs: [], model: '' };
+  if (!override) {
+    const known = discoverKnownWindowsPath(provider);
+    return { command: known || defaultCommand, prefixArgs: [], model: '' };
+  }
   if (typeof override === 'string') return { command: override, prefixArgs: [], model: '' };
   return {
     command: override.command || defaultCommand,
@@ -107,6 +132,21 @@ function modelArgs(spec) {
   return spec.model ? ['--model', spec.model] : [];
 }
 
+function resolveWindowsCommand(command) {
+  if (process.platform !== 'win32') return { command, shell: false };
+  if (extname(command)) return { command, shell: false }; // explicit codex.exe / pi.cmd
+  const hasPath = command.includes('\\') || command.includes('/');
+  const name = basename(command);
+  const dirs = hasPath ? [dirname(command)] : (process.env.PATH || '').split(';').filter(Boolean);
+  for (const dir of dirs) {
+    for (const extension of ['.exe', '.cmd', '.bat']) {
+      const candidate = join(dir, name + extension);
+      if (existsSync(candidate)) return { command: candidate, shell: extension !== '.exe' };
+    }
+  }
+  return { command, shell: false };
+}
+
 export function runProcess(command, args, { cwd, input = '', timeoutMs = DEFAULT_TIMEOUT_MS, signal, allowFailure = false, onOutput } = {}) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -114,12 +154,28 @@ export function runProcess(command, args, { cwd, input = '', timeoutMs = DEFAULT
       error.code = 'AGENT_CANCELLED';
       return reject(error);
     }
-    const child = spawn(command, args, {
-      cwd,
-      env: safeEnvironment(),
-      shell: false,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    // Windows: npm-installed CLIs ship as .cmd/.bat shims without an .exe.
+    // Node's spawn with shell:false cannot execute those directly, so resolve the
+    // shim on PATH (or next to the given path) and run it through cmd.exe with
+    // explicitly quoted arguments (avoids the DEP0190 shell:true concatenation).
+    const resolved = resolveWindowsCommand(command);
+    const env = safeEnvironment();
+    let child;
+    if (resolved.shell) {
+      // cmd /c strips the leading quote and the last quote, so wrap the whole
+      // line in an extra pair of quotes: ""C:\...\pi.cmd" "--version""
+      const inner = [`"${resolved.command}"`, ...args.map((arg) => `"${String(arg).replace(/"/g, '""')}"`)].join(' ');
+      const commandLine = `"${inner}"`;
+      child = spawn('cmd.exe', ['/d', '/s', '/c', commandLine], {
+        cwd, env, shell: false, windowsVerbatimArguments: true,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } else {
+      child = spawn(resolved.command, args, {
+        cwd, env, shell: false,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    }
     let stdout = '';
     let stderr = '';
     let outputBytes = 0;

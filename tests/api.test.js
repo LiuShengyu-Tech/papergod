@@ -15,6 +15,7 @@ import { buildLibraryContext, composeMockParagraph, extractLibraryCandidates, me
 import { applySuggestionsAsRevision, restoreRevisionVersion, splitAtomicOpinions } from '../src/server/revision-engine.js';
 import { getHistoricalRevisionSource, getRecentChangeHistory } from '../src/server/change-history.js';
 import { generateMockPeerReview, synthesizePeerReviews } from '../src/server/review-panel.js';
+import { analyzeLengths, variationIndex, mechanicalVerdict } from '../src/server/paragraph-analysis.js';
 import { resolve, join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { mkdtemp, writeFile, readFile, rm, mkdir, symlink } from 'fs/promises';
@@ -361,12 +362,12 @@ test('validateProject rejects broken cross-resource references', () => {
 });
 
 test('LaTeX structure parser maps sections, paragraphs, sentences, and exact ranges', async () => {
-  const source = await readFile(SAMPLE_TEX, 'utf-8');
+  const source = '\\title{Inline Parser Test}\\begin{document}\n\\begin{abstract}\nA concise summary sentence. Another claim follows here.\n\\end{abstract}\n\\section{Introduction}\nFirst sentence. Second result shows progress. Third claim closes the paragraph.\n\n\\section{Conclusion}\nFinal claim stands. It summarizes the work.\n\\end{document}';
   const document = { id: 'document_parser', title: '', sections: [] };
   const parsed = parseLatexDocument(source, document);
-  assert.equal(parsed.title, 'Structured Workflows for AI-Assisted Scientific Writing: An Empirical Study');
+  assert.equal(parsed.title, 'Inline Parser Test');
   const sectionTitles = parsed.sections.map((section) => section.title);
-  for (const expected of ['Abstract', 'Introduction', 'Methods', 'Results', 'Conclusion']) assert.ok(sectionTitles.includes(expected));
+  for (const expected of ['Abstract', 'Introduction', 'Conclusion']) assert.ok(sectionTitles.includes(expected));
   const introduction = parsed.sections.find((section) => section.title === 'Introduction');
   assert.ok(introduction.children.length > 0);
   assert.ok(introduction.children[0].children.length >= 3);
@@ -404,11 +405,13 @@ test('LaTeX structure parser ignores commented headings and decimal punctuation'
 });
 
 test('Document structure APIs synchronize and update layered metadata', async () => {
-  const synced = await api('/api/documents/sync', { method: 'POST', body: { file: 'main.tex' } });
+  const file = 'structure-api.tex';
+  await writeFile(join(tmpWorkspace, file), '\\title{Structure API Paper}\\begin{document}\n\\section{Introduction}\nFirst sentence. Second claim follows.\n\n\\section{Methods}\nMethod sentence one. Method sentence two.\n\\end{document}', 'utf-8');
+  const synced = await api('/api/documents/sync', { method: 'POST', body: { file } });
   assert.equal(synced.status, 200);
   const document = synced.data.document;
   assert.ok(document.sourceHash);
-  assert.ok(document.sections.length >= 5);
+  assert.ok(document.sections.length >= 2);
 
   const documentUpdate = await api(`/api/documents/${document.id}/metadata`, {
     method: 'PUT', body: { corePrompt: 'Prioritize reproducibility.', summary: 'An AI overview.' },
@@ -640,7 +643,7 @@ test('React workbench and legacy overlays expose the complete writing workflow',
 
 test('CLI parses workspace, port, and Agent provider', () => {
   const options = parseCliArgs(['papers/demo', '--port', '4312', '--agent=codex', '--demo'], '/tmp');
-  assert.equal(options.workspaceRoot, '/tmp/papers/demo');
+  assert.equal(options.workspaceRoot, resolve('/tmp', 'papers/demo'));
   assert.equal(options.port, 4312);
   assert.equal(options.provider, 'codex');
   assert.equal(options.demo, true);
@@ -882,7 +885,8 @@ test('package manifest exposes publishable papergod binary', async () => {
   assert.doesNotMatch(packageData.scripts.papergod, /\bworkspace\b/);
 });
 
-test('papergod CLI executes through an npm-style bin symlink', async () => {
+test('papergod CLI executes through an npm-style bin symlink', async (t) => {
+  if (process.platform === 'win32') return t.skip('Windows symlinks require developer mode');
   const binLink = join(tmpWorkspace, 'papergod-bin');
   await symlink(join(PROJECT_ROOT, 'src', 'cli.js'), binLink);
   const result = await runProcess(binLink, ['--version'], { cwd: tmpWorkspace, timeoutMs: 5000 });
@@ -1920,6 +1924,314 @@ test('Workflow history and export bundle include source, artifacts, runs, and re
   assert.ok(Array.isArray(exported.data.bundle.history));
 });
 
+// ---------------------------------------------------------------------------
+// M9: Multi-agent orchestration
+// ---------------------------------------------------------------------------
+
+async function waitForOrchestration(id, predicate, timeoutMs = 12_000) {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const { data } = await api(`/api/orchestrations/${encodeURIComponent(id)}`);
+    if (predicate(data.orchestration)) return data.orchestration;
+    if (Date.now() > deadline) throw new Error(`Timed out waiting for orchestration ${id}`);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+  }
+}
+
+function orchNode(overrides = {}) {
+  const node = {
+    id: overrides.id || `node_${Math.random().toString(36).slice(2, 10)}`,
+    kind: overrides.kind || 'agent',
+    label: overrides.label || 'Node',
+    x: overrides.x ?? 0,
+    y: overrides.y ?? 0,
+    provider: overrides.provider || 'mock',
+    capability: overrides.capability || 'suggest',
+    prompt: overrides.prompt || '',
+    source: overrides.source || { type: 'manual', nodeId: '', text: 'This result is very important.' },
+    reviewer: overrides.reviewer ?? null,
+    rubric: overrides.rubric ?? [],
+    status: 'idle',
+    note: '',
+    output: null,
+    runId: '',
+    error: '',
+    startedAt: '',
+    finishedAt: '',
+  };
+  if (node.kind === 'gate') node.decision = 'pending';
+  return node;
+}
+
+test('Project metadata exposes the orchestrations collection', async () => {
+  const { data } = await api('/api/project');
+  assert.ok(Array.isArray(data.project.orchestrations));
+});
+
+test('Project schema v3 migrates older metadata and adds the orchestrations collection', () => {
+  const legacy = createDefaultProject('/tmp/legacy-v2');
+  legacy.schemaVersion = 2;
+  legacy.project.corePrompt = 'Keep this prompt.';
+  const migration = migrateProjectData(legacy, '/tmp/legacy-v2');
+  assert.equal(migration.migratedFrom, 2);
+  assert.equal(migration.data.schemaVersion, PROJECT_SCHEMA_VERSION);
+  assert.deepEqual(migration.data.orchestrations, []);
+  assert.equal(migration.data.project.corePrompt, 'Keep this prompt.');
+  assert.equal(migration.data.documents[0].file, 'main.tex');
+  assert.equal(validateProject(migration.data).ok, true);
+
+  const broken = createDefaultProject('/tmp/broken-orch');
+  broken.orchestrations = [{ id: 'o1', createdAt: 'now', updatedAt: 'now', name: '', status: 'draft', nodes: [], edges: [] }];
+  assert.equal(validateProject(broken).ok, false);
+  const valid = createDefaultProject('/tmp/valid-orch');
+  valid.orchestrations = [{
+    id: 'o1', name: 'Flow', status: 'draft', createdAt: 'now', updatedAt: 'now',
+    nodes: [{ id: 'n1', kind: 'agent', label: '', x: 0, y: 0, provider: 'mock', capability: 'suggest', prompt: '', source: { type: 'manual', nodeId: '', text: '' }, status: 'idle', note: '', output: null, runId: '', error: '', startedAt: '', finishedAt: '' }],
+    edges: [{ id: 'e1', source: 'n1', target: 'end', summary: '' }],
+  }];
+  assert.equal(validateProject(valid).ok, true);
+});
+
+test('Orchestration API creates, lists, updates, and deletes workflows with validation', async () => {
+  const created = await api('/api/orchestrations', { method: 'POST', body: { name: 'Draft flow' } });
+  assert.equal(created.status, 201);
+  assert.equal(created.data.orchestration.status, 'draft');
+  assert.equal(created.data.orchestration.nodes.length, 1);
+  const id = created.data.orchestration.id;
+
+  const listed = await api('/api/orchestrations');
+  assert.equal(listed.status, 200);
+  assert.ok(listed.data.orchestrations.some((item) => item.id === id));
+
+  const a = created.data.orchestration.nodes[0];
+  const b = orchNode({ id: 'node_validate_b', label: 'Review', capability: 'review', source: { type: 'upstream', nodeId: a.id, text: '' } });
+  const updated = await api(`/api/orchestrations/${id}`, {
+    method: 'PUT',
+    body: {
+      name: 'Renamed flow',
+      nodes: [{ ...a, label: 'Read', x: 10, y: 20 }, b],
+      edges: [{ id: 'edge_ab', source: a.id, target: b.id, summary: '' }],
+    },
+  });
+  assert.equal(updated.status, 200);
+  assert.equal(updated.data.orchestration.name, 'Renamed flow');
+  assert.equal(updated.data.orchestration.nodes[0].x, 10);
+  assert.equal(updated.data.orchestration.nodes[1].source.nodeId, a.id);
+
+  const invalidCapability = await api(`/api/orchestrations/${id}`, {
+    method: 'PUT', body: { name: 'x', nodes: [{ ...a, capability: 'unknown' }], edges: [] },
+  });
+  assert.equal(invalidCapability.status, 400);
+
+  const invalidProvider = await api(`/api/orchestrations/${id}`, {
+    method: 'PUT', body: { name: 'x', nodes: [{ ...a, provider: 'skynet' }], edges: [] },
+  });
+  assert.equal(invalidProvider.status, 400);
+
+  const badEdge = await api(`/api/orchestrations/${id}`, {
+    method: 'PUT', body: { name: 'x', nodes: [a], edges: [{ id: 'e', source: a.id, target: 'ghost', summary: '' }] },
+  });
+  assert.equal(badEdge.status, 400);
+
+  const dupEdge = await api(`/api/orchestrations/${id}`, {
+    method: 'PUT',
+    body: { name: 'x', nodes: [a, b], edges: [{ id: 'e1', source: a.id, target: b.id, summary: '' }, { id: 'e2', source: a.id, target: b.id, summary: '' }] },
+  });
+  assert.equal(dupEdge.status, 400);
+
+  const removed = await api(`/api/orchestrations/${id}`, { method: 'DELETE' });
+  assert.equal(removed.status, 200);
+  const afterDelete = await api('/api/orchestrations');
+  assert.ok(!afterDelete.data.orchestrations.some((item) => item.id === id));
+});
+
+test('Mock orchestration runs a serial chain and persists outputs, edge summaries, and audited agent runs', async () => {
+  const created = await api('/api/orchestrations', { method: 'POST', body: { name: 'Serial chain' } });
+  const id = created.data.orchestration.id;
+  const a = created.data.orchestration.nodes[0];
+  const b = orchNode({ id: 'node_serial_b', label: 'Review', capability: 'review', source: { type: 'upstream', nodeId: a.id, text: '' } });
+  const c = orchNode({ id: 'node_serial_c', label: 'Second pass', capability: 'suggest', source: { type: 'upstream', nodeId: b.id, text: '' }, prompt: 'Polish the review result.' });
+  await api(`/api/orchestrations/${id}`, {
+    method: 'PUT',
+    body: {
+      name: 'Serial chain',
+      nodes: [{ ...a, label: 'Read', source: { type: 'manual', nodeId: '', text: 'This result is very important.' } }, b, c],
+      edges: [
+        { id: 'edge_s1', source: a.id, target: b.id, summary: '' },
+        { id: 'edge_s2', source: b.id, target: c.id, summary: '' },
+      ],
+    },
+  });
+  const run = await api(`/api/orchestrations/${id}/run`, { method: 'POST' });
+  assert.equal(run.status, 202);
+  assert.equal(run.data.started, true);
+  const finished = await waitForOrchestration(id, (orch) => orch.status !== 'running');
+  assert.equal(finished.status, 'complete');
+  assert.ok(finished.nodes.every((node) => node.status === 'complete'));
+  const byId = new Map(finished.nodes.map((node) => [node.id, node]));
+  assert.ok(byId.get(a.id).output.summary.includes('suggestion'));
+  assert.ok(byId.get(b.id).output.summary.includes('reviewer'));
+  assert.ok(byId.get(b.id).runId);
+  assert.ok(finished.edges.every((edge) => edge.summary.length > 0));
+  const runs = (await api('/api/agent/runs')).data.runs;
+  const orchestrationRuns = runs.filter((run) => run.operation.startsWith('orchestrate:'));
+  assert.ok(orchestrationRuns.length >= 2);
+  assert.ok(orchestrationRuns.some((run) => run.operation === 'orchestrate:suggest' && run.status === 'complete'));
+  assert.ok(orchestrationRuns.some((run) => run.operation === 'orchestrate:review' && run.status === 'complete'));
+  const reset = await api(`/api/orchestrations/${id}/reset`, { method: 'POST' });
+  assert.equal(reset.status, 200);
+  assert.equal(reset.data.orchestration.status, 'draft');
+  assert.ok(reset.data.orchestration.nodes.every((node) => node.status === 'idle' && node.output === null));
+  await api(`/api/orchestrations/${id}`, { method: 'DELETE' });
+});
+
+test('Mock orchestration runs independent branches in parallel', async () => {
+  const created = await api('/api/orchestrations', { method: 'POST', body: { name: 'Parallel' } });
+  const id = created.data.orchestration.id;
+  const a = created.data.orchestration.nodes[0];
+  const b = orchNode({ id: 'node_par_b', label: 'Review A', capability: 'review', source: { type: 'upstream', nodeId: a.id, text: '' } });
+  const c = orchNode({ id: 'node_par_c', label: 'Review B', capability: 'review', source: { type: 'upstream', nodeId: a.id, text: '' } });
+  await api(`/api/orchestrations/${id}`, {
+    method: 'PUT',
+    body: {
+      name: 'Parallel',
+      nodes: [a, b, c],
+      edges: [
+        { id: 'e_ab', source: a.id, target: b.id, summary: '' },
+        { id: 'e_ac', source: a.id, target: c.id, summary: '' },
+      ],
+    },
+  });
+  await api(`/api/orchestrations/${id}/run`, { method: 'POST' });
+  const finished = await waitForOrchestration(id, (orch) => orch.status !== 'running');
+  assert.equal(finished.status, 'complete');
+  const byId = new Map(finished.nodes.map((node) => [node.id, node]));
+  assert.equal(byId.get(b.id).status, 'complete');
+  assert.equal(byId.get(c.id).status, 'complete');
+  assert.ok(byId.get(b.id).output && byId.get(c.id).output);
+  await api(`/api/orchestrations/${id}`, { method: 'DELETE' });
+});
+
+test('Approval gate pauses a run and resumes only after approval', async () => {
+  const created = await api('/api/orchestrations', { method: 'POST', body: { name: 'Gated' } });
+  const id = created.data.orchestration.id;
+  const a = created.data.orchestration.nodes[0];
+  const gate = orchNode({ id: 'node_gate', kind: 'gate', label: 'Gate' });
+  const b = orchNode({ id: 'node_after_gate', label: 'After gate', capability: 'review', source: { type: 'upstream', nodeId: a.id, text: '' } });
+  await api(`/api/orchestrations/${id}`, {
+    method: 'PUT',
+    body: {
+      name: 'Gated',
+      nodes: [a, gate, b],
+      edges: [
+        { id: 'e_ag', source: a.id, target: gate.id, summary: '' },
+        { id: 'e_gb', source: gate.id, target: b.id, summary: '' },
+      ],
+    },
+  });
+  await api(`/api/orchestrations/${id}/run`, { method: 'POST' });
+  const waiting = await waitForOrchestration(id, (orch) => orch.nodes.some((node) => node.kind === 'gate' && node.status === 'waiting'));
+  assert.equal(waiting.status, 'running');
+  const gateId = waiting.nodes.find((node) => node.kind === 'gate').id;
+  assert.equal(waiting.nodes.find((node) => node.id === gateId).decision, 'pending');
+  const decided = await api(`/api/orchestrations/${id}/gates/${gateId}/decide`, { method: 'POST', body: { decision: 'approved', note: 'proceed' } });
+  assert.equal(decided.status, 200);
+  const finished = await waitForOrchestration(id, (orch) => orch.status !== 'running');
+  assert.equal(finished.status, 'complete');
+  assert.equal(finished.nodes.find((node) => node.id === gateId).decision, 'approved');
+  assert.equal(finished.nodes.find((node) => node.id === 'node_after_gate').status, 'complete');
+  await api(`/api/orchestrations/${id}`, { method: 'DELETE' });
+});
+
+test('Rejecting an approval gate stops the run and skips downstream nodes', async () => {
+  const created = await api('/api/orchestrations', { method: 'POST', body: { name: 'Gated reject' } });
+  const id = created.data.orchestration.id;
+  const a = created.data.orchestration.nodes[0];
+  const gate = orchNode({ id: 'node_gate2', kind: 'gate', label: 'Gate' });
+  const b = orchNode({ id: 'node_after2', label: 'After', capability: 'review', source: { type: 'upstream', nodeId: a.id, text: '' } });
+  await api(`/api/orchestrations/${id}`, {
+    method: 'PUT',
+    body: {
+      name: 'Gated reject',
+      nodes: [a, gate, b],
+      edges: [
+        { id: 'e1', source: a.id, target: gate.id, summary: '' },
+        { id: 'e2', source: gate.id, target: b.id, summary: '' },
+      ],
+    },
+  });
+  await api(`/api/orchestrations/${id}/run`, { method: 'POST' });
+  const waiting = await waitForOrchestration(id, (orch) => orch.nodes.some((node) => node.kind === 'gate' && node.status === 'waiting'));
+  const gateId = waiting.nodes.find((node) => node.kind === 'gate').id;
+  const decided = await api(`/api/orchestrations/${id}/gates/${gateId}/decide`, { method: 'POST', body: { decision: 'rejected' } });
+  assert.equal(decided.status, 200);
+  const finished = await waitForOrchestration(id, (orch) => orch.status !== 'running');
+  assert.equal(finished.status, 'cancelled');
+  assert.equal(finished.nodes.find((node) => node.id === 'node_after2').status, 'skipped');
+  await api(`/api/orchestrations/${id}`, { method: 'DELETE' });
+});
+
+test('Orchestration run rejects cyclic graphs and guards busy states', async () => {
+  const created = await api('/api/orchestrations', { method: 'POST', body: { name: 'Cycle flow' } });
+  const id = created.data.orchestration.id;
+  const a = created.data.orchestration.nodes[0];
+  const b = orchNode({ id: 'node_cyc_b', label: 'B' });
+  await api(`/api/orchestrations/${id}`, {
+    method: 'PUT',
+    body: {
+      name: 'Cycle flow',
+      nodes: [a, b],
+      edges: [
+        { id: 'e1', source: a.id, target: b.id, summary: '' },
+        { id: 'e2', source: b.id, target: a.id, summary: '' },
+      ],
+    },
+  });
+  const run = await api(`/api/orchestrations/${id}/run`, { method: 'POST' });
+  assert.equal(run.status, 400);
+  assert.equal(run.data.code, 'CYCLIC_GRAPH');
+  const gate = orchNode({ id: 'node_gate3', kind: 'gate' });
+  await api(`/api/orchestrations/${id}`, {
+    method: 'PUT',
+    body: { name: 'Cycle flow', nodes: [a, gate], edges: [{ id: 'e1', source: a.id, target: gate.id, summary: '' }] },
+  });
+  const started = await api(`/api/orchestrations/${id}/run`, { method: 'POST' });
+  assert.equal(started.status, 202);
+  const waiting = await waitForOrchestration(id, (orch) => orch.nodes.some((node) => node.kind === 'gate' && node.status === 'waiting'));
+  const editWhileRunning = await api(`/api/orchestrations/${id}`, { method: 'PUT', body: { name: 'Nope', nodes: waiting.nodes, edges: waiting.edges } });
+  assert.equal(editWhileRunning.status, 409);
+  const deleteWhileRunning = await api(`/api/orchestrations/${id}`, { method: 'DELETE' });
+  assert.equal(deleteWhileRunning.status, 409);
+  const secondRun = await api(`/api/orchestrations/${id}/run`, { method: 'POST' });
+  assert.equal(secondRun.status, 409);
+  const cancelled = await api(`/api/orchestrations/${id}/cancel`, { method: 'POST' });
+  assert.equal(cancelled.status, 200);
+  const afterCancel = await waitForOrchestration(id, (orch) => orch.status === 'cancelled');
+  assert.equal(afterCancel.status, 'cancelled');
+  await api(`/api/orchestrations/${id}`, { method: 'DELETE' });
+});
+
+test('Gate decisions require a running orchestration and a waiting gate', async () => {
+  const created = await api('/api/orchestrations', { method: 'POST', body: { name: 'No gate yet' } });
+  const id = created.data.orchestration.id;
+  const gate = orchNode({ id: 'node_gate4', kind: 'gate' });
+  await api(`/api/orchestrations/${id}`, {
+    method: 'PUT', body: { name: 'No gate yet', nodes: [created.data.orchestration.nodes[0], gate], edges: [{ id: 'e1', source: created.data.orchestration.nodes[0].id, target: gate.id, summary: '' }] },
+  });
+  const notRunning = await api(`/api/orchestrations/${id}/gates/node_gate4/decide`, { method: 'POST', body: { decision: 'approved' } });
+  assert.equal(notRunning.status, 409);
+  const started = await api(`/api/orchestrations/${id}/run`, { method: 'POST' });
+  assert.equal(started.status, 202);
+  const waiting = await waitForOrchestration(id, (orch) => orch.nodes.some((node) => node.kind === 'gate' && node.status === 'waiting'));
+  const gateId = waiting.nodes.find((node) => node.kind === 'gate').id;
+  const invalidDecision = await api(`/api/orchestrations/${id}/gates/${gateId}/decide`, { method: 'POST', body: { decision: 'maybe' } });
+  assert.equal(invalidDecision.status, 400);
+  const decided = await api(`/api/orchestrations/${id}/gates/${gateId}/decide`, { method: 'POST', body: { decision: 'approved' } });
+  assert.equal(decided.status, 200);
+  await waitForOrchestration(id, (orch) => orch.status !== 'running');
+  await api(`/api/orchestrations/${id}`, { method: 'DELETE' });
+});
+
 test('Path traversal is blocked', async () => {
   const { status, data } = await api('/api/files/../../etc/passwd');
   assert.ok(status === 403 || status === 404, `Expected 403 or 404, got ${status}`);
@@ -1933,7 +2245,7 @@ test('Absolute path is blocked', async () => {
 });
 
 test('sanitizePath rejects traversal', () => {
-  const root = '/home/user/workspace';
+  const root = join(process.cwd(), 'sanitize-root');
   assert.equal(sanitizePath('../../etc/passwd', root), null);
   assert.equal(sanitizePath('/etc/passwd', root), null);
   assert.equal(sanitizePath('subdir/../../etc/passwd', root), null);
@@ -1942,7 +2254,7 @@ test('sanitizePath rejects traversal', () => {
 });
 
 test('sanitizePath rejects null bytes', () => {
-  const root = '/home/user/workspace';
+  const root = join(process.cwd(), 'sanitize-root');
   assert.equal(sanitizePath('main.tex\0.exe', root), null);
 });
 
@@ -2008,4 +2320,134 @@ test('Security headers are set', async () => {
 test('PUT /api/files validates content type', async () => {
   const { status } = await api('/api/files/test.tex', { method: 'PUT', body: { content: 123 } });
   assert.equal(status, 400);
+});
+
+// ---------------------------------------------------------------------------
+// Paragraph analysis (rhythm statistics)
+// ---------------------------------------------------------------------------
+
+test('Paragraph analysis computes sentence-length statistics for a selection', async () => {
+  const { status, data } = await api('/api/analysis/structure', {
+    method: 'POST',
+    body: { content: 'One short. A considerably longer sentence that keeps going with more words and clauses to extend its length. Tiny.' },
+  });
+  assert.equal(status, 200);
+  assert.equal(data.analysis.kind, 'selection');
+  assert.equal(data.analysis.unit.sentenceCount, 3);
+  assert.equal(data.analysis.stats.count, 3);
+  assert.ok(data.analysis.stats.mean > 3 && data.analysis.stats.mean < 12);
+  assert.ok(data.analysis.stats.stddev > 0);
+  assert.ok(data.analysis.stats.cv > 0.4);
+  assert.ok(data.analysis.stats.delta > 3);
+  assert.ok(data.analysis.variation.score >= 0 && data.analysis.variation.score <= 100);
+  assert.ok(data.analysis.verdict.title);
+  assert.ok(Array.isArray(data.analysis.formulas));
+  assert.ok(data.analysis.sentences.every((sentence) => sentence.wordCount > 0));
+});
+
+test('Paragraph analysis covers the whole document and individual paragraphs', async () => {
+  await api('/api/documents/sync', { method: 'POST', body: { file: 'main.tex' } });
+  const documentLevel = await api('/api/analysis/structure', { method: 'POST', body: {} });
+  assert.equal(documentLevel.status, 200);
+  assert.equal(documentLevel.data.analysis.kind, 'document');
+  assert.ok(documentLevel.data.analysis.unit.sentenceCount > 10);
+  assert.ok(documentLevel.data.analysis.paragraphs.length > 1);
+  assert.ok(documentLevel.data.analysis.sentenceStats.mean > 0);
+  assert.ok(documentLevel.data.analysis.paragraphStats.count >= 1);
+  const paragraphId = documentLevel.data.analysis.paragraphs[0].id;
+  const paragraphLevel = await api('/api/analysis/structure', { method: 'POST', body: { nodeId: paragraphId } });
+  assert.equal(paragraphLevel.status, 200);
+  assert.ok(['paragraph', 'sentence'].includes(paragraphLevel.data.analysis.kind));
+  assert.ok(paragraphLevel.data.analysis.stats.count >= 1);
+  assert.ok(paragraphLevel.data.analysis.unit.id);
+});
+
+test('Variation index and verdict classify uniform text as template-like', () => {
+  const uniform = analyzeLengths([10, 10, 11, 10, 9, 10, 10, 11, 10, 10]);
+  assert.ok(uniform.cv < 0.1);
+  assert.ok(uniform.relativeDelta < 0.15);
+  const verdict = mechanicalVerdict(variationIndex(uniform).score);
+  assert.ok(['highly-uniform', 'uniform'].includes(verdict.label));
+  const varied = analyzeLengths([2, 18, 4, 30, 6, 22, 3, 27, 5, 19]);
+  assert.ok(varied.cv > 0.6);
+  const variedVerdict = mechanicalVerdict(variationIndex(varied).score);
+  assert.ok(['highly-varied', 'varied'].includes(variedVerdict.label));
+});
+
+// ---------------------------------------------------------------------------
+// Literature review generation from the reference library
+// ---------------------------------------------------------------------------
+
+test('Literature review generates a citable paragraph from selected references and inserts it', async () => {
+  await api('/api/references/import', {
+    method: 'POST',
+    body: { references: [
+      { id: 'lr_turing', citekey: 'turing1950', title: 'Computing Machinery and Intelligence', authors: ['A. M. Turing'], year: '1950', status: 'verified' },
+      { id: 'lr_shannon', citekey: 'shannon1948', title: 'A Mathematical Theory of Communication', authors: ['C. E. Shannon'], year: '1948', status: 'verified' },
+    ] },
+  });
+  const review = await api('/api/references/review', {
+    method: 'POST', body: { citekeys: ['turing1950', 'shannon1948'], prompt: 'Machine intelligence foundations' },
+  });
+  assert.equal(review.status, 201);
+  assert.equal(review.data.provider, 'mock');
+  assert.match(review.data.draft, /\\citep\{turing1950\}/);
+  assert.match(review.data.draft, /\\citep\{shannon1948\}/);
+  assert.ok(review.data.runId);
+  assert.deepEqual(review.data.citekeys.sort(), ['shannon1948', 'turing1950']);
+
+  const missing = await api('/api/references/review', { method: 'POST', body: { citekeys: ['ghost1949'] } });
+  assert.equal(missing.status, 404);
+  const empty = await api('/api/references/review', { method: 'POST', body: { citekeys: [] } });
+  assert.equal(empty.status, 400);
+
+  const synced = await api('/api/documents/sync', { method: 'POST', body: { file: 'main.tex' } });
+  const inserted = await api('/api/agent/insert-paragraph', {
+    method: 'POST',
+    body: { documentId: synced.data.document.id, index: 0, text: review.data.draft, prompt: 'Insert literature review.', runId: review.data.runId },
+  });
+  assert.equal(inserted.status, 200);
+  assert.ok(inserted.data.content.includes('\\citep{turing1950}'));
+  assert.ok(inserted.data.recoveryPoint);
+});
+
+// ---------------------------------------------------------------------------
+// PDF pattern extraction into the writing library
+// ---------------------------------------------------------------------------
+
+test('Text extraction pulls reusable academic patterns from PDF text and adds them to the library', async () => {
+  const extracted = await api('/api/libraries/extract-text', {
+    method: 'POST',
+    body: {
+      source: 'sample.pdf',
+      text: 'We propose a novel framework that can be used to model complex systems. It has been shown that the method plays a key role in practice. Our results indicate a substantial improvement over prior work. This sentence has no academic framing and should be ignored by the extractor.',
+    },
+  });
+  assert.equal(extracted.status, 201);
+  assert.ok(extracted.data.candidates.patterns.length >= 2);
+  for (const candidate of extracted.data.candidates.patterns) {
+    assert.equal(candidate.kind, 'sentence-patterns');
+    assert.ok(candidate.value.template.length > 20);
+    assert.ok(candidate.value.tags.includes('pdf'));
+    assert.equal(candidate.value.source, 'sample.pdf');
+  }
+
+  const blank = await api('/api/libraries/extract-text', { method: 'POST', body: { text: '   ' } });
+  assert.equal(blank.status, 400);
+
+  const candidate = extracted.data.candidates.patterns[0];
+  const added = await api('/api/libraries/sentence-patterns', {
+    method: 'POST', body: candidate.value,
+  });
+  assert.equal(added.status, 201);
+  const libraries = await api('/api/libraries');
+  assert.ok(libraries.data.libraries.sentencePatterns.some((item) => item.id === added.data.item.id));
+  assert.ok(libraries.data.libraries.sentencePatterns.some((item) => item.source === 'sample.pdf'));
+});
+
+test('File listing exposes PDF files alongside TeX sources', async () => {
+  const { status, data } = await api('/api/files');
+  assert.equal(status, 200);
+  assert.ok(Array.isArray(data.files));
+  assert.ok(Array.isArray(data.pdfs));
 });
