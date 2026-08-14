@@ -2497,3 +2497,30 @@ test('File listing exposes PDF files alongside TeX sources', async () => {
   assert.ok(Array.isArray(data.files));
   assert.ok(Array.isArray(data.pdfs));
 });
+
+// ---------------------------------------------------------------------------
+// Context engineering: library materialization for on-demand agent reads
+// ---------------------------------------------------------------------------
+
+import { materializeLibraries, libraryIndexPath, libraryDirectory } from '../src/server/library-files.js';
+
+test('Writing library materializes to readable files with a machine index', async () => {
+  await api('/api/libraries/corpora', {
+    method: 'POST',
+    body: { name: 'Context corpus', content: 'Line one. Line two.', source: 'experiment', tags: ['ml'], description: 'd' },
+  });
+  await api('/api/libraries/sentence-patterns', {
+    method: 'POST',
+    body: { name: 'Claim pattern', template: 'We show that {slot1}.', source: '', tags: ['claims'], sectionTypes: ['results'], slots: [{ name: 'slot1', description: 'finding', required: true }], description: '' },
+  });
+  const result = await materializeLibraries(tmpWorkspace);
+  assert.ok(result.paths.some((path) => path.endsWith('corpus.md')));
+  assert.ok(result.paths.some((path) => path.endsWith('patterns.md')));
+  assert.equal(result.index.files.length, 4);
+  const index = JSON.parse(await readFile(libraryIndexPath(tmpWorkspace), 'utf-8'));
+  assert.ok(index.entries.some((entry) => entry.kind === 'corpora'));
+  assert.ok(index.entries.some((entry) => entry.kind === 'sentence-patterns'));
+  const corpusMd = await readFile(join(libraryDirectory(tmpWorkspace), 'corpus.md'), 'utf-8');
+  assert.match(corpusMd, /Context corpus/);
+  assert.match(corpusMd, /Line one\. Line two\./);
+});
