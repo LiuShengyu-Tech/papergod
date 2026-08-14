@@ -87,9 +87,13 @@ body {
 #navigator-tabs button { border: 0; border-radius: 5px; padding: 7px; color: var(--text-dim); background: transparent; font-size: 10px; font-weight: 700; cursor: pointer; }
 #navigator-tabs button.active { color: var(--text); background: var(--bg-panel); box-shadow: 0 1px 3px rgba(0,0,0,.12); }
 .navigator-panel { min-height: 0; overflow: auto; }
-.tool-list { display: grid; gap: 5px; padding: 6px 8px 12px; }
-.tool-list button { display: flex; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: 6px; padding: 9px; color: var(--text); background: var(--bg-panel); text-align: left; font-size: 10px; cursor: pointer; }
-.tool-list button:hover { border-color: var(--accent); }
+.tool-group { display: grid; gap: 4px; padding: 8px 8px 0; }
+.tool-group + .tool-group { margin-top: 8px; padding-top: 12px; border-top: 1px solid var(--border); }
+.tool-group-title { padding: 0 2px 4px; color: var(--text-dim); font-size: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; }
+.tool-group button { display: flex; align-items: center; gap: 7px; border: 1px solid var(--border); border-radius: 6px; padding: 8px 9px; color: var(--text); background: var(--bg-panel); text-align: left; font-size: 10px; cursor: pointer; }
+.tool-group button:hover { border-color: var(--accent); }
+.tool-group button svg { flex: none; color: var(--text-dim); }
+.tool-group button:hover svg { color: var(--accent); }
 
 #active-workspace-name { max-width: 180px; overflow: hidden; padding-left: 8px; color: var(--text-dim); border-left: 1px solid var(--border); font-size: 10px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }
 

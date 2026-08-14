@@ -1,6 +1,7 @@
 import {
-  BarChart3, BookMarked, BookOpen, Bot, Braces, FileText, FolderKanban, GitPullRequest, History,
-  Network, Play, RefreshCw, Save, ScanText, Sparkles, SquareTerminal, Users,
+  BarChart3, BookMarked, BookOpen, Bot, Braces, FileCode, FileText, FolderKanban, FolderOpen,
+  GitPullRequest, History, Library, Network, Play, PlayCircle, RefreshCw, Save, ScanText,
+  Settings, Sparkles, SquareTerminal, Users,
 } from 'lucide-react';
 import { Button } from './ui/button.jsx';
 
@@ -30,7 +31,26 @@ function Navigator() {
       </section>
       <section id="navigator-tools-panel" className="navigator-panel hidden" role="tabpanel">
         <div className="sidebar-heading"><h3 data-i18n="nav.workspaceTools">Workspace tools</h3></div>
-        <div className="tool-list"><button id="tool-workspaces" type="button"><FolderKanban size={13} /><span data-i18n="tools.workspaces">Workspaces</span></button><button id="tool-references" type="button"><BookMarked size={13} /><span data-i18n="tools.references">References</span></button><button id="tool-orchestration" type="button"><Network size={13} /><span data-i18n="tools.orchestration">Agent orchestration</span></button><button id="tool-analysis" type="button"><BarChart3 size={13} /><span data-i18n="tools.analysis">Paragraph analysis</span></button><button id="tool-terminal" type="button"><SquareTerminal size={13} /><span data-i18n="tools.terminal">Terminal</span></button><button id="tool-open-folder" type="button" data-i18n="tools.openFolder">Open paper folder</button><button id="tool-show-source" type="button" data-i18n="tools.source">LaTeX source</button><button id="tool-compile" type="button" data-i18n="tools.compile">Compile PDF</button><button id="tool-change-history" type="button" data-i18n="tools.changeHistory">Change history</button><button id="tool-libraries" type="button" data-i18n="tools.libraries">Writing libraries</button><button id="tool-agent-config" type="button" data-i18n="tools.agentConfig">Agent configuration</button></div>
+        <div className="tool-group">
+          <div className="tool-group-title" data-i18n="tools.group.workspace">Workspace</div>
+          <button id="tool-workspaces" type="button"><FolderKanban size={13} /><span data-i18n="tools.workspaces">Workspaces</span></button>
+          <button id="tool-references" type="button"><BookMarked size={13} /><span data-i18n="tools.references">References</span></button>
+          <button id="tool-terminal" type="button"><SquareTerminal size={13} /><span data-i18n="tools.terminal">Terminal</span></button>
+          <button id="tool-open-folder" type="button"><FolderOpen size={13} /><span data-i18n="tools.openFolder">Open paper folder</span></button>
+        </div>
+        <div className="tool-group">
+          <div className="tool-group-title" data-i18n="tools.group.ai">AI assistants</div>
+          <button id="tool-orchestration" type="button"><Network size={13} /><span data-i18n="tools.orchestration">Agent orchestration</span></button>
+          <button id="tool-analysis" type="button"><BarChart3 size={13} /><span data-i18n="tools.analysis">Paragraph analysis</span></button>
+          <button id="tool-agent-config" type="button"><Settings size={13} /><span data-i18n="tools.agentConfig">Agent configuration</span></button>
+        </div>
+        <div className="tool-group">
+          <div className="tool-group-title" data-i18n="tools.group.document">Document</div>
+          <button id="tool-show-source" type="button"><FileCode size={13} /><span data-i18n="tools.source">LaTeX source</span></button>
+          <button id="tool-compile" type="button"><PlayCircle size={13} /><span data-i18n="tools.compile">Compile PDF</span></button>
+          <button id="tool-change-history" type="button"><History size={13} /><span data-i18n="tools.changeHistory">Change history</span></button>
+          <button id="tool-libraries" type="button"><Library size={13} /><span data-i18n="tools.libraries">Writing libraries</span></button>
+        </div>
         <div className="sidebar-heading tool-files-heading"><h3 data-i18n="tools.backendFiles">Backend files</h3></div><ul id="file-tree" />
       </section>
     </aside>
