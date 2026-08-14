@@ -50,9 +50,12 @@ export function splitSentences(text) {
     const previous = source[cursor - 1];
     const boundary = sentenceEndIndex(source, cursor);
     if (boundary === -1) continue; // glued to following word/command
-    const follower = source[boundary];
-    if (/\d/.test(previous || '') && /\d/.test(follower || '')) continue; // decimal
+    let look = boundary;
+    while (look < source.length && /\s/.test(source[look])) look += 1;
+    const nextNonSpace = source[look];
+    if (/\d/.test(previous || '') && /\d/.test(nextNonSpace || '')) continue; // decimal
     if (character === '.' && isAbbreviationAt(source, cursor)) continue; // e.g. i.e. cf.
+    if (look < source.length && /[a-z]/.test(nextNonSpace || '')) continue; // embedded quote continues
     const sentence = cleanText(source.slice(sentenceStart, boundary));
     if (sentence) sentences.push(sentence);
     sentenceStart = boundary;

@@ -407,7 +407,7 @@ test('LaTeX structure parser ignores commented headings and decimal punctuation'
 test('Sentence splitting keeps abbreviations, quote-wrapped ends, and decimals intact', () => {
   // "e.g." "cf." "i.e." stay glued; a single-letter placeholder ending "X." is a
   // real boundary; decimals and "Fig. 5" survive; the period + closing quote
-  // ("think?") is followed by a new sentence.
+  // ("think?") followed by a capital starts a new sentence.
   const source = '\\begin{document}\\section{Intro}\nWe use, e.g., the imitation game, cf. Turing (1950), and i.e. not a proof. Choose variable X. Then the question, "Can machines think?" This is a new sentence. Accuracy is 3.14 and Fig. 5 is shown. That is the end.\n\\end{document}';
   const parsed = parseLatexDocument(source, { id: 'document_abbr', sections: [] });
   const sentences = parsed.sections[0].children[0].children.map((sentence) => sentence.text);
@@ -421,6 +421,18 @@ test('Sentence splitting keeps abbreviations, quote-wrapped ends, and decimals i
   assert.ok(sentences[3].startsWith('This is a new sentence'));
   assert.ok(sentences[4].includes('3.14'));
   assert.ok(sentences[4].includes('Fig. 5'));
+});
+
+test('Embedded quote followed by lowercase does not split the sentence', () => {
+  // "the answer ... "Can machines think?" is to be sought ..." — the question
+  // mark closes a quoted clause but "is" continues the same sentence.
+  const source = '\\begin{document}\\section{Intro}\nThe meaning and the answer to the question, "Can machines think?" is to be sought in a statistical survey such as a Gallup poll. But this is absurd.\n\\end{document}';
+  const parsed = parseLatexDocument(source, { id: 'document_quote', sections: [] });
+  const sentences = parsed.sections[0].children[0].children.map((sentence) => sentence.text);
+  assert.equal(sentences.length, 2);
+  assert.ok(sentences[0].startsWith('The meaning and the answer'));
+  assert.ok(sentences[0].includes('is to be sought in a statistical survey such as a Gallup poll.'));
+  assert.ok(sentences[1].startsWith('But this is absurd'));
 });
 
 test('Paragraph analysis splits sentences abbreviation-aware and strips LaTeX for word count', async () => {

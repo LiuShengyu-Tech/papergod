@@ -147,9 +147,13 @@ function sentenceRanges(source, start, end) {
     const previous = source[cursor - 1];
     const boundary = sentenceEndIndex(source, cursor, end);
     if (boundary === -1) continue; // glued to command, citation, etc.
-    const follower = source[boundary];
-    if (/\d/.test(previous || '') && /\d/.test(follower || '')) continue; // decimal number
+    // Next non-space character after the punctuation (and any closing quotes).
+    let look = boundary;
+    while (look < end && /\s/.test(source[look])) look += 1;
+    const nextNonSpace = source[look];
+    if (/\d/.test(previous || '') && /\d/.test(nextNonSpace || '')) continue; // decimal number
     if (character === '.' && isAbbreviationAt(source, cursor)) continue; // e.g. i.e. cf. A. M.
+    if (look < end && /[a-z]/.test(nextNonSpace || '')) continue; // embedded quote: "think?" is ...
     const range = trimRange(source, sentenceStart, boundary);
     if (range.end > range.start) ranges.push(range);
     sentenceStart = boundary;
