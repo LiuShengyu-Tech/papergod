@@ -9,7 +9,7 @@ import { parseCliArgs, resolveStartupWorkspace } from '../src/cli.js';
 import { initializeWorkspace } from '../src/server/workspace.js';
 import { buildCitationContext, checkCitations, findUnknownAgentCitations, parseBibTeX, scanReferenceFolder, serializeReference } from '../src/server/references.js';
 import { enrichZoteroAttachment, exportBetterBibTeX, getZoteroFullText, getZoteroStatus, listZoteroCollections, searchZoteroItems } from '../src/server/zotero.js';
-import { PAPER_GENERATION_OUTPUT_SCHEMA, REVIEW_ORCHESTRATION_OUTPUT_SCHEMA, SUGGESTION_OUTPUT_SCHEMA, detectAgentProviders, parseAgentJson, parsePaperGenerationJson, parseReviewAgentJson, parseReviewOrchestrationJson, runAcademicReviewAgent, runPaperGenerationAgent, runProcess, runReviewOrchestrationAgent, runWritingAgent, validatePaperGenerationResponse, validateReviewOrchestrationResponse, validateReviewResponse, validateSuggestionResponse } from '../src/server/agent-adapters.js';
+import { PAPER_GENERATION_OUTPUT_SCHEMA, REVIEW_ORCHESTRATION_OUTPUT_SCHEMA, SUGGESTION_OUTPUT_SCHEMA, buildWorkspaceIndex, detectAgentProviders, parseAgentJson, parsePaperGenerationJson, parseReviewAgentJson, parseReviewOrchestrationJson, runAcademicReviewAgent, runPaperGenerationAgent, runProcess, runReviewOrchestrationAgent, runWritingAgent, validatePaperGenerationResponse, validateReviewOrchestrationResponse, validateReviewResponse, validateSuggestionResponse } from '../src/server/agent-adapters.js';
 import { parseLatexDocument } from '../src/server/latex-structure.js';
 import { buildLibraryContext, composeMockParagraph, extractLibraryCandidates, mergedVocabulary, renderSentencePattern, searchLibraries } from '../src/server/library-engine.js';
 import { applySuggestionsAsRevision, restoreRevisionVersion, splitAtomicOpinions } from '../src/server/revision-engine.js';
@@ -2523,4 +2523,24 @@ test('Writing library materializes to readable files with a machine index', asyn
   const corpusMd = await readFile(join(libraryDirectory(tmpWorkspace), 'corpus.md'), 'utf-8');
   assert.match(corpusMd, /Context corpus/);
   assert.match(corpusMd, /Line one\. Line two\./);
+});
+
+test('Workspace index lists paths and target range without inlining document text', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'papergod-wsindex-'));
+  await writeFile(join(workspace, 'main.tex'), '\\documentclass{article}\\begin{document}SECRET LONG BODY TEXT HERE.\\end{document}', 'utf-8');
+  await writeFile(join(workspace, 'intro.tex'), '\\chapter{Intro}', 'utf-8');
+  await writeFile(join(workspace, 'refs.bib'), '@article{key,title={T}}', 'utf-8');
+  await mkdir(join(workspace, '.papergod', 'library'), { recursive: true });
+  await writeFile(join(workspace, '.papergod', 'library', 'patterns.md'), 'template pattern', 'utf-8');
+  const indexText = buildWorkspaceIndex(workspace, { file: 'main.tex', start: 40, end: 58 });
+  assert.match(indexText, new RegExp(workspace.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(indexText, /main\.tex\s+<-- TARGET document/);
+  assert.match(indexText, /intro\.tex/);
+  assert.match(indexText, /refs\.bib/);
+  assert.match(indexText, /\.papergod\/library\/patterns\.md/);
+  assert.match(indexText, /\[40, 58\)/);
+  // Index must NOT inline the manuscript body or library content
+  assert.doesNotMatch(indexText, /SECRET LONG BODY TEXT/);
+  assert.doesNotMatch(indexText, /template pattern/);
+  await rm(workspace, { recursive: true, force: true });
 });

@@ -431,6 +431,45 @@ export function validateReviewOrchestrationResponse(value, content) {
   return { ok: errors.length === 0, errors };
 }
 
+const LIBRARY_FILES = [
+  { path: '.papergod/library/corpus.md', description: 'writing library: corpora (search by tag/topic)' },
+  { path: '.papergod/library/patterns.md', description: 'writing library: sentence patterns (with {slot} placeholders)' },
+  { path: '.papergod/library/vocabulary-global.md', description: 'preferred wording (global)' },
+  { path: '.papergod/library/vocabulary-session.md', description: 'preferred wording (this session)' },
+  { path: '.papergod/index.json', description: 'machine-readable catalog of library entries' },
+];
+
+// Build a compact workspace index for the agent prompt: absolute root, a flat
+// file listing with purpose annotations, and the target range. The full
+// document and library bodies are intentionally NOT included — the agent reads
+// them from disk on demand.
+export function buildWorkspaceIndex(workspaceRoot, { file = '', start = 0, end = 0 } = {}) {
+  let entries = [];
+  try { entries = readdirSync(workspaceRoot, { withFileTypes: true }); } catch { entries = []; }
+  const texFiles = entries.filter((entry) => entry.isFile() && entry.name.endsWith('.tex')).map((entry) => entry.name);
+  const bibFiles = entries.filter((entry) => entry.isFile() && /\.(bib|bibtex)$/i.test(entry.name)).map((entry) => entry.name);
+
+  const lines = [];
+  lines.push(`WORKING DIRECTORY (absolute path): ${workspaceRoot}`);
+  lines.push('');
+  lines.push('Files in this workspace (read-only; do not modify any file):');
+  for (const name of texFiles.sort()) {
+    if (name === file) lines.push(`  ${name}    <-- TARGET document`);
+    else lines.push(`  ${name}`);
+  }
+  for (const name of bibFiles.sort()) lines.push(`  ${name}    (bibliography)`);
+  for (const { path, description } of LIBRARY_FILES) lines.push(`  ${path}    -- ${description}`);
+  lines.push('');
+  const target = file
+    ? (Number.isInteger(start) && Number.isInteger(end) && end > start
+      ? `Read the TARGET document ${file} (byte range [${start}, ${end})), then analyze exactly that range and produce suggestions whose originalText is a contiguous substring of the file.`
+      : `Read the TARGET document ${file}, then analyze it and produce suggestions whose originalText is a contiguous substring of the file.`)
+    : 'Read the target document before answering.';
+  lines.push(target);
+  lines.push('When writing-library context is relevant, read the corresponding .papergod/library files first and report the entry ids you actually use in usedResourceIds.');
+  return lines.join('\n');
+}
+
 function buildPrompt({ prompt, content, resourceContext = '' }) {
   return `You are an academic writing editor. Analyze only the LaTeX document supplied below.
 Return JSON matching the required schema. Every originalText must be an exact, contiguous substring of the submitted document. Do not edit files and do not include Markdown fences.
@@ -444,6 +483,17 @@ LaTeX document:
 <document>
 ${content}
 </document>`;
+}
+
+// Index-style prompt: no document body or library text is inlined; the agent
+// reads the workspace on demand. `workspace` = { workspaceRoot, file, start, end }.
+function buildWorkspacePrompt({ prompt, workspace }) {
+  return `You are an academic writing editor. Return JSON matching the required schema. Every originalText must be an exact, contiguous substring of the TARGET file in the workspace. Do not edit files and do not include Markdown fences.
+
+User editing instruction:
+${prompt}
+
+${buildWorkspaceIndex(workspace.workspaceRoot, workspace)}`;
 }
 
 function buildReviewPrompt({ content, reviewer, rubric }) {
