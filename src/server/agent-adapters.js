@@ -496,6 +496,17 @@ ${prompt}
 ${buildWorkspaceIndex(workspace.workspaceRoot, workspace)}`;
 }
 
+// Chooses between the legacy inline prompt and the workspace-index prompt.
+function buildSuggestionPrompt(request, options) {
+  if (request.workspace && options.workspaceRoot) {
+    return buildWorkspacePrompt({
+      prompt: request.prompt,
+      workspace: { workspaceRoot: options.workspaceRoot, file: request.workspace.file || '', start: request.workspace.start ?? 0, end: request.workspace.end ?? 0 },
+    });
+  }
+  return buildPrompt(request);
+}
+
 function buildReviewPrompt({ content, reviewer, rubric }) {
   return `You are an independent academic peer reviewer. Review only the supplied LaTeX manuscript from your assigned perspective. Do not edit files. Return only JSON matching the required schema. A quote must be an exact contiguous substring of the manuscript or an empty string. Keep each item atomic and assign it to one supplied rubricId.
 
@@ -561,13 +572,16 @@ function parseProviderOutput(parser, output) {
 
 async function runClaudeStructured(prompt, schema, parser, options) {
   const spec = commandSpec('claude-code', options.commands);
+  // Workspace mode grants read-only tools (Read/Grep/Glob) so the agent can
+  // read the paper and library files; inline mode keeps tools empty.
+  const toolFlag = options.readFromWorkspace ? ['--tools', 'Read,Grep,Glob'] : ['--tools', ''];
   const args = [
     ...spec.prefixArgs,
     '--print',
     '--output-format', 'json',
     '--json-schema', JSON.stringify(schema),
     '--permission-mode', 'plan',
-    '--tools', '',
+    ...toolFlag,
     '--no-session-persistence',
     ...modelArgs(spec),
   ];
@@ -582,7 +596,7 @@ async function runClaudeStructured(prompt, schema, parser, options) {
 }
 
 async function runClaude(request, options) {
-  return runClaudeStructured(buildPrompt(request), SUGGESTION_OUTPUT_SCHEMA, parseAgentJson, options);
+  return runClaudeStructured(buildSuggestionPrompt(request, options), SUGGESTION_OUTPUT_SCHEMA, parseAgentJson, options);
 }
 
 async function runClaudeReview(request, options) {
@@ -606,7 +620,7 @@ async function runCodex(request, options) {
     const spec = commandSpec('codex', options.commands);
     const liveTestArgs = options.liveTest ? ['--config', 'model_reasoning_effort="low"'] : [];
     const args = [...spec.prefixArgs, 'exec', ...modelArgs(spec), ...liveTestArgs, '--sandbox', 'read-only', '--skip-git-repo-check', '--ephemeral', '--color', 'never', '--output-schema', schemaFile, '--output-last-message', outputFile, '-'];
-    await runProcess(spec.command, args, { cwd: options.workspaceRoot, input: buildPrompt(request), timeoutMs: options.timeoutMs, signal: options.signal, onOutput: options.onOutput });
+    await runProcess(spec.command, args, { cwd: options.workspaceRoot, input: buildSuggestionPrompt(request, options), timeoutMs: options.timeoutMs, signal: options.signal, onOutput: options.onOutput });
     return parseAgentJson(await readFile(outputFile, 'utf-8'));
   } finally {
     await rm(temporary, { recursive: true, force: true });
@@ -618,13 +632,18 @@ async function runOpenCodeStructured(prompt, parser, options, instruction) {
   try {
     const requestFile = join(temporary, 'request.txt');
     const configFile = join(temporary, 'opencode.json');
+    // Workspace mode: run against the workspace directory (so the agent can
+    // read the paper/library) with read-only permissions; inline mode keeps a
+    // deny-only throwaway directory.
+    const runDir = options.readFromWorkspace ? options.workspaceRoot : temporary;
+    const permission = options.readFromWorkspace ? 'allow' : 'deny';
     await Promise.all([
       writeFile(requestFile, prompt, 'utf-8'),
-      writeFile(configFile, JSON.stringify({ permission: 'deny' }), 'utf-8'),
+      writeFile(configFile, JSON.stringify({ permission }), 'utf-8'),
     ]);
     const spec = commandSpec('opencode', options.commands);
-    const args = [...spec.prefixArgs, 'run', instruction, ...modelArgs(spec), '--pure', '--format', 'json', '--dir', temporary, '--file', requestFile];
-    const result = await runProcess(spec.command, args, { cwd: temporary, timeoutMs: options.timeoutMs, signal: options.signal, onOutput: options.onOutput });
+    const args = [...spec.prefixArgs, 'run', instruction, ...modelArgs(spec), '--pure', '--format', 'json', '--dir', runDir, '--file', requestFile];
+    const result = await runProcess(spec.command, args, { cwd: runDir, timeoutMs: options.timeoutMs, signal: options.signal, onOutput: options.onOutput });
     return parseProviderOutput(parser, result.stdout);
   } finally {
     await rm(temporary, { recursive: true, force: true });
@@ -632,7 +651,7 @@ async function runOpenCodeStructured(prompt, parser, options, instruction) {
 }
 
 async function runOpenCode(request, options) {
-  return runOpenCodeStructured(withOutputSchema(buildPrompt(request), SUGGESTION_OUTPUT_SCHEMA), parseAgentJson, options, 'Follow the attached academic editing request and return only the required JSON.');
+  return runOpenCodeStructured(withOutputSchema(buildSuggestionPrompt(request, options), SUGGESTION_OUTPUT_SCHEMA), parseAgentJson, options, 'Follow the attached academic editing request and return only the required JSON.');
 }
 
 async function runCodexReview(request, options) {
@@ -696,9 +715,12 @@ async function runPiStructured(prompt, parser, options) {
     const requestFile = join(temporary, 'request.txt');
     await writeFile(requestFile, prompt, 'utf-8');
     const spec = commandSpec('pi', options.commands);
+    // Workspace mode: allow Pi's read tool so it can read the paper/library
+    // files itself; inline mode keeps all tools disabled (analysis-only).
+    const toolFlag = options.readFromWorkspace ? ['--tools', 'read'] : ['--no-tools'];
     const args = [
       ...spec.prefixArgs,
-      '--print', '--mode', 'json', '--no-session', '--no-tools', '--no-context-files',
+      '--print', '--mode', 'json', '--no-session', ...toolFlag, '--no-context-files',
       '--no-extensions', '--no-skills', '--no-prompt-templates', '--no-themes', '--no-approve',
       ...modelArgs(spec), `@${requestFile}`,
       'Follow the attached academic writing request. Return only the required JSON.',
@@ -790,7 +812,7 @@ export async function listProviderModels(provider, spec, { commands = {} } = {})
 }
 
 async function runPi(request, options) {
-  return runPiStructured(withOutputSchema(buildPrompt(request), SUGGESTION_OUTPUT_SCHEMA), parseAgentJson, options);
+  return runPiStructured(withOutputSchema(buildSuggestionPrompt(request, options), SUGGESTION_OUTPUT_SCHEMA), parseAgentJson, options);
 }
 
 async function runPiReview(request, options) {
@@ -866,7 +888,7 @@ export async function runWritingAgent(provider, request, options = {}) {
   if (!AGENT_PROVIDERS.includes(provider) || provider === 'mock') throw new Error(`External adapter unavailable for provider: ${provider}`);
   if (typeof request?.prompt !== 'string' || typeof request?.content !== 'string') throw new Error('prompt and content must be strings');
   if (request.content.length + request.prompt.length > MAX_INPUT_CHARS) throw new Error('Agent input exceeds 500,000 characters');
-  const runtime = { workspaceRoot: options.workspaceRoot, commands: options.commands || {}, timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS, signal: options.signal, liveTest: options.liveTest === true, onOutput: options.onOutput };
+  const runtime = { workspaceRoot: options.workspaceRoot, commands: options.commands || {}, timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS, signal: options.signal, liveTest: options.liveTest === true, onOutput: options.onOutput, readFromWorkspace: Boolean(request.workspace && options.workspaceRoot) };
   const response = provider === 'codex' ? await runCodex(request, runtime)
     : provider === 'claude-code' ? await runClaude(request, runtime)
       : provider === 'opencode' ? await runOpenCode(request, runtime)

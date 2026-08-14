@@ -1046,6 +1046,37 @@ else process.stdout.write(JSON.stringify({ type: 'text', part: { text: response 
   assert.ok(providers.every((provider) => provider.available));
 });
 
+test('Workspace mode inlines a path index instead of the manuscript and grants read access', async () => {
+  const fakeCli = join(tmpWorkspace, 'fake-ws-agent.mjs');
+  await writeFile(fakeCli, `
+import { readFileSync, writeFileSync } from 'fs';
+const args = process.argv.slice(2);
+const requestIdx = args.findIndex((a) => a.startsWith('@'));
+const prompt = readFileSync(args[requestIdx].slice(1), 'utf-8');
+writeFileSync('captured-ws-prompt.txt', prompt);
+const doc = readFileSync('main.tex', 'utf-8');
+const out = { summary: 'Read file.', usedResourceIds: [], suggestions: [{ category: 'style', description: 'Replace', originalText: 'very important', suggestedText: 'crucial', reason: 'x' }] };
+process.stdout.write(JSON.stringify(out));
+`, 'utf-8');
+  const workspace = await mkdtemp(join(tmpdir(), 'papergod-ws-agent-'));
+  await writeFile(join(workspace, 'main.tex'), '\\documentclass{article}\\begin{document}This result is very important.\\end{document}', 'utf-8');
+  const commands = { pi: { command: process.execPath, args: [fakeCli] } };
+  const request = {
+    prompt: 'Improve precision.',
+    content: 'This result is very important.',
+    resourceContext: '', resourceIds: [],
+    workspace: { file: 'main.tex', start: 0, end: 14 },
+  };
+  const result = await runWritingAgent('pi', request, { workspaceRoot: workspace, commands });
+  assert.equal(result.suggestions[0].suggestedText, 'crucial');
+  const prompt = await readFile(join(workspace, 'captured-ws-prompt.txt'), 'utf-8');
+  // Index-style prompt: paths present, body absent
+  assert.match(prompt, /main\.tex\s+<-- TARGET document/);
+  assert.doesNotMatch(prompt, /very important/);
+  assert.match(prompt, new RegExp(workspace.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  await rm(workspace, { recursive: true, force: true });
+});
+
 test('Codex, Claude Code, OpenCode, and Pi peer-review adapters enforce structured reports', async () => {
   const fakeCli = join(tmpWorkspace, 'fake-review-agent.mjs');
   await writeFile(fakeCli, `

@@ -203,8 +203,12 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
     try {
       const controller = new AbortController();
       req.once('aborted', () => controller.abort());
+      const workspace = context.file
+        ? { file: context.file, start: context.nodeStart ?? 0, end: (context.nodeStart ?? 0) + content.length }
+        : null;
       const result = await runWritingAgent(provider, {
         content, prompt, resourceContext: libraryContext.prompt, resourceIds: libraryContext.resourceIds,
+        workspace,
       }, {
         workspaceRoot, commands: agentCommands, signal: controller.signal,
         onOutput: (stream, chunk) => appendAgentActivity(activity, stream, chunk),
