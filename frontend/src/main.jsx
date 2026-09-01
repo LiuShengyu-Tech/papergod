@@ -7,7 +7,7 @@ import './theme.css';
 
 let terminalApiPromise;
 globalThis.loadPapergodTerminal = () => {
-  terminalApiPromise ||= Promise.all([import('@xterm/xterm'), import('@xterm/addon-fit')]).then(([xterm, fit]) => ({ Terminal: xterm.Terminal, FitAddon: fit.FitAddon }));
+  terminalApiPromise ||= Promise.all([import('@xterm/xterm'), import('@xterm/addon-fit'), import('@xterm/addon-web-links')]).then(([xterm, fit, webLinks]) => ({ Terminal: xterm.Terminal, FitAddon: fit.FitAddon, WebLinksAddon: webLinks.WebLinksAddon }));
   return terminalApiPromise;
 };
 

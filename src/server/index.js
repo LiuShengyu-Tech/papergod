@@ -2,7 +2,7 @@ import express from 'express';
 import { resolve, join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile, stat } from 'fs/promises';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { spawn } from 'child_process';
 import { sanitizePath, securityHeaders } from './security.js';
 import { detectEngines, compile } from './latex.js';
@@ -14,7 +14,9 @@ import {
   listRevisions, createRevision, updateRevision, deleteRevision,
   createAgentRun, updateAgentRun, listAgentRuns,
 } from './project-resources.js';
-import { AGENT_PROVIDERS, detectAgentProviders, runWritingAgent } from './agent-adapters.js';
+import { AGENT_PROVIDERS, buildSuggestionPayload, detectAgentProviders, runWritingAgent } from './agent-adapters.js';
+import { alignSuggestionsToManifest, loadPromptManifest, materializePromptManifest } from './prompt-manifest.js';
+import { agentFailureAudit, redactAgentDiagnostic } from './agent-errors.js';
 import {
   syncDocumentStructure, getDocumentStructure, updateDocumentMetadata,
   updateNodeMetadata, getNodeSourceContext,
@@ -52,6 +54,7 @@ import {
   listOrchestrations, resetOrchestration, updateOrchestration,
 } from './orchestration-engine.js';
 import { analyzeStructure, ANALYSIS_FORMULAS } from './paragraph-analysis.js';
+import { getAppVersionInfo } from './app-version.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, '../..');
@@ -62,6 +65,12 @@ function publicErrorMessage(error) {
   const message = String(error?.message || 'Unexpected error');
   if (error?.code === 'ENOENT') return 'The configured Agent CLI command was not found.';
   if (error?.code === 'AGENT_TIMEOUT') return 'The Agent did not respond before the timeout.';
+  if (error?.code === 'AGENT_CONTENT_FILTERED') return 'The model output was interrupted by the provider content filter. No partial result was applied. Try a shorter or differently worded editing instruction.';
+  if (error?.code === 'AGENT_REFUSED') return 'The model refused this request. No partial result was applied.';
+  if (error?.code === 'AGENT_OUTPUT_TRUNCATED') return 'The model output ended before the structured result was complete. No partial result was applied.';
+  if (error?.code === 'AGENT_EMPTY_RESPONSE') return 'The Agent returned no usable structured result.';
+  if (error?.code === 'AGENT_CLI_INCOMPATIBLE') return 'The installed Agent CLI does not support Papergod’s required structured-output protocol. Update the CLI and retry.';
+  if (error?.code === 'AGENT_COOLDOWN') return `${message} Retry in ${Math.max(1, Math.ceil((error.retryAfterMs || 0) / 1000))} seconds or choose another configured provider.`;
   if (/invalid_json_schema/i.test(message)) return 'The Agent rejected Papergod’s structured output schema. Update Papergod or choose another provider.';
   if (/auth|sign.?in|log.?in|unauthorized|forbidden|\b401\b|\b403\b/i.test(message)) return 'The Agent CLI is installed but its model provider is not authenticated.';
   if (/rate.?limit|quota|too many requests|\b429\b/i.test(message)) return 'The Agent provider rate limit or quota was reached. Try again later or choose another provider.';
@@ -88,6 +97,13 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
   const agentCommands = { ...baseAgentCommands };
   const agentProbeJobs = new Map();
   const agentActivityJobs = new Map();
+  const agentConnectionState = new Map();
+  const recordAgentConnection = (id, update = {}) => {
+    const previous = agentConnectionState.get(id) || {};
+    const next = { ...previous, ...update, checkedAt: new Date().toISOString() };
+    agentConnectionState.set(id, next);
+    return next;
+  };
   let activeWorkspaceRequests = 0;
   const workspaceRegistry = createWorkspaceRegistry({ file: options.workspaceRegistryFile });
   const terminalManager = options.terminalManager || createWorkspaceTerminalManager();
@@ -102,7 +118,7 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
   app.use('/vendor/pdfjs-dist', express.static(join(PROJECT_ROOT, 'node_modules', 'pdfjs-dist'), { dotfiles: 'deny' }));
   app.use(express.static(join(PROJECT_ROOT, 'public')));
   app.use('/api', (req, res, next) => {
-    if (req.path === '/workspaces' || req.path.startsWith('/workspaces/') || req.path === '/terminal' || req.path.startsWith('/terminal/')) return next();
+    if (req.path === '/version' || req.path === '/workspaces' || req.path.startsWith('/workspaces/') || req.path === '/terminal' || req.path.startsWith('/terminal/')) return next();
     activeWorkspaceRequests += 1;
     let released = false;
     const release = () => {
@@ -126,7 +142,8 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
     if (!activity || typeof chunk !== 'string') return;
     const clean = chunk.replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, '').replace(/[^\x09\x0a\x0d\x20-\x7e\u0080-\uffff]/g, '');
     if (!clean) return;
-    activity.output = `${activity.output}${stream === 'stderr' ? '[stderr] ' : ''}${clean}`.slice(-40_000);
+    activity.rawOutput = `${activity.rawOutput || ''}${stream === 'stderr' ? '[stderr] ' : ''}${clean}`.slice(-50_000);
+    activity.output = redactAgentDiagnostic(activity.rawOutput, 40_000);
     activity.updatedAt = new Date().toISOString();
   }
 
@@ -149,6 +166,7 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
           command: profile.command.trim(),
           args: Array.isArray(profile.args) ? profile.args : [],
           model: typeof profile.model === 'string' ? profile.model.trim() : '',
+          reasoningEffort: typeof profile.reasoningEffort === 'string' ? profile.reasoningEffort : '',
         };
       }
     }
@@ -177,40 +195,73 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
 
   async function requestSuggestions(content, prompt, req, context = {}) {
     const libraryContext = context.libraryContext || { prompt: '', resources: [], resourceIds: [], mode: 'automatic' };
+    const workspace = context.file
+      ? { file: context.file, start: context.nodeStart ?? 0, end: (context.nodeStart ?? 0) + content.length }
+      : null;
+    if (context.payloadHash) {
+      const payload = buildSuggestionPayload(provider, { content, prompt, resourceContext: libraryContext.prompt, resourceIds: libraryContext.resourceIds, workspace, manifest: context.manifest || null }, { workspaceRoot });
+      const actualHash = createHash('sha256').update(payload).update('\0').update(context.manifestSerialized || '').digest('hex');
+      if (actualHash !== context.payloadHash) throw Object.assign(new Error('The final Agent payload changed after preview; refresh the prompt preview and try again.'), { status: 409, code: 'PROMPT_PREVIEW_STALE' });
+    }
+    const runInput = {
+      characters: content.length,
+      providedResources: libraryContext.resources,
+      libraryMode: context.manifest ? 'workspace-manifest' : libraryContext.mode,
+      ...(context.manifest ? { manifest: context.manifest, manifestPath: context.manifestPath, payloadHash: context.payloadHash } : {}),
+      ...(context.intentIds?.length ? { intentIds: context.intentIds } : {}),
+    };
     const activity = beginAgentActivity(req.body?.activityId, provider);
     appendAgentActivity(activity, 'stdout', `Starting ${provider} Agent in ${workspaceRoot}\n`);
     if (provider === 'mock') {
-      const suggestions = generateSuggestions(content, prompt);
+      let unresolvedTasks = [];
+      let suggestions;
+      if (context.manifest?.tasks?.length) {
+        const proposed = [];
+        for (const task of context.manifest.tasks) {
+          const quote = task.target.exactQuote;
+          const range = task.target.sourceRange;
+          const scope = quote || content.slice(range?.start || 0, range?.end ?? content.length);
+          const candidate = generateSuggestions(scope, task.instruction)[0];
+          if (!candidate || candidate.originalText === candidate.suggestedText) {
+            unresolvedTasks.push({ taskId: task.taskId, reason: 'The deterministic Mock Agent had no applicable transformation for this target.' });
+            continue;
+          }
+          proposed.push({
+            ...candidate, taskId: task.taskId, nodeId: task.target.nodeId,
+            originalText: quote || candidate.originalText,
+            suggestedText: quote ? quote.replace(candidate.originalText, candidate.suggestedText) : candidate.suggestedText,
+            usedTemplateIds: [], usedCitekeys: [],
+          });
+        }
+        suggestions = registerSuggestions(alignSuggestionsToManifest(proposed, context.manifest, unresolvedTasks, content));
+      } else suggestions = generateSuggestions(content, prompt);
       attachSuggestionContext(suggestions, { ...context, selectedContent: content });
       const completedAt = new Date().toISOString();
       const run = await createAgentRun(workspaceRoot, {
         provider, operation: 'suggest', status: 'complete', prompt,
-        input: JSON.stringify({ characters: content.length, providedResources: libraryContext.resources, libraryMode: libraryContext.mode }),
-        output: JSON.stringify({ usedResourceIds: [] }), error: '', startedAt: completedAt, finishedAt: completedAt,
+        input: JSON.stringify(runInput),
+        output: JSON.stringify({ usedResourceIds: [], unresolvedTasks }), error: '', startedAt: completedAt, finishedAt: completedAt,
       });
       finishAgentActivity(activity, 'complete', `Mock Agent produced ${suggestions.length} suggestion${suggestions.length === 1 ? '' : 's'}.`);
       return {
-        provider, runId: run.id, suggestions,
+        provider, runId: run.id, suggestions, unresolvedTasks, summary: unresolvedTasks.length ? `${unresolvedTasks.length} manifest task(s) were left unresolved by the Mock Agent.` : 'Mock Agent completed.',
         library: { mode: libraryContext.mode, providedResources: libraryContext.resources, usedResourceIds: [] },
       };
     }
     await hydrateAgentCommands();
-    await materializeLibraries(workspaceRoot);
+    if (!context.manifest) await materializeLibraries(workspaceRoot);
     const startedAt = new Date().toISOString();
     const run = await createAgentRun(workspaceRoot, {
       provider, operation: 'suggest', status: 'running', prompt,
-      input: JSON.stringify({ characters: content.length, providedResources: libraryContext.resources, libraryMode: libraryContext.mode }),
+      input: JSON.stringify(runInput),
       output: '', error: '', startedAt, finishedAt: '',
     });
     try {
       const controller = new AbortController();
       req.once('aborted', () => controller.abort());
-      const workspace = context.file
-        ? { file: context.file, start: context.nodeStart ?? 0, end: (context.nodeStart ?? 0) + content.length }
-        : null;
       const result = await runWritingAgent(provider, {
         content, prompt, resourceContext: libraryContext.prompt, resourceIds: libraryContext.resourceIds,
-        workspace,
+        workspace, manifest: context.manifest || null,
       }, {
         workspaceRoot, commands: agentCommands, signal: controller.signal,
         onOutput: (stream, chunk) => appendAgentActivity(activity, stream, chunk),
@@ -218,25 +269,28 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
       const referenceState = await loadReferenceState(workspaceRoot);
       const unknownCitekeys = findUnknownAgentCitations(result.suggestions, content, referenceState.items);
       if (unknownCitekeys.length) throw Object.assign(new Error(`Agent proposed unknown citation keys: ${unknownCitekeys.join(', ')}`), { status: 422, code: 'UNKNOWN_CITATION_KEY' });
-      const suggestions = registerSuggestions(result.suggestions);
+      recordAgentConnection(provider, { ok: true, status: 'complete', authenticated: true, authStatus: 'Last real Agent request passed', error: '', code: '' });
+      const suggestions = registerSuggestions(alignSuggestionsToManifest(result.suggestions, context.manifest, result.unresolvedTasks, content));
       attachSuggestionContext(suggestions, { ...context, selectedContent: content });
       await updateAgentRun(workspaceRoot, run.id, {
-        status: 'complete', output: JSON.stringify(result), finishedAt: new Date().toISOString(),
+        status: 'complete', output: JSON.stringify({ ...result, agentMeta: result.agentMeta }), finishedAt: new Date().toISOString(),
       });
       finishAgentActivity(activity, 'complete', 'Agent process completed successfully.');
       return {
-        provider, runId: run.id, summary: result.summary, suggestions,
+        provider, agentMeta: result.agentMeta, runId: run.id, summary: result.summary, suggestions, unresolvedTasks: result.unresolvedTasks || [],
         library: {
           mode: libraryContext.mode, providedResources: libraryContext.resources,
           usedResourceIds: result.usedResourceIds,
         },
       };
     } catch (error) {
+      if (error.code === 'AGENT_AUTH_REQUIRED') recordAgentConnection(provider, { ok: false, status: 'failed', authenticated: false, authStatus: 'Authentication failed · sign in again', error: publicErrorMessage(error), code: error.code });
+      else recordAgentConnection(provider, { ok: false, status: 'failed', error: publicErrorMessage(error), code: error.code || '' });
       finishAgentActivity(activity, 'failed', publicErrorMessage(error));
       await updateAgentRun(workspaceRoot, run.id, {
-        status: 'failed', error: [error.message, error.diagnostic].filter(Boolean).join('\n').slice(0, 4000), finishedAt: new Date().toISOString(),
+        status: 'failed', error: agentFailureAudit(error), finishedAt: new Date().toISOString(),
       });
-      error.status = 502;
+      error.status ||= 502;
       throw error;
     }
   }
@@ -258,6 +312,10 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
       if (error.code === 'ENOENT') return next();
       next(error);
     }
+  });
+
+  app.get('/api/version', async (_req, res) => {
+    res.json(await getAppVersionInfo());
   });
 
   app.get('/api/engines', async (_req, res) => {
@@ -503,7 +561,8 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
   app.get('/api/agent/activity/:id', (req, res) => {
     const activity = agentActivityJobs.get(req.params.id);
     if (!activity) return res.status(404).json({ error: 'Agent activity not found' });
-    res.json(activity);
+    const { rawOutput: _rawOutput, ...safeActivity } = activity;
+    res.json(safeActivity);
   });
 
   app.post('/api/workspace/open-folder', (_req, res) => {
@@ -528,30 +587,41 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
       ];
       return {
         selected: provider,
-        providers: definitions.map((definition) => ({
-          ...definition,
-          command: saved[definition.id]?.command || definition.command,
-          args: saved[definition.id]?.args || [],
-          model: saved[definition.id]?.model || '',
-          ...(detectedById.get(definition.id) || { available: false, authenticated: false, authStatus: 'CLI unavailable', version: null }),
-        })),
+        providers: definitions.map((definition) => {
+          const detectedAgent = detectedById.get(definition.id) || { available: false, authenticated: false, authStatus: 'CLI unavailable', version: null };
+          const connection = agentConnectionState.get(definition.id);
+          return {
+            ...definition,
+            command: saved[definition.id]?.command || definition.command,
+            args: saved[definition.id]?.args || [],
+            model: saved[definition.id]?.model || '',
+            reasoningEffort: saved[definition.id]?.reasoningEffort || '',
+            ...detectedAgent,
+            ...(connection ? {
+              authenticated: connection.authenticated ?? detectedAgent.authenticated,
+              authStatus: connection.authStatus || detectedAgent.authStatus,
+              liveCheck: connection,
+            } : {}),
+          };
+        }),
       };
     });
   });
 
   app.put('/api/agents/config', async (req, res) => {
-    const { id, command = '', args = [], model = '', activate = false } = req.body || {};
+    const { id, command = '', args = [], model = '', reasoningEffort = '', activate = false } = req.body || {};
     if (!AGENT_PROVIDERS.includes(id)) return res.status(400).json({ error: 'Unknown Agent provider' });
     if (typeof command !== 'string' || command.length > 500) return res.status(400).json({ error: 'command must be a string up to 500 characters' });
     if (!Array.isArray(args) || args.some((item) => typeof item !== 'string') || args.length > 30) return res.status(400).json({ error: 'args must be an array of strings' });
     if (typeof model !== 'string' || model.length > 200) return res.status(400).json({ error: 'model must be a string up to 200 characters' });
+    if (!['', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(reasoningEffort)) return res.status(400).json({ error: 'reasoningEffort is invalid' });
     await resourceResponse(res, async () => {
       await updateProject(workspaceRoot, (project) => {
         project.project.agentProfiles ||= {};
-        project.project.agentProfiles[id] = { command, args, model };
+        project.project.agentProfiles[id] = { command, args, model, reasoningEffort };
         if (activate) project.project.activeAgentProvider = id;
       });
-      if (id !== 'mock' && command.trim()) agentCommands[id] = { command: command.trim(), args, model: model.trim() };
+      if (id !== 'mock' && command.trim()) agentCommands[id] = { command: command.trim(), args, model: model.trim(), reasoningEffort };
       if (activate) {
         provider = id;
         app.locals.config.provider = provider;
@@ -601,14 +671,26 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
             prompt: 'Return one precise academic edit for the supplied sentence.',
             resourceContext: '', resourceIds: [],
           }, { workspaceRoot, commands, timeoutMs: 60_000, signal: controller.signal, liveTest: true });
-          job.agent = { ...agent, authenticated: true, authStatus: 'Live test passed' };
+          job.agent = { ...agent, authenticated: true, authStatus: 'Live subscription test passed' };
           job.liveTest = { ok: true, latencyMs: Date.now() - startedAt, summary: result.summary || 'Structured response validated.' };
         }
         job.status = job.liveTest.ok ? 'complete' : 'failed';
+        recordAgentConnection(id, {
+          ok: job.liveTest.ok, status: job.status, latencyMs: job.liveTest.latencyMs,
+          authenticated: job.liveTest.ok ? true : (agent?.authenticated ?? false),
+          authStatus: job.liveTest.ok ? 'Live subscription test passed' : (job.liveTest.error || agent?.authStatus || 'Live test failed'),
+          error: job.liveTest.error || '', code: job.liveTest.code || '',
+        });
       } catch (error) {
         const cancelled = controller.signal.aborted || error.code === 'AGENT_CANCELLED';
         job.status = cancelled ? 'cancelled' : 'failed';
         job.liveTest = { ok: false, latencyMs: Date.now() - startedAt, error: cancelled ? 'Live test cancelled.' : publicErrorMessage(error), code: error.code };
+        const authenticationFailed = error.code === 'AGENT_AUTH_REQUIRED';
+        recordAgentConnection(id, {
+          ok: false, status: job.status, latencyMs: job.liveTest.latencyMs,
+          ...(authenticationFailed ? { authenticated: false, authStatus: 'Live subscription test failed · sign in again' } : {}),
+          error: job.liveTest.error, code: error.code || '',
+        });
       } finally {
         job.finishedAt = new Date().toISOString();
       }
@@ -630,58 +712,63 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
   });
 
   app.post('/api/agent/context-preview', async (req, res) => {
-    const { nodeId, documentId, content = '', temporaryPrompt = '', resourceIds, citekeys = [] } = req.body || {};
+    const { nodeId, documentId, content = '', temporaryPrompt = '', additionalRequirements = '', intentIds = [], resourceIds = [], citekeys = [] } = req.body || {};
     await resourceResponse(res, async () => {
       const project = await loadProject(workspaceRoot);
       let document = project.documents.find((item) => item.id === documentId) || null;
       let node = document;
-      let section = null;
-      let parentParagraph = null;
       let targetContent = typeof content === 'string' ? content : '';
+      let target = document ? { type: 'document', id: document.id, start: 0, end: targetContent.length, quote: '' } : null;
       if (typeof nodeId === 'string' && nodeId) {
         const context = await getNodeSourceContext(workspaceRoot, nodeId);
         document = context.document;
         node = context.node;
-        section = context.section;
-        const parent = context.node.parentId ? findStructureNode(context.document, context.node.parentId) : null;
-        parentParagraph = parent?.type === 'paragraph' ? parent : null;
         targetContent = context.selectedContent;
+        target = { type: context.node.type, id: context.node.id, start: context.sourceRange.start, end: context.sourceRange.end, quote: context.selectedContent };
       }
-      if (!document) {
-        const error = new Error('Document not found');
-        error.status = 404;
-        throw error;
-      }
-      const libraryContext = buildLibraryContext(project.libraries, {
-        query: [node?.summary, node?.prompt, temporaryPrompt, targetContent].filter(Boolean).join(' '),
-        sectionType: section?.title || (node?.type === 'section' ? node.title : ''), resourceIds,
+      if (!document) throw Object.assign(new Error('Document not found'), { status: 404 });
+      const manifestResult = await materializePromptManifest(workspaceRoot, {
+        documentId: document.id, nodeId, target, intentIds,
+        instruction: additionalRequirements || temporaryPrompt,
+        additionalRequirements: additionalRequirements || temporaryPrompt,
+        sourceContent: nodeId ? undefined : targetContent,
+        resourceIds, citekeys,
       });
-      const referenceState = await loadReferenceState(workspaceRoot);
-      const citationContext = buildCitationContext(referenceState.items, Array.isArray(citekeys) ? citekeys : []);
-      const scopeLabel = node?.type === 'section' ? `Section · ${node.title}`
-        : node?.type === 'paragraph' ? 'Selected paragraph'
-          : node?.type === 'sentence' ? 'Selected sentence' : `Document · ${document.title || document.file}`;
-      const contextLayers = [
-        { name: 'System instruction', value: 'Analyze the selected LaTeX scope and propose reviewable academic-writing edits.' },
-        { name: 'Project core prompt', value: project.project.corePrompt },
-        { name: 'Document core prompt', value: document.corePrompt },
-        { name: 'Section prompt', value: section && section.id !== node?.id ? section.prompt : '' },
-        { name: 'Paragraph prompt', value: parentParagraph?.prompt },
-        { name: 'Element prompt', value: node?.type !== 'document' ? node?.prompt : '' },
-        { name: 'Summary / intent', value: [node?.summary, node?.intent].filter(Boolean).join('\n') },
-        { name: 'Writing-library context', value: libraryContext.prompt },
-        { name: 'Reference context', value: citationContext },
-      ].filter((item) => item.value);
-      const temporaryLayer = temporaryPrompt ? { name: 'Temporary instruction', value: temporaryPrompt } : null;
-      const sourceLayer = { name: 'Target source', value: targetContent };
-      const contextPrompt = contextLayers.map((item) => `## ${item.name}\n${item.value}`).join('\n\n');
-      const mergedPrompt = [contextPrompt, temporaryLayer && `## ${temporaryLayer.name}\n${temporaryLayer.value}`].filter(Boolean).join('\n\n');
-      const layers = [...contextLayers, ...(temporaryLayer ? [temporaryLayer] : []), sourceLayer];
-      const assembledPrompt = [mergedPrompt, `## ${sourceLayer.name}\n${sourceLayer.value}`].filter(Boolean).join('\n\n');
+      const manifestTarget = manifestResult.manifest.tasks.length === 1 ? manifestResult.manifest.tasks[0].target : { file: document.file, sourceRange: { start: 0, end: targetContent.length } };
+      const request = {
+        prompt: manifestResult.prompt,
+        content: targetContent,
+        resourceIds,
+        workspace: { file: manifestTarget.file || document.file, start: manifestTarget.sourceRange?.start || 0, end: manifestTarget.sourceRange?.end || targetContent.length },
+        manifest: manifestResult.manifest,
+      };
+      const payloadText = buildSuggestionPayload(provider, request, { workspaceRoot });
+      const schemaTransport = ['codex', 'claude-code'].includes(provider) ? 'out-of-band' : 'inline';
+      const payloadHash = createHash('sha256').update(payloadText).update('\0').update(manifestResult.serialized).digest('hex');
+      const primaryPayload = { provider, model: project.project.agentProfiles?.[provider]?.model || '', text: payloadText, characters: payloadText.length, tokenEstimate: Math.ceil(payloadText.length / 4), schemaTransport, hash: payloadHash };
+      const scopeLabel = intentIds.length ? `${manifestResult.manifest.tasks.length} atomic modification tasks`
+        : node?.type === 'section' ? `Section · ${node.title}`
+          : node?.type === 'paragraph' ? 'Selected paragraph'
+            : node?.type === 'sentence' ? 'Selected sentence' : `Document · ${document.title || document.file}`;
+      const resourceLayers = Object.entries(manifestResult.manifest.resources).map(([name, value]) => ({ name: `Resource · ${name}`, characters: JSON.stringify(value).length, path: value }));
       return {
-        provider, scope: scopeLabel, contextPrompt, mergedPrompt, assembledPrompt, characterCount: assembledPrompt.length,
-        layers: layers.map((item) => ({ name: item.name, characters: item.value.length })),
-        library: { mode: libraryContext.mode, resources: libraryContext.resources },
+        provider, scope: scopeLabel,
+        contextPrompt: manifestResult.prompt,
+        mergedPrompt: manifestResult.prompt,
+        assembledPrompt: payloadText,
+        characterCount: payloadText.length,
+        tokenEstimate: Math.ceil(payloadText.length / 4),
+        budget: { limitCharacters: 500000, totalCharacters: payloadText.length, remainingCharacters: 500000 - payloadText.length },
+        payload: primaryPayload,
+        manifest: manifestResult.manifest,
+        manifestPath: manifestResult.manifestPath,
+        manifestHash: manifestResult.manifestHash,
+        layers: [
+          { name: `CLI payload · ${provider}${primaryPayload.model ? `/${primaryPayload.model}` : ''} · ${schemaTransport}`, characters: primaryPayload.characters },
+          { name: 'Prompt manifest', characters: manifestResult.manifestCharacterCount, path: manifestResult.manifestPath },
+          ...resourceLayers,
+        ],
+        library: { mode: 'workspace-manifest', resources: resourceIds },
       };
     });
   });
@@ -1130,31 +1217,73 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
   });
 
   app.post('/api/agent/suggest', async (req, res) => {
-    const { documentId, content, prompt, promptIsComposed = false, resourceIds } = req.body || {};
+    const { documentId, content, prompt, promptIsComposed = false, resourceIds, citekeys = [], intentIds = [], additionalRequirements = '', manifest = null, manifestPath = '', payloadHash = '' } = req.body || {};
     if (typeof content !== 'string') return res.status(400).json({ error: 'content is required' });
+    if (manifest !== null) return res.status(400).json({ error: 'Send manifestPath, not a client-supplied manifest object', code: 'INVALID_PROMPT_MANIFEST' });
+    if (manifestPath && !payloadHash) return res.status(400).json({ error: 'Manifest execution requires a confirmed payload hash', code: 'PROMPT_CONFIRMATION_REQUIRED' });
     try {
       const project = await loadProject(workspaceRoot);
       const document = project.documents.find((item) => item.id === documentId);
-      const effectivePrompt = promptIsComposed ? prompt : [
+      let resolvedManifest = null;
+      let resolvedManifestPath = manifestPath;
+      let resolvedManifestSerialized = '';
+      if (manifestPath) {
+        const loadedManifest = await loadPromptManifest(workspaceRoot, manifestPath);
+        resolvedManifest = loadedManifest.manifest;
+        resolvedManifestSerialized = loadedManifest.serialized;
+      }
+      let effectivePrompt = promptIsComposed ? prompt : [
         project.project.corePrompt && `Paper core prompt:\n${project.project.corePrompt}`,
         document?.corePrompt && `Document prompt:\n${document.corePrompt}`,
         `Current editing request:\n${typeof prompt === 'string' && prompt.trim() ? prompt : 'Improve this scope according to the supplied writing context.'}`,
       ].filter(Boolean).join('\n\n');
+      if (!resolvedManifest && intentIds.length && document) {
+        const generatedManifest = await materializePromptManifest(workspaceRoot, {
+          documentId: document.id, intentIds, additionalRequirements: additionalRequirements || prompt,
+          sourceContent: content,
+          resourceIds: Array.isArray(resourceIds) ? resourceIds : [], citekeys,
+        });
+        resolvedManifest = generatedManifest.manifest;
+        resolvedManifestPath = generatedManifest.manifestPath;
+        resolvedManifestSerialized = generatedManifest.serialized;
+        effectivePrompt = generatedManifest.prompt;
+      }
+      if (resolvedManifest?.tasks?.length) {
+        const actualSourceHash = createHash('sha256').update(content).digest('hex');
+        if (resolvedManifest.tasks.some((task) => task.target?.sourceHash && task.target.sourceHash !== actualSourceHash)) {
+          throw Object.assign(new Error('The manuscript changed after the Prompt Manifest was prepared; refresh the preview before invoking the Agent.'), { status: 409, code: 'PROMPT_TARGET_STALE' });
+        }
+      }
       const libraries = project.libraries;
       const libraryContext = buildLibraryContext(libraries, {
         query: `${effectivePrompt}\n${content}`, resourceIds,
       });
-      res.json(await requestSuggestions(content, effectivePrompt, req, { libraryContext, file: document?.file || '', nodeStart: 0 }));
+      res.json(await requestSuggestions(content, effectivePrompt, req, {
+        libraryContext, file: document?.file || '', nodeStart: 0,
+        manifest: resolvedManifest, manifestPath: resolvedManifestPath, manifestSerialized: resolvedManifestSerialized, payloadHash, intentIds, additionalRequirements, citekeys,
+      }));
     } catch (e) {
       res.status(e.status || 500).json({ error: e.message, code: e.code, details: e.details });
     }
   });
 
   app.post('/api/agent/suggest-node', async (req, res) => {
-    const { nodeId, prompt, promptIsComposed = false, resourceIds } = req.body || {};
+    const { nodeId, prompt, promptIsComposed = false, resourceIds, citekeys = [], intentIds = [], additionalRequirements = '', manifest = null, manifestPath = '', payloadHash = '' } = req.body || {};
     if (typeof nodeId !== 'string' || !nodeId) return res.status(400).json({ error: 'nodeId is required' });
+    if (manifest !== null) return res.status(400).json({ error: 'Send manifestPath, not a client-supplied manifest object', code: 'INVALID_PROMPT_MANIFEST' });
+    if (manifestPath && !payloadHash) return res.status(400).json({ error: 'Manifest execution requires a confirmed payload hash', code: 'PROMPT_CONFIRMATION_REQUIRED' });
     try {
       const context = await getNodeSourceContext(workspaceRoot, nodeId);
+      let resolvedManifest = null;
+      let resolvedManifestSerialized = '';
+      if (manifestPath) {
+        const loadedManifest = await loadPromptManifest(workspaceRoot, manifestPath);
+        resolvedManifest = loadedManifest.manifest;
+        resolvedManifestSerialized = loadedManifest.serialized;
+      }
+      if (resolvedManifest?.tasks?.some((task) => task.target?.sourceHash && task.target.sourceHash !== context.document.sourceHash)) {
+        throw Object.assign(new Error('The target changed after the Prompt Manifest was prepared; refresh the preview before invoking the Agent.'), { status: 409, code: 'PROMPT_TARGET_STALE' });
+      }
       const parent = context.node.parentId ? findStructureNode(context.document, context.node.parentId) : null;
       const layers = promptIsComposed ? prompt : [
         context.project.project.corePrompt && `Paper core prompt:\n${context.project.project.corePrompt}`,
@@ -1170,6 +1299,7 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
       const result = await requestSuggestions(context.selectedContent, layers, req, {
         file: context.document.file, nodeId, nodeStart: context.sourceRange.start,
         libraryContext,
+        manifest: resolvedManifest, manifestPath, manifestSerialized: resolvedManifestSerialized, payloadHash, intentIds, additionalRequirements, citekeys,
       });
       res.json({ ...result, nodeId, sourceRange: context.sourceRange });
     } catch (e) {

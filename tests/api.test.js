@@ -4,13 +4,18 @@ import { createApp, startServer } from '../src/server/index.js';
 import { sanitizePath } from '../src/server/security.js';
 import { detectEngines } from '../src/server/latex.js';
 import { generateSuggestions, applySuggestionToContent } from '../src/server/agent.js';
-import { PROJECT_SCHEMA_VERSION, createDefaultProject, migrateProjectData, validateProject } from '../src/server/project-store.js';
+import { PROJECT_SCHEMA_VERSION, createDefaultProject, loadProject, migrateProjectData, updateProject, validateProject } from '../src/server/project-store.js';
 import { parseCliArgs, resolveStartupWorkspace } from '../src/cli.js';
 import { initializeWorkspace } from '../src/server/workspace.js';
 import { buildCitationContext, checkCitations, findUnknownAgentCitations, parseBibTeX, scanReferenceFolder, serializeReference } from '../src/server/references.js';
 import { enrichZoteroAttachment, exportBetterBibTeX, getZoteroFullText, getZoteroStatus, listZoteroCollections, searchZoteroItems } from '../src/server/zotero.js';
-import { PAPER_GENERATION_OUTPUT_SCHEMA, REVIEW_ORCHESTRATION_OUTPUT_SCHEMA, SUGGESTION_OUTPUT_SCHEMA, buildWorkspaceIndex, detectAgentProviders, parseAgentJson, parsePaperGenerationJson, parseReviewAgentJson, parseReviewOrchestrationJson, runAcademicReviewAgent, runPaperGenerationAgent, runProcess, runReviewOrchestrationAgent, runWritingAgent, validatePaperGenerationResponse, validateReviewOrchestrationResponse, validateReviewResponse, validateSuggestionResponse } from '../src/server/agent-adapters.js';
+import { PAPER_GENERATION_OUTPUT_SCHEMA, REVIEW_ORCHESTRATION_OUTPUT_SCHEMA, SUGGESTION_OUTPUT_SCHEMA, buildSuggestionPayload, buildWorkspaceIndex, classifyAgentCliFailure, detectAgentProviders, parseAgentJson, parsePaperGenerationJson, parseReviewAgentJson, parseReviewOrchestrationJson, runAcademicReviewAgent, runPaperGenerationAgent, runProcess, runReviewOrchestrationAgent, runWritingAgent, validatePaperGenerationResponse, validateReviewOrchestrationResponse, validateReviewResponse, validateSuggestionResponse } from '../src/server/agent-adapters.js';
+import { classifyAgentDiagnostic, redactAgentDiagnostic } from '../src/server/agent-errors.js';
+import { agentHealthStatus, inspectCliCapabilities, markAgentUnavailable, resetAgentHealthForTests, versionAtLeast } from '../src/server/agent-runtime.js';
+import { alignSuggestionsToManifest, loadPromptManifest, materializePromptManifest } from '../src/server/prompt-manifest.js';
 import { parseLatexDocument } from '../src/server/latex-structure.js';
+import { syncDocumentStructure } from '../src/server/document-structure.js';
+import { buildOrderedSentenceMappings, sentenceMappingAt } from '../public/pdf-sentence-mapping.js';
 import { buildLibraryContext, composeMockParagraph, extractLibraryCandidates, mergedVocabulary, renderSentencePattern, searchLibraries } from '../src/server/library-engine.js';
 import { applySuggestionsAsRevision, restoreRevisionVersion, splitAtomicOpinions } from '../src/server/revision-engine.js';
 import { getHistoricalRevisionSource, getRecentChangeHistory } from '../src/server/change-history.js';
@@ -230,7 +235,7 @@ test('Agent configuration exposes Codex, Claude Code, OpenCode, and Pi adapters'
   assert.equal(saved.data.selected, 'mock');
 });
 
-test('Prompt context preview composes definitions, temporary instruction, libraries, and source', async () => {
+test('Prompt context preview returns the exact Manifest-based CLI payload', async () => {
   const synced = await api('/api/documents/sync', { method: 'POST', body: { file: 'main.tex' } });
   const paragraph = synced.data.document.sections[0].children[0];
   const preview = await api('/api/agent/context-preview', {
@@ -240,32 +245,101 @@ test('Prompt context preview composes definitions, temporary instruction, librar
     },
   });
   assert.equal(preview.status, 200);
-  assert.match(preview.data.assembledPrompt, /Temporary instruction/);
-  assert.match(preview.data.assembledPrompt, /Keep the quantitative claim precise/);
-  assert.match(preview.data.assembledPrompt, /Target source/);
-  assert.doesNotMatch(preview.data.contextPrompt, /Temporary instruction/);
-  assert.match(preview.data.mergedPrompt, /Temporary instruction/);
-  assert.doesNotMatch(preview.data.mergedPrompt, /Target source/);
-  assert.ok(preview.data.layers.length >= 3);
-  assert.ok(preview.data.characterCount > paragraph.text.length);
+  assert.match(preview.data.payload.text, /Prompt manifest: \.papergod\/context\/manifests\//);
+  assert.equal(preview.data.assembledPrompt, preview.data.payload.text);
+  assert.equal(preview.data.mergedPrompt, preview.data.contextPrompt);
+  assert.equal(preview.data.manifest.additionalRequirements, 'Keep the quantitative claim precise.');
+  assert.equal(preview.data.manifest.tasks[0].target.nodeId, paragraph.id);
+  assert.equal(preview.data.manifest.tasks[0].target.exactQuote, paragraph.text);
+  assert.doesNotMatch(preview.data.payload.text, /Keep the quantitative claim precise/);
+  assert.doesNotMatch(preview.data.payload.text, new RegExp(paragraph.text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(preview.data.payload.hash, /^[a-f0-9]{64}$/);
+  assert.match(preview.data.manifestPath, /^\.papergod\/context\/manifests\/manifest_[a-zA-Z0-9-]+\/manifest\.json$/);
+  assert.equal(preview.data.manifest.workspace.root, '.');
+  assert.ok(Object.keys(preview.data.manifest.resources.integrity).length >= 5);
+  assert.ok(preview.data.layers.some((layer) => layer.name === 'Prompt manifest'));
+  assert.ok(preview.data.characterCount > 0);
+  assert.ok(preview.data.tokenEstimate > 0);
   const invoked = await api('/api/agent/suggest-node', {
     method: 'POST', body: {
       nodeId: paragraph.id, prompt: preview.data.mergedPrompt,
       promptIsComposed: true, resourceIds: [],
+      manifestPath: preview.data.manifestPath, payloadHash: preview.data.payload.hash,
     },
   });
   assert.equal(invoked.status, 200);
   const runs = await api('/api/agent/runs');
-  assert.equal(runs.data.runs.find((item) => item.id === invoked.data.runId).prompt, preview.data.mergedPrompt);
+  const recordedRun = runs.data.runs.find((item) => item.id === invoked.data.runId);
+  assert.equal(recordedRun.prompt, preview.data.mergedPrompt);
+  const recordedInput = JSON.parse(recordedRun.input);
+  assert.equal(recordedInput.manifestPath, preview.data.manifestPath);
+  assert.equal(recordedInput.payloadHash, preview.data.payload.hash);
+  const unconfirmedManifest = await api('/api/agent/suggest-node', { method: 'POST', body: { nodeId: paragraph.id, prompt: preview.data.mergedPrompt, promptIsComposed: true, manifestPath: preview.data.manifestPath } });
+  assert.equal(unconfirmedManifest.status, 400);
+  assert.equal(unconfirmedManifest.data.code, 'PROMPT_CONFIRMATION_REQUIRED');
+  const clientManifest = await api('/api/agent/suggest-node', { method: 'POST', body: { nodeId: paragraph.id, prompt: 'Edit.', manifest: preview.data.manifest } });
+  assert.equal(clientManifest.status, 400);
+  assert.equal(clientManifest.data.code, 'INVALID_PROMPT_MANIFEST');
+  const stalePreview = await api('/api/agent/suggest-node', {
+    method: 'POST', body: { nodeId: paragraph.id, prompt: `${preview.data.mergedPrompt} changed`, promptIsComposed: true, resourceIds: [], manifestPath: preview.data.manifestPath, payloadHash: preview.data.payload.hash },
+  });
+  assert.equal(stalePreview.status, 409);
+  assert.equal(stalePreview.data.code, 'PROMPT_PREVIEW_STALE');
   const sentence = paragraph.children[0];
   await api(`/api/structure/nodes/${paragraph.id}`, { method: 'PUT', body: { prompt: 'Preserve the paragraph evidence chain.' } });
   await api(`/api/structure/nodes/${sentence.id}`, { method: 'PUT', body: { prompt: 'Make this sentence precise.', intent: 'State the main finding.' } });
   const sentencePreview = await api('/api/agent/context-preview', {
     method: 'POST', body: { nodeId: sentence.id, documentId: synced.data.document.id, temporaryPrompt: '', resourceIds: [] },
   });
-  assert.match(sentencePreview.data.contextPrompt, /## Paragraph prompt\nPreserve the paragraph evidence chain/);
-  assert.match(sentencePreview.data.contextPrompt, /## Element prompt\nMake this sentence precise/);
-  assert.match(sentencePreview.data.contextPrompt, /State the main finding/);
+  assert.doesNotMatch(sentencePreview.data.contextPrompt, /Preserve the paragraph evidence chain/);
+  const documentContext = await readFile(join(tmpWorkspace, sentencePreview.data.manifest.resources.documentContext), 'utf-8');
+  assert.match(documentContext, /prompt: Preserve the paragraph evidence chain/);
+  assert.match(documentContext, /prompt: Make this sentence precise/);
+  assert.match(documentContext, /intent: State the main finding/);
+});
+
+test('Prompt Manifest preserves multiple queued modification intents as separate atomic tasks', async () => {
+  const synced = await api('/api/documents/sync', { method: 'POST', body: { file: 'main.tex' } });
+  const document = synced.data.document;
+  const sentences = document.sections.flatMap((section) => section.children.flatMap((paragraph) => paragraph.children || [])).slice(0, 2);
+  assert.equal(sentences.length, 2);
+  const created = [];
+  for (const [index, sentence] of sentences.entries()) {
+    const source = await api('/api/files/main.tex');
+    const quote = source.data.content.slice(sentence.sourceRange.start, sentence.sourceRange.end);
+    const response = await api('/api/annotations', {
+      method: 'POST', body: {
+        documentId: document.id,
+        target: { type: 'sentence', id: sentence.id, start: sentence.sourceRange.start, end: sentence.sourceRange.end, quote },
+        category: 'style', severity: 'minor', body: `Atomic instruction ${index + 1}.`, suggestedFix: '', source: { type: 'user', actor: 'pdf-intent:sentence' },
+      },
+    });
+    assert.equal(response.status, 201);
+    created.push(response.data.annotation);
+  }
+  const content = (await api('/api/files/main.tex')).data.content;
+  const preview = await api('/api/agent/context-preview', {
+    method: 'POST', body: { documentId: document.id, content, intentIds: created.map((item) => item.id), additionalRequirements: 'Preserve LaTeX commands.' },
+  });
+  assert.equal(preview.status, 200);
+  assert.equal(preview.data.manifest.tasks.length, 2);
+  assert.deepEqual(preview.data.manifest.tasks.map((task) => task.taskId), created.map((item) => item.id));
+  assert.deepEqual(preview.data.manifest.tasks.map((task) => task.instruction), ['Atomic instruction 1.', 'Atomic instruction 2.']);
+  assert.ok(preview.data.manifest.tasks.every((task) => task.target.nodeId && task.target.exactQuote && task.target.sourceRange));
+  assert.match(preview.data.scope, /2 atomic modification tasks/);
+  assert.doesNotMatch(preview.data.payload.text, /Atomic instruction 1/);
+  const invoked = await api('/api/agent/suggest', {
+    method: 'POST', body: {
+      documentId: document.id, content, prompt: preview.data.mergedPrompt, promptIsComposed: true,
+      intentIds: created.map((item) => item.id), manifestPath: preview.data.manifestPath,
+      payloadHash: preview.data.payload.hash,
+    },
+  });
+  assert.equal(invoked.status, 200);
+  const resultTaskIds = [...invoked.data.suggestions.map((item) => item.taskId), ...invoked.data.unresolvedTasks.map((item) => item.taskId)];
+  assert.deepEqual(new Set(resultTaskIds), new Set(created.map((item) => item.id)));
+  assert.equal(resultTaskIds.length, 2);
+  for (const annotation of created) await api(`/api/annotations/${annotation.id}`, { method: 'DELETE' });
 });
 
 test('GET /api/project initializes versioned project metadata', async () => {
@@ -348,6 +422,16 @@ test('migrateProjectData upgrades schema v1 review records to the peer-review mo
   assert.equal(validateProject(migration.data).ok, true);
 });
 
+test('Agent profile validation remains compatible with legacy profiles', () => {
+  const legacy = createDefaultProject(tmpWorkspace);
+  legacy.project.agentProfiles = { codex: { command: 'codex', args: [], model: '' } };
+  assert.equal(validateProject(legacy).ok, true);
+  legacy.project.agentProfiles.codex.reasoningEffort = 'unsupported';
+  assert.equal(validateProject(legacy).ok, false);
+  legacy.project.agentProfiles.codex.reasoningEffort = 'low';
+  assert.equal(validateProject(legacy).ok, true);
+});
+
 test('validateProject rejects broken cross-resource references', () => {
   const project = createDefaultProject('/tmp/broken-references');
   project.annotations.push({
@@ -421,6 +505,102 @@ test('Sentence splitting keeps abbreviations, quote-wrapped ends, and decimals i
   assert.ok(sentences[3].startsWith('This is a new sentence'));
   assert.ok(sentences[4].includes('3.14'));
   assert.ok(sentences[4].includes('Fig. 5'));
+});
+
+test('Visible LaTeX wrapper content still creates sentence boundaries', () => {
+  const source = '\\begin{document}\\section{Intro}\n\\emph{A visible sentence.} Next sentence follows.\\textbf{A third question?} Final sentence.\n\\end{document}';
+  const parsed = parseLatexDocument(source, { id: 'document_wrappers', sections: [] });
+  const sentences = parsed.sections[0].children[0].children.map((sentence) => sentence.text);
+  assert.deepEqual(sentences, [
+    '\\emph{A visible sentence.}',
+    'Next sentence follows.',
+    '\\textbf{A third question?}',
+    'Final sentence.',
+  ]);
+});
+
+test('Sentence splitting ignores punctuation inside non-prose command arguments', () => {
+  const source = '\\begin{document}\\section{Intro}\nThe claim\\footnote{A note ends.} Continues as one source sentence. Next sentence.\n\\end{document}';
+  const parsed = parseLatexDocument(source, { id: 'document_non_prose', sections: [] });
+  const sentences = parsed.sections[0].children[0].children.map((sentence) => sentence.text);
+  assert.equal(sentences.length, 2);
+  assert.ok(sentences[0].includes('A note ends.'));
+  assert.ok(sentences[0].endsWith('Continues as one source sentence.'));
+});
+
+test('Ordered PDF mapping follows source sentences across headings, citations, and repeated text', () => {
+  const pdfText = 'paper title a. m. author abstract can machines think? this paper explains the test. 1 introduction can machines think? the method uses smith 2024 evidence. next result follows.';
+  const items = [
+    { id: 'abstract-1', matchText: 'can machines think?' },
+    { id: 'abstract-2', matchText: 'this paper explains the test.' },
+    { id: 'body-1', matchText: 'can machines think?' },
+    { id: 'body-2', matchText: 'the method uses evidence.' },
+    { id: 'body-3', matchText: 'next result follows.' },
+  ];
+  const { mappings } = buildOrderedSentenceMappings(pdfText, items);
+  assert.equal(mappings.length, items.length);
+  assert.deepEqual(mappings.map((mapping) => mapping.id), items.map((item) => item.id));
+  assert.ok(mappings.every((mapping, index) => index === 0 || mapping.start > mappings[index - 1].start));
+  assert.equal(pdfText.slice(mappings[3].start, mappings[3].end), 'the method uses smith 2024 evidence.');
+  assert.equal(sentenceMappingAt(mappings, pdfText.indexOf('evidence')), mappings[3]);
+});
+
+test('Document sync safely demotes annotations whose source sentence disappeared', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'papergod-stale-anchor-'));
+  try {
+    await writeFile(join(root, 'main.tex'), '\\begin{document}\\section{Intro}\nOriginal anchored sentence. Another sentence.\n\\end{document}', 'utf-8');
+    await initializeWorkspace(root);
+    const first = await syncDocumentStructure(root, 'main.tex');
+    const sentence = first.sections[0].children[0].children[0];
+    const timestamp = new Date().toISOString();
+    await updateProject(root, (project) => {
+      project.annotations.push({
+        id: 'annotation_stale_anchor', documentId: first.id,
+        target: { type: 'sentence', id: sentence.id, start: sentence.sourceRange.start, end: sentence.sourceRange.end, quote: sentence.text },
+        category: 'content', severity: 'info', body: 'Preserve this historical note.', suggestedFix: '', status: 'open',
+        dependsOn: [], source: { type: 'user', actor: 'test' }, createdAt: timestamp, updatedAt: timestamp,
+      });
+    });
+    await writeFile(join(root, 'main.tex'), '\\begin{document}\\section{Replacement}\nCompletely different material now appears.\n\\end{document}', 'utf-8');
+    const second = await syncDocumentStructure(root, 'main.tex');
+    const annotation = (await loadProject(root)).annotations.find((item) => item.id === 'annotation_stale_anchor');
+    assert.equal(annotation.target.type, 'document');
+    assert.equal(annotation.target.id, second.id);
+    assert.equal(annotation.target.quote, 'Original anchored sentence.');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Project loading repairs dangling annotation targets before new prompts are saved', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'papergod-dangling-target-'));
+  try {
+    await writeFile(join(root, 'main.tex'), '\\begin{document}\\section{Intro}\nA stable sentence.\n\\end{document}', 'utf-8');
+    await initializeWorkspace(root);
+    const document = await syncDocumentStructure(root, 'main.tex');
+    const sentence = document.sections[0].children[0].children[0];
+    const timestamp = new Date().toISOString();
+    await updateProject(root, (project) => {
+      project.annotations.push({
+        id: 'annotation_dangling_target', documentId: document.id,
+        target: { type: 'sentence', id: sentence.id, start: sentence.sourceRange.start, end: sentence.sourceRange.end, quote: sentence.text },
+        category: 'content', severity: 'info', body: 'Keep this prompt.', suggestedFix: '', status: 'open',
+        dependsOn: [], source: { type: 'user', actor: 'test' }, createdAt: timestamp, updatedAt: timestamp,
+      });
+    });
+    const projectFile = join(root, '.papergod', 'project.json');
+    const stored = JSON.parse(await readFile(projectFile, 'utf-8'));
+    stored.annotations[0].target.id = 'sentence_missing_after_source_change';
+    await writeFile(projectFile, `${JSON.stringify(stored, null, 2)}\n`, 'utf-8');
+    const repaired = await loadProject(root);
+    assert.equal(repaired.annotations[0].target.type, 'document');
+    assert.equal(repaired.annotations[0].target.id, document.id);
+    assert.equal(repaired.annotations[0].target.quote, 'A stable sentence.');
+    const persisted = JSON.parse(await readFile(projectFile, 'utf-8'));
+    assert.equal(persisted.annotations[0].target.id, document.id);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('Embedded quote followed by lowercase does not split the sentence', () => {
@@ -526,9 +706,19 @@ test('Node-scoped suggestion applies only inside the selected repeated range', a
   assert.ok(applied.data.content.indexOf('very important') < applied.data.content.indexOf('crucial'));
 });
 
+test('PDF sentence menu can locate the exact LaTeX source range', async () => {
+  const html = await readFile(resolve(PROJECT_ROOT, 'public', 'index.html'), 'utf-8');
+  const appSource = await readFile(resolve(PROJECT_ROOT, 'public', 'app.js'), 'utf-8');
+  assert.ok(html.includes('id="pdf-locate-source"'));
+  assert.ok(appSource.includes('function locatePdfSentenceInSource()'));
+  assert.ok(appSource.includes("selectStructureNode(node.id, { forceSource: true })"));
+  assert.ok(appSource.includes("getElementById('pdf-locate-source').addEventListener"));
+});
+
 test('React workbench and legacy overlays expose the complete writing workflow', async () => {
   const html = await (await fetch(baseUrl + '/')).text();
   const workbench = await readFile(resolve(PROJECT_ROOT, 'frontend', 'src', 'components', 'workbench.jsx'), 'utf-8');
+  const legacyApp = await readFile(resolve(PROJECT_ROOT, 'public', 'app.js'), 'utf-8');
   const frontend = html + workbench;
   assert.ok(html.includes('id="root"'));
   assert.ok(frontend.includes('id="outline-tree"'));
@@ -559,14 +749,25 @@ test('React workbench and legacy overlays expose the complete writing workflow',
   assert.ok(workbench.includes('id="agent-provider-quick"'));
   assert.ok(html.includes('id="agent-config-overlay"'));
   assert.ok(html.includes('id="agent-config-probe"'));
+  assert.ok(html.includes('id="agent-config-login"'));
+  assert.ok(html.includes('class="agent-advanced-settings"'));
   assert.ok(html.includes('id="agent-config-save"'));
-  assert.ok(html.includes('Check setup'));
+  assert.ok(legacyApp.includes('Array.isArray(item.capabilities)'));
+  assert.ok(legacyApp.includes('Local subscription CLI'));
+  assert.ok(legacyApp.includes('waitForAgentProbe'));
+  assert.ok(legacyApp.includes('live: true'));
+  assert.ok(legacyApp.includes('LIVE TEST FAILED'));
+  assert.ok(legacyApp.includes('reflectAgentRunConnection'));
+  assert.ok(legacyApp.includes("error.code === 'AGENT_AUTH_REQUIRED'"));
+  assert.ok(html.includes('Test subscription'));
   assert.ok(html.includes('<option value="claude-code">Claude Code</option>'));
   assert.ok(html.includes('<option value="pi">Pi Agent</option>'));
   assert.ok(frontend.includes('id="prompt-context-module"'));
   assert.ok(workbench.includes('id="prompt-management-module"'));
   assert.ok(workbench.includes('Preview final prompt'));
   assert.ok(html.includes('id="prompt-preview-overlay"'));
+  assert.ok(html.includes('id="prompt-preview-manifest"'));
+  assert.ok(legacyApp.includes("data.payload?.text || data.assembledPrompt"));
   assert.ok(frontend.includes('id="temporary-prompt-module"'));
   assert.ok(!frontend.includes('id="ai-action"'));
   assert.ok(frontend.includes('id="ai-invoke"'));
@@ -639,7 +840,7 @@ test('React workbench and legacy overlays expose the complete writing workflow',
   assert.ok(appSource.includes('data-provider='));
   assert.ok(appSource.includes('selectAgentProvider'));
   assert.ok(appSource.includes('activateAgentProvider'));
-  assert.ok(appSource.includes('live: false'));
+  assert.ok(appSource.includes('live: true'));
   assert.ok(appSource.includes('/api/documents/sync'));
   assert.ok(appSource.includes('/api/agent/suggest-node'));
   assert.ok(appSource.includes('/api/agent/apply-all'));
@@ -673,7 +874,11 @@ test('React workbench and legacy overlays expose the complete writing workflow',
   assert.ok(appSource.includes('textOffsetAtPoint'));
   assert.ok(appSource.includes('tokenOccurrences'));
   assert.ok(appSource.includes('highlightPdfRanges'));
-  assert.ok(appSource.includes('createPositionalPdfIntent'));
+  assert.ok(appSource.includes('buildOrderedSentenceMappings'));
+  assert.ok(appSource.includes('sentenceMappingAt'));
+  assert.ok(appSource.includes('recordSuccessfulCompile'));
+  assert.ok(appSource.includes('renderRecentPdfChanges'));
+  assert.ok(!appSource.includes('createPositionalPdfIntent'));
   assert.ok(appSource.includes('openSentenceReader'));
   assert.ok(appSource.includes('submitSentenceReaderIntent'));
   assert.ok(appSource.includes('queueModificationIntent'));
@@ -683,8 +888,11 @@ test('React workbench and legacy overlays expose the complete writing workflow',
   assert.ok(appSource.includes('context layers'));
   const legacyTheme = await (await fetch(baseUrl + '/style.css')).text();
   assert.ok(legacyTheme.includes('.pdf-scope-highlight'));
+  assert.ok(legacyTheme.includes('.pdf-recent-highlight'));
   const pdfModule = await fetch(baseUrl + '/vendor/pdfjs-dist/build/pdf.mjs');
   assert.equal(pdfModule.status, 200);
+  const sentenceMappingModule = await fetch(baseUrl + '/pdf-sentence-mapping.js');
+  assert.equal(sentenceMappingModule.status, 200);
 });
 
 test('CLI parses workspace, port, and Agent provider', () => {
@@ -969,10 +1177,135 @@ test('Agent response parser accepts JSON and JSONL text events', () => {
   assert.deepEqual(parseAgentJson(piResult), payload);
 });
 
+test('Agent protocol classifier distinguishes filters, truncation, and provider errors', () => {
+  const filtered = classifyAgentCliFailure({
+    provider: 'codex',
+    output: JSON.stringify({ type: 'response.incomplete', response: { status: 'incomplete', incomplete_details: { reason: 'content_filter' } } }),
+  });
+  assert.equal(filtered.code, 'AGENT_CONTENT_FILTERED');
+  assert.equal(filtered.provider, 'codex');
+
+  const truncated = classifyAgentCliFailure({
+    provider: 'codex', output: JSON.stringify({ status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' } }),
+  });
+  assert.equal(truncated.code, 'AGENT_OUTPUT_TRUNCATED');
+  assert.equal(truncated.retryable, true);
+
+  const rateLimited = classifyAgentCliFailure({ provider: 'opencode', stderr: 'HTTP 429 rate limit; retry-after: 7 seconds' });
+  assert.equal(rateLimited.code, 'AGENT_RATE_LIMITED');
+  assert.equal(rateLimited.retryAfterMs, 7000);
+
+  const refused = classifyAgentCliFailure({ provider: 'pi', output: JSON.stringify({ type: 'error', error: { message: 'safety refusal' } }) });
+  assert.equal(refused.code, 'AGENT_REFUSED');
+});
+
+test('Provider lifecycle rejects nonterminal and post-result failure streams', async () => {
+  const nonterminal = join(tmpWorkspace, 'fake-nonterminal-pi.mjs');
+  const failedAfterResult = join(tmpWorkspace, 'fake-post-result-error-pi.mjs');
+  const payload = { summary: 'must not apply', suggestions: [], usedResourceIds: [] };
+  await writeFile(nonterminal, `process.stdout.write(JSON.stringify({type:'message_update',structured_output:${JSON.stringify(payload)}})+'\\n');`, 'utf-8');
+  await assert.rejects(runWritingAgent('pi', { prompt: 'Edit.', content: 'Text.' }, { workspaceRoot: tmpWorkspace, commands: { pi: { command: process.execPath, args: [nonterminal] } }, maxAttempts: 1 }), (error) => error.code === 'AGENT_OUTPUT_TRUNCATED');
+  resetAgentHealthForTests();
+  await writeFile(failedAfterResult, `const p=${JSON.stringify(payload)};process.stdout.write(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:JSON.stringify(p)}]}})+'\\n'+JSON.stringify({type:'error',error:{message:'transport connection failed'}})+'\\n');`, 'utf-8');
+  await assert.rejects(runWritingAgent('pi', { prompt: 'Edit.', content: 'Text.' }, { workspaceRoot: tmpWorkspace, commands: { pi: { command: process.execPath, args: [failedAfterResult] } }, maxAttempts: 1 }), (error) => error.code === 'AGENT_TRANSPORT_ERROR');
+  resetAgentHealthForTests();
+});
+
+test('Agent JSON parser rejects partial output with a truncation code', () => {
+  assert.throws(() => parseAgentJson('{"summary":"partial","suggestions":['), (error) => error.code === 'AGENT_OUTPUT_TRUNCATED');
+  assert.throws(() => parseAgentJson(''), (error) => error.code === 'AGENT_EMPTY_RESPONSE');
+});
+
+test('Agent diagnostics redact secrets and remain bounded', () => {
+  const diagnostic = redactAgentDiagnostic(`${'x'.repeat(5000)}\nauthorization: Bearer secret-token\napi_key=sk-example-secret-value\n{"access_token":"json-secret-token","refresh_token":"json-refresh-token"}`);
+  assert.doesNotMatch(diagnostic, /secret-token|sk-example|json-secret|json-refresh/);
+  assert.ok(diagnostic.length <= 4000);
+  assert.equal(classifyAgentDiagnostic('invalid_json_schema was rejected').code, 'AGENT_CLI_INCOMPATIBLE');
+});
+
+test('Agent adapters translate task reasoning effort for every local CLI', async () => {
+  const fakeCli = join(tmpWorkspace, 'fake-reasoning-agent.mjs');
+  const captures = join(tmpWorkspace, 'reasoning-captures.jsonl');
+  await writeFile(fakeCli, `
+import { appendFileSync, writeFileSync } from 'fs';
+const args = process.argv.slice(2);
+appendFileSync(${JSON.stringify(join(tmpWorkspace, 'reasoning-captures.jsonl'))}, JSON.stringify(args) + '\\n');
+const payload = { summary: 'ok', suggestions: [], usedResourceIds: [] };
+const outputIndex = args.indexOf('--output-last-message');
+if (outputIndex >= 0) writeFileSync(args[outputIndex + 1], JSON.stringify(payload));
+else if (args.includes('--output-format')) process.stdout.write(JSON.stringify({ type: 'result', structured_output: payload }));
+else if (args.includes('--format')) process.stdout.write(JSON.stringify({ type: 'message', part: { text: JSON.stringify(payload) } }) + '\\n');
+else process.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: JSON.stringify(payload) }] } }) + '\\n');
+`, 'utf-8');
+  const commands = Object.fromEntries(['codex', 'claude-code', 'opencode', 'pi'].map((id) => [id, { command: process.execPath, args: [fakeCli] }]));
+  for (const provider of Object.keys(commands)) await runWritingAgent(provider, { prompt: 'Edit.', content: 'Text.' }, { workspaceRoot: tmpWorkspace, commands, reasoningEffort: 'medium' });
+  const args = (await readFile(captures, 'utf-8')).trim().split('\n').map(JSON.parse);
+  assert.ok(args[0].some((item) => item.includes('model_reasoning_effort="medium"')));
+  assert.ok(args[1].includes('--effort') && args[1].includes('medium'));
+  assert.ok(args[2].includes('--variant') && args[2].includes('medium'));
+  assert.ok(args[3].includes('--thinking') && args[3].includes('medium'));
+});
+
+test('Selective Agent retry records provenance and does not retry content filters', async () => {
+  const retryCli = join(tmpWorkspace, 'fake-retry-agent.mjs');
+  const counter = join(tmpWorkspace, 'retry-counter.txt');
+  await writeFile(retryCli, `
+import { existsSync, readFileSync, writeFileSync } from 'fs';
+const counter = ${JSON.stringify(join(tmpWorkspace, 'retry-counter.txt'))};
+const count = existsSync(counter) ? Number(readFileSync(counter, 'utf-8')) : 0;
+writeFileSync(counter, String(count + 1));
+if (count === 0) { process.stderr.write('temporary network connection failed'); process.exit(2); }
+const payload = { summary: 'recovered', suggestions: [], usedResourceIds: [] };
+process.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: JSON.stringify(payload) }] } }) + '\\n');
+`, 'utf-8');
+  const result = await runWritingAgent('pi', { prompt: 'Edit.', content: 'Text.' }, { workspaceRoot: tmpWorkspace, commands: { pi: { command: process.execPath, args: [retryCli] } }, maxAttempts: 2 });
+  assert.equal(result.summary, 'recovered');
+  assert.equal(result.agentMeta.attempts.length, 2);
+  assert.equal(result.agentMeta.attempts[0].code, 'AGENT_TRANSPORT_ERROR');
+
+  const filteredCli = join(tmpWorkspace, 'fake-no-retry-filter.mjs');
+  const filterCounter = join(tmpWorkspace, 'filter-counter.txt');
+  await writeFile(filteredCli, `
+import { existsSync, readFileSync, writeFileSync } from 'fs';
+const counter = ${JSON.stringify(join(tmpWorkspace, 'filter-counter.txt'))};
+const count = existsSync(counter) ? Number(readFileSync(counter, 'utf-8')) : 0;
+writeFileSync(counter, String(count + 1));
+process.stdout.write(JSON.stringify({ type: 'error', error: { message: 'content_filter' } }) + '\\n');
+`, 'utf-8');
+  await assert.rejects(runWritingAgent('pi', { prompt: 'Edit.', content: 'Text.' }, { workspaceRoot: tmpWorkspace, commands: { pi: { command: process.execPath, args: [filteredCli] } }, maxAttempts: 3 }), (error) => error.code === 'AGENT_CONTENT_FILTERED' && error.attempts.length === 1);
+  assert.equal(await readFile(filterCounter, 'utf-8'), '1');
+});
+
+test('Agent capability inspection verifies required CLI features and semantic versions', () => {
+  assert.equal(versionAtLeast('codex-cli 0.147.0', '0.146.0'), true);
+  assert.equal(versionAtLeast('0.145.9', '0.146.0'), false);
+  const ready = inspectCliCapabilities('codex', 'codex-cli 0.147.0', '--output-schema --output-last-message --ephemeral --json --config');
+  assert.equal(ready.compatible, true);
+  assert.equal(ready.capabilities.eventStream, true);
+  assert.equal(ready.capabilities.reasoningEffort, true);
+  const old = inspectCliCapabilities('codex', 'codex-cli 0.100.0', '--output-last-message');
+  assert.equal(old.compatible, false);
+  assert.ok(old.warnings[0].includes('--output-schema'));
+});
+
+test('Agent provider/model cooldown honors retry-after and recovers', () => {
+  resetAgentHealthForTests();
+  const marked = markAgentUnavailable('codex', 'model-a', { code: 'AGENT_RATE_LIMITED', retryAfterMs: 5000 }, 1000);
+  assert.equal(marked.available, false);
+  assert.equal(agentHealthStatus('codex', 'model-a', 5999).available, false);
+  assert.equal(agentHealthStatus('codex', 'model-a', 6000).available, true);
+  assert.equal(agentHealthStatus('codex', 'model-b', 1001).available, true);
+  resetAgentHealthForTests();
+});
+
 test('Codex output schemas use only supported structured-output keywords', () => {
   for (const schema of [SUGGESTION_OUTPUT_SCHEMA, PAPER_GENERATION_OUTPUT_SCHEMA, REVIEW_ORCHESTRATION_OUTPUT_SCHEMA]) {
     assert.equal(JSON.stringify(schema).includes('uniqueItems'), false);
   }
+  assert.ok(SUGGESTION_OUTPUT_SCHEMA.required.includes('unresolvedTasks'));
+  const suggestionRequired = SUGGESTION_OUTPUT_SCHEMA.properties.suggestions.items.required;
+  assert.ok(['taskId', 'nodeId', 'usedTemplateIds', 'usedCitekeys'].every((field) => suggestionRequired.includes(field)));
+  assert.throws(() => buildSuggestionPayload('pi', { prompt: 'x'.repeat(500_000), content: '' }, {}), (error) => error.code === 'AGENT_INPUT_TOO_LARGE' && error.status === 413);
 });
 
 test('Agent response validation requires exact source text', () => {
@@ -1025,6 +1358,8 @@ const response = JSON.stringify({
 });
 const outputIndex = args.indexOf('--output-last-message');
 if (outputIndex !== -1) writeFileSync(args[outputIndex + 1], response);
+else if (args.includes('--output-format')) process.stdout.write(JSON.stringify({ type: 'result', structured_output: JSON.parse(response), result: '' }));
+else if (args.includes('--mode')) process.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: response }] } }) + '\\n');
 else process.stdout.write(JSON.stringify({ type: 'text', part: { text: response } }) + '\\n');
 `, 'utf-8');
   const commands = {
@@ -1044,6 +1379,34 @@ else process.stdout.write(JSON.stringify({ type: 'text', part: { text: response 
   assert.deepEqual(pi, codex);
   const providers = await detectAgentProviders({ commands });
   assert.ok(providers.every((provider) => provider.available));
+});
+
+test('Codex adapter surfaces content-filtered structured output without applying partial JSON', async () => {
+  const fakeCli = join(tmpWorkspace, 'fake-filtered-codex.mjs');
+  await writeFile(fakeCli, `
+import { writeFileSync } from 'fs';
+const args = process.argv.slice(2);
+const outputIndex = args.indexOf('--output-last-message');
+writeFileSync(args[outputIndex + 1], JSON.stringify({ type: 'response.incomplete', response: { status: 'incomplete', incomplete_details: { reason: 'content_filter' } } }));
+`, 'utf-8');
+  const commands = { codex: { command: process.execPath, args: [fakeCli] } };
+  await assert.rejects(
+    runWritingAgent('codex', { prompt: 'Shorten this.', content: 'This sentence is unnecessarily long.' }, { workspaceRoot: tmpWorkspace, commands }),
+    (error) => error.code === 'AGENT_CONTENT_FILTERED' && error.provider === 'codex',
+  );
+});
+
+test('Provider CLI stderr failures preserve a classified error and redacted diagnostic', async () => {
+  const fakeCli = join(tmpWorkspace, 'fake-rate-limited-agent.mjs');
+  await writeFile(fakeCli, `
+process.stderr.write('HTTP 429 rate limit retry-after: 2 seconds api_key=sk-sensitive-token');
+process.exit(2);
+`, 'utf-8');
+  const commands = { pi: { command: process.execPath, args: [fakeCli] } };
+  await assert.rejects(
+    runWritingAgent('pi', { prompt: 'Edit.', content: 'Text.' }, { workspaceRoot: tmpWorkspace, commands }),
+    (error) => error.code === 'AGENT_RATE_LIMITED' && error.retryAfterMs === 2000 && !error.diagnostic.includes('sk-sensitive-token'),
+  );
 });
 
 test('Workspace mode inlines a path index instead of the manuscript and grants read access', async () => {
@@ -1075,6 +1438,57 @@ process.stdout.write(JSON.stringify(out));
   assert.doesNotMatch(prompt, /very important/);
   assert.match(prompt, new RegExp(workspace.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   await rm(workspace, { recursive: true, force: true });
+});
+
+test('Codex manifest transport restores exact targets without echoing long quotes', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'papergod-codex-manifest-'));
+  const fakeCli = join(workspace, 'fake-codex-manifest.mjs');
+  const exactQuote = 'A deliberately long exact source sentence with quoted "machine" terminology that should not be echoed through structured output.';
+  await writeFile(join(workspace, 'main.tex'), exactQuote, 'utf-8');
+  await writeFile(fakeCli, `
+import { writeFileSync } from 'fs';
+const args = process.argv.slice(2);
+let prompt = '';
+process.stdin.setEncoding('utf8');
+for await (const chunk of process.stdin) prompt += chunk;
+writeFileSync('captured-codex-manifest-prompt.txt', prompt);
+const response = { summary: 'Shortened.', usedResourceIds: [], unresolvedTasks: [], suggestions: [{ taskId: 'task_exact', nodeId: 'sentence_1', category: 'style', description: 'Shorten', originalText: '__PAPERGOD_EXACT_TARGET__', suggestedText: 'A concise source sentence.', reason: 'Improve clarity.', usedTemplateIds: [], usedCitekeys: [] }] };
+writeFileSync(args[args.indexOf('--output-last-message') + 1], JSON.stringify(response));
+`, 'utf-8');
+  const manifest = { tasks: [{ taskId: 'task_exact', target: { matchMode: 'exact', nodeId: 'sentence_1', exactQuote } }] };
+  try {
+    const result = await runWritingAgent('codex', {
+      prompt: 'Shorten the exact target.', content: exactQuote, resourceIds: [], manifest,
+      workspace: { file: 'main.tex', start: 0, end: exactQuote.length },
+    }, { workspaceRoot: workspace, commands: { codex: { command: process.execPath, args: [fakeCli] } }, maxAttempts: 1 });
+    assert.equal(result.suggestions[0].originalText, exactQuote);
+    const prompt = await readFile(join(workspace, 'captured-codex-manifest-prompt.txt'), 'utf-8');
+    assert.match(prompt, /__PAPERGOD_EXACT_TARGET__/);
+    assert.match(prompt, /do not repeat its potentially long exactQuote/);
+  } finally { await rm(workspace, { recursive: true, force: true }); }
+});
+
+test('OpenCode workspace mode loads a deny-by-default read-only permission config', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'papergod-opencode-policy-'));
+  const fakeCli = join(workspace, 'fake-opencode-policy.mjs');
+  const capture = join(workspace, 'captured-opencode-policy.json');
+  await writeFile(join(workspace, 'main.tex'), 'Text.', 'utf-8');
+  await writeFile(fakeCli, `
+import{readFileSync,writeFileSync}from'fs';
+const config=JSON.parse(readFileSync(process.env.OPENCODE_CONFIG,'utf-8'));
+writeFileSync(${JSON.stringify(join(workspace, 'captured-opencode-policy.json'))},JSON.stringify(config));
+const payload={summary:'read only',suggestions:[],usedResourceIds:[]};
+process.stdout.write(JSON.stringify({type:'message',part:{text:JSON.stringify(payload)}})+'\\n');
+`, 'utf-8');
+  try {
+    await runWritingAgent('opencode', { prompt: 'Read.', content: 'Text.', workspace: { file: 'main.tex', start: 0, end: 5 } }, { workspaceRoot: workspace, commands: { opencode: { command: process.execPath, args: [fakeCli] } }, maxAttempts: 1 });
+    const config = JSON.parse(await readFile(capture, 'utf-8'));
+    assert.equal(config.permission['*'], 'deny');
+    assert.equal(config.permission.read, 'allow');
+    assert.equal(config.permission.grep, 'allow');
+    assert.equal(config.permission.edit, undefined);
+    assert.equal(config.permission.bash, undefined);
+  } finally { await rm(workspace, { recursive: true, force: true }); }
 });
 
 test('Review and orchestration prompts also switch to workspace index when a target is set', async () => {
@@ -1111,6 +1525,8 @@ const response = JSON.stringify({
 });
 const outputIndex = args.indexOf('--output-last-message');
 if (outputIndex !== -1) writeFileSync(args[outputIndex + 1], response);
+else if (args.includes('--output-format')) process.stdout.write(JSON.stringify({ type: 'result', structured_output: JSON.parse(response), result: '' }));
+else if (args.includes('--mode')) process.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: response }] } }) + '\\n');
 else process.stdout.write(JSON.stringify({ type: 'text', part: { text: response } }) + '\\n');
 `, 'utf-8');
   const commands = {
@@ -1142,6 +1558,8 @@ const args = process.argv.slice(2);
 const response = JSON.stringify({ summary: 'Complete draft.', latex: '\\\\documentclass{article}\\n\\\\begin{document}Draft.\\\\end{document}', usedResourceIds: [] });
 const outputIndex = args.indexOf('--output-last-message');
 if (outputIndex !== -1) writeFileSync(args[outputIndex + 1], response);
+else if (args.includes('--output-format')) process.stdout.write(JSON.stringify({ type: 'result', structured_output: JSON.parse(response), result: '' }));
+else if (args.includes('--mode')) process.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: response }] } }) + '\\n');
 else process.stdout.write(JSON.stringify({ type: 'text', part: { text: response } }) + '\\n');
 `, 'utf-8');
   const commands = {
@@ -1174,6 +1592,8 @@ const response = JSON.stringify({ summary: 'Two atomic opinions.', opinions: [
 ] });
 const outputIndex = args.indexOf('--output-last-message');
 if (outputIndex !== -1) writeFileSync(args[outputIndex + 1], response);
+else if (args.includes('--output-format')) process.stdout.write(JSON.stringify({ type: 'result', structured_output: JSON.parse(response), result: '' }));
+else if (args.includes('--mode')) process.stdout.write(JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: response }] } }) + '\\n');
 else process.stdout.write(JSON.stringify({ type: 'text', part: { text: response } }) + '\\n');
 `, 'utf-8');
   const commands = { codex: { command: process.execPath, args: [fakeCli] }, 'claude-code': { command: process.execPath, args: [fakeCli] }, opencode: { command: process.execPath, args: [fakeCli] }, pi: { command: process.execPath, args: [fakeCli] } };
@@ -1204,6 +1624,50 @@ test('Agent process supports cancellation', async () => {
   });
   controller.abort();
   await assert.rejects(running, (error) => error.code === 'AGENT_CANCELLED');
+});
+
+test('Agent cancellation terminates the Unix process group gracefully', { skip: process.platform === 'win32' }, async () => {
+  const marker = join(tmpWorkspace, 'agent-tree-term.txt');
+  const childFile = join(tmpWorkspace, 'agent-tree-child.mjs');
+  const parentFile = join(tmpWorkspace, 'agent-tree-parent.mjs');
+  await writeFile(childFile, `import{appendFileSync}from'fs';process.on('SIGTERM',()=>{appendFileSync(${JSON.stringify(join(tmpWorkspace, 'agent-tree-term.txt'))},'child\\n');process.exit(0)});setInterval(()=>{},1000);`, 'utf-8');
+  await writeFile(parentFile, `import{spawn}from'child_process';import{appendFileSync}from'fs';spawn(process.execPath,[${JSON.stringify(join(tmpWorkspace, 'agent-tree-child.mjs'))}],{stdio:'ignore'});process.on('SIGTERM',()=>{appendFileSync(${JSON.stringify(join(tmpWorkspace, 'agent-tree-term.txt'))},'parent\\n');setTimeout(()=>process.exit(0),25)});setTimeout(()=>process.stdout.write('ready\\n'),100);setInterval(()=>{},1000);`, 'utf-8');
+  const controller = new AbortController();
+  const running = runProcess(process.execPath, [parentFile], { timeoutMs: 5000, signal: controller.signal, onOutput: (_stream, chunk) => { if (chunk.includes('ready')) controller.abort(); } });
+  await assert.rejects(running, (error) => error.code === 'AGENT_CANCELLED');
+  await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+  const signals = await readFile(marker, 'utf-8');
+  assert.match(signals, /parent/);
+  assert.match(signals, /child/);
+});
+
+test('Agent cancellation kills a resistant descendant after its parent exits gracefully', { skip: process.platform === 'win32' }, async () => {
+  const pidsFile = join(tmpWorkspace, 'agent-tree-hybrid-pids.json');
+  const childFile = join(tmpWorkspace, 'agent-tree-hybrid-child.mjs');
+  const parentFile = join(tmpWorkspace, 'agent-tree-hybrid-parent.mjs');
+  await writeFile(childFile, `process.on('SIGTERM',()=>{});setInterval(()=>{},1000);`, 'utf-8');
+  await writeFile(parentFile, `import{spawn}from'child_process';import{writeFileSync}from'fs';const child=spawn(process.execPath,[${JSON.stringify(join(tmpWorkspace, 'agent-tree-hybrid-child.mjs'))}],{stdio:'ignore'});process.on('SIGTERM',()=>process.exit(0));writeFileSync(${JSON.stringify(join(tmpWorkspace, 'agent-tree-hybrid-pids.json'))},JSON.stringify({child:child.pid}));setTimeout(()=>process.stdout.write('ready\\n'),100);setInterval(()=>{},1000);`, 'utf-8');
+  const controller = new AbortController();
+  const started = Date.now();
+  const running = runProcess(process.execPath, [parentFile], { timeoutMs: 5000, signal: controller.signal, onOutput: (_stream, chunk) => { if (chunk.includes('ready')) controller.abort(); } });
+  await assert.rejects(running, (error) => error.code === 'AGENT_CANCELLED');
+  assert.ok(Date.now() - started >= 700);
+  const { child } = JSON.parse(await readFile(pidsFile, 'utf-8'));
+  assert.throws(() => process.kill(child, 0), (error) => error.code === 'ESRCH');
+});
+
+test('Agent cancellation force-kills a TERM-resistant Unix process tree', { skip: process.platform === 'win32' }, async () => {
+  const pidsFile = join(tmpWorkspace, 'agent-tree-pids.json');
+  const childFile = join(tmpWorkspace, 'agent-tree-resistant-child.mjs');
+  const parentFile = join(tmpWorkspace, 'agent-tree-resistant-parent.mjs');
+  await writeFile(childFile, `process.on('SIGTERM',()=>{});setInterval(()=>{},1000);`, 'utf-8');
+  await writeFile(parentFile, `import{spawn}from'child_process';import{writeFileSync}from'fs';const child=spawn(process.execPath,[${JSON.stringify(join(tmpWorkspace, 'agent-tree-resistant-child.mjs'))}],{stdio:'ignore'});process.on('SIGTERM',()=>{});writeFileSync(${JSON.stringify(join(tmpWorkspace, 'agent-tree-pids.json'))},JSON.stringify({parent:process.pid,child:child.pid}));setTimeout(()=>process.stdout.write('ready\\n'),100);setInterval(()=>{},1000);`, 'utf-8');
+  const controller = new AbortController();
+  const running = runProcess(process.execPath, [parentFile], { timeoutMs: 5000, signal: controller.signal, onOutput: (_stream, chunk) => { if (chunk.includes('ready')) controller.abort(); } });
+  await assert.rejects(running, (error) => error.code === 'AGENT_CANCELLED');
+  const pids = JSON.parse(await readFile(pidsFile, 'utf-8'));
+  await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+  for (const pid of Object.values(pids)) assert.throws(() => process.kill(pid, 0), (error) => error.code === 'ESRCH');
 });
 
 test('Agent process streams stdout and stderr to an activity listener', async () => {
@@ -1265,7 +1729,7 @@ test('External Agent API persists auditable run records', async () => {
 import { writeFileSync } from 'fs';
 const args = process.argv.slice(2);
 if (args.includes('--version')) { process.stdout.write('fake-codex 1.0\\n'); process.exit(0); }
-process.stdout.write('Analyzing manuscript scope...\\n');
+process.stdout.write('Analyzing manuscript scope...\\nauthorization: Bearer secret-activity-token\\n');
 const outputIndex = args.indexOf('--output-last-message');
 writeFileSync(args[outputIndex + 1], JSON.stringify({ summary: 'API edit.', usedResourceIds: [], suggestions: [{ category: 'style', description: 'Precise wording', originalText: 'very important', suggestedText: 'crucial', reason: 'Precision' }] }));
 `, 'utf-8');
@@ -1290,6 +1754,10 @@ writeFileSync(args[outputIndex + 1], JSON.stringify({ summary: 'API edit.', used
     const runs = await (await fetch(`${root}/api/agent/runs`)).json();
     const run = runs.runs.find((item) => item.id === data.runId);
     assert.equal(run.status, 'complete');
+    const auditedOutput = JSON.parse(run.output);
+    assert.equal(auditedOutput.agentMeta.provider, 'codex');
+    assert.equal(auditedOutput.agentMeta.reasoningEffort, 'low');
+    assert.equal(auditedOutput.agentMeta.attempts.length, 1);
     assert.ok(run.startedAt);
     assert.ok(run.finishedAt);
     const activityResponse = await fetch(`${root}/api/agent/activity/activity-test-1234`);
@@ -1297,9 +1765,36 @@ writeFileSync(args[outputIndex + 1], JSON.stringify({ summary: 'API edit.', used
     const activity = await activityResponse.json();
     assert.equal(activity.status, 'complete');
     assert.match(activity.output, /Analyzing manuscript scope/);
-    assert.doesNotMatch(activity.output, /Current editing request/);
+    assert.doesNotMatch(activity.output, /secret-activity-token|Current editing request/);
+    assert.equal(activity.rawOutput, undefined);
   } finally {
     await new Promise((resolveClose) => agentServer.close(resolveClose));
+  }
+});
+
+test('Agent configuration persists per provider and reports content-filter failures', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'papergod-agent-config-'));
+  await initializeWorkspace(workspace);
+  const filtered = join(workspace, 'api-primary-filtered.mjs');
+  await writeFile(filtered, `if(process.argv.includes('--version')){process.stdout.write('fake 1.0.0');process.exit(0)}const i=process.argv.indexOf('--output-last-message');import('fs').then(({writeFileSync})=>writeFileSync(process.argv[i+1],JSON.stringify({type:'response.incomplete',response:{status:'incomplete',incomplete_details:{reason:'content_filter'}}})));`, 'utf-8');
+  const configApp = createApp(workspace);
+  const configServer = await new Promise((resolveListen) => { const instance = configApp.listen(0, '127.0.0.1', () => resolveListen(instance)); });
+  try {
+    const root = `http://127.0.0.1:${configServer.address().port}`;
+    let response = await fetch(`${root}/api/agents/config`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: 'codex', command: process.execPath, args: [filtered], model: '', reasoningEffort: 'low', activate: true }) });
+    assert.equal(response.status, 200);
+    const configuration = await (await fetch(`${root}/api/agents`)).json();
+    assert.equal(configuration.providers.find((item) => item.id === 'codex').reasoningEffort, 'low');
+    response = await fetch(`${root}/api/agent/suggest`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: 'Edit.', content: 'Text.' }) });
+    assert.equal(response.status, 502);
+    const runs = await (await fetch(`${root}/api/agent/runs`)).json();
+    const failedRun = runs.runs.find((item) => item.status === 'failed');
+    const audit = JSON.parse(failedRun.error);
+    assert.equal(audit.code, 'AGENT_CONTENT_FILTERED');
+  } finally {
+    await new Promise((resolveClose) => configServer.close(resolveClose));
+    await rm(workspace, { recursive: true, force: true });
+    resetAgentHealthForTests();
   }
 });
 
@@ -1342,6 +1837,31 @@ writeFileSync(args[outputIndex + 1], JSON.stringify({ summary: 'Live structured 
     assert.equal(testResult.agent.authenticated, true);
     assert.equal(testResult.liveTest.ok, true);
     assert.match(testResult.liveTest.summary, /Live structured response/);
+    let providers = await (await fetch(`${root}/api/agents`)).json();
+    assert.equal(providers.providers.find((item) => item.id === 'codex').liveCheck.ok, true);
+
+    await writeFile(fakeCli, `
+const args = process.argv.slice(2);
+if (args.includes('--version')) { process.stdout.write('fake-codex 1.0\\n'); process.exit(0); }
+if (args.includes('login') && args.includes('status')) { process.stdout.write('Logged in\\n'); process.exit(0); }
+process.stderr.write('401 Unauthorized: refresh token revoked; please log in again'); process.exit(2);
+`, 'utf-8');
+    const failedResponse = await fetch(`${root}/api/agents/probe`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: 'codex', live: true }) });
+    const failedQueued = await failedResponse.json();
+    let failedTest;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      failedTest = (await (await fetch(`${root}/api/agents/probe/${failedQueued.test.id}`)).json()).test;
+      if (['complete', 'failed', 'cancelled'].includes(failedTest.status)) break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+    }
+    assert.equal(failedTest.status, 'failed');
+    assert.equal(failedTest.liveTest.code, 'AGENT_AUTH_REQUIRED');
+    providers = await (await fetch(`${root}/api/agents`)).json();
+    const failedProvider = providers.providers.find((item) => item.id === 'codex');
+    assert.equal(failedProvider.authenticated, false);
+    assert.equal(failedProvider.liveCheck.ok, false);
+    assert.equal(failedProvider.liveCheck.code, 'AGENT_AUTH_REQUIRED');
+    assert.match(failedProvider.authStatus, /sign in again/i);
   } finally {
     await new Promise((resolveClose) => probeServer.close(resolveClose));
     await rm(workspace, { recursive: true, force: true });
@@ -2574,9 +3094,86 @@ test('Writing library materializes to readable files with a machine index', asyn
   const index = JSON.parse(await readFile(libraryIndexPath(tmpWorkspace), 'utf-8'));
   assert.ok(index.entries.some((entry) => entry.kind === 'corpora'));
   assert.ok(index.entries.some((entry) => entry.kind === 'sentence-patterns'));
+  assert.ok(index.entries.every((entry) => entry.file.startsWith('.papergod/library/')));
   const corpusMd = await readFile(join(libraryDirectory(tmpWorkspace), 'corpus.md'), 'utf-8');
   assert.match(corpusMd, /Context corpus/);
   assert.match(corpusMd, /Line one\. Line two\./);
+});
+
+test('Prompt Manifest materializes address-based context and atomic stable tasks', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'papergod-prompt-manifest-'));
+  try {
+    await initializeWorkspace(workspace);
+    const document = await syncDocumentStructure(workspace, 'main.tex');
+    const section = document.sections[0];
+    const paragraph = section.children[0];
+    const sentence = paragraph.children[0];
+    const quote = sentence.text || (await readFile(join(workspace, 'main.tex'), 'utf-8')).slice(sentence.sourceRange.start, sentence.sourceRange.end);
+    await updateProject(workspace, (project) => {
+      const timestamp = new Date().toISOString();
+      project.annotations.push({
+        id: 'annotation_manifest_task', documentId: document.id,
+        target: { type: 'sentence', id: sentence.id, start: sentence.sourceRange.start, end: sentence.sourceRange.end, quote },
+        category: 'style', severity: 'minor', body: 'Rewrite precisely.', suggestedFix: '', status: 'open', source: { type: 'user', actor: 'pdf-intent:sentence' }, createdAt: timestamp, updatedAt: timestamp,
+      });
+      project.libraries.sentencePatterns.push({ id: 'pattern_1', name: 'Result contrast', template: 'In contrast, {finding}.', description: '', source: '', tags: [], sectionTypes: [], slots: [{ name: 'finding', description: '', required: true }], createdAt: timestamp, updatedAt: timestamp });
+    });
+    const result = await materializePromptManifest(workspace, { documentId: document.id, intentIds: ['annotation_manifest_task'], additionalRequirements: 'Preserve citations.', resourceIds: ['pattern_1'], citekeys: ['smith2024'] });
+    assert.match(result.prompt, /Prompt manifest: \.papergod\/context\/manifests\//);
+    assert.doesNotMatch(result.prompt, new RegExp(quote.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    assert.equal(result.manifest.tasks[0].taskId, 'annotation_manifest_task');
+    assert.equal(result.manifest.tasks[0].humanLocation.section, 1);
+    assert.equal(result.manifest.tasks[0].humanLocation.paragraph, 1);
+    assert.equal(result.manifest.tasks[0].humanLocation.sentence, 1);
+    assert.deepEqual(result.manifest.tasks[0].target.sourceRange, { start: sentence.sourceRange.start, end: sentence.sourceRange.end });
+    assert.equal(result.manifest.tasks[0].target.exactQuote, quote);
+    assert.match(result.manifest.resources.bibliography, /\/bibliography\.bib$/);
+    assert.match(result.manifest.resources.selectedWritingResources[0].file, /\/library\/patterns\.md$/);
+    assert.equal(result.manifest.workspace.root, '.');
+    assert.equal(JSON.stringify(result.manifest).includes(workspace), false);
+    assert.ok(Object.keys(result.manifest.resources.integrity).every((path) => path.startsWith(`.papergod/context/manifests/${result.manifestId}/`)));
+    assert.equal(result.manifest.policy.readOnlyOnDemand, true);
+    assert.ok(result.tokenEstimate < result.manifestTokenEstimate);
+    const stored = JSON.parse(await readFile(join(workspace, result.manifestPath), 'utf-8'));
+    assert.equal(stored.additionalRequirements, 'Preserve citations.');
+    const aligned = alignSuggestionsToManifest([{
+      taskId: 'annotation_manifest_task', nodeId: sentence.id, originalText: quote, suggestedText: 'Rewritten.',
+      category: 'style', description: 'Precise', reason: 'Clearer', usedTemplateIds: ['pattern_1'], usedCitekeys: ['smith2024'],
+    }], result.manifest);
+    assert.equal(aligned[0].targetAnchor.sourceRange.start, sentence.sourceRange.start);
+    const wholeSource = await readFile(join(workspace, 'main.tex'), 'utf-8');
+    const documentTaskManifest = { ...result.manifest, tasks: [{ ...result.manifest.tasks[0], taskId: 'document_task', target: { ...result.manifest.tasks[0].target, nodeId: document.id, type: 'document', matchMode: 'substring-within-range', sourceRange: { start: 0, end: wholeSource.length }, exactQuote: '', exactQuoteHash: '' } }] };
+    const documentAligned = alignSuggestionsToManifest([{ ...aligned[0], taskId: 'document_task', nodeId: document.id, originalText: quote }], documentTaskManifest, [], wholeSource);
+    assert.deepEqual(documentAligned[0].targetAnchor.sourceRange, { start: sentence.sourceRange.start, end: sentence.sourceRange.start + quote.length });
+    const twoTaskManifest = { ...result.manifest, tasks: [...result.manifest.tasks, { ...result.manifest.tasks[0], taskId: 'task_unresolved' }] };
+    assert.throws(() => alignSuggestionsToManifest([{ ...aligned[0] }], twoTaskManifest), (error) => error.code === 'AGENT_TASK_INCOMPLETE');
+    assert.equal(alignSuggestionsToManifest([{ ...aligned[0] }], twoTaskManifest, [{ taskId: 'task_unresolved', reason: 'No safe edit.' }]).length, 1);
+    assert.throws(() => alignSuggestionsToManifest([{ ...aligned[0], taskId: 'unknown' }], result.manifest), /does not reference/);
+    assert.throws(() => alignSuggestionsToManifest([{ ...aligned[0], originalText: 'stale' }], result.manifest), /exactly match/);
+    await assert.rejects(materializePromptManifest(workspace, { documentId: document.id, intentIds: ['annotation_manifest_task', 'annotation_manifest_task'] }), (error) => error.code === 'DUPLICATE_MODIFICATION_INTENT');
+    await assert.rejects(materializePromptManifest(workspace, { documentId: document.id, intentIds: ['missing_intent'] }), (error) => error.code === 'MODIFICATION_INTENT_NOT_FOUND');
+    await writeFile(join(workspace, 'other.tex'), '\\documentclass{article}\\begin{document}\\section{Other}Other exact sentence.\\end{document}', 'utf-8');
+    const otherDocument = await syncDocumentStructure(workspace, 'other.tex');
+    const otherSentence = otherDocument.sections[0].children[0].children[0];
+    const otherSource = await readFile(join(workspace, 'other.tex'), 'utf-8');
+    const otherQuote = otherSource.slice(otherSentence.sourceRange.start, otherSentence.sourceRange.end);
+    await updateProject(workspace, (project) => project.annotations.push({
+      id: 'annotation_other_document', documentId: otherDocument.id, target: { type: 'sentence', id: otherSentence.id, start: otherSentence.sourceRange.start, end: otherSentence.sourceRange.end, quote: otherQuote },
+      category: 'style', severity: 'minor', body: 'Rewrite.', suggestedFix: '', status: 'open', source: { type: 'user', actor: 'pdf-intent:sentence' }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    }));
+    await assert.rejects(materializePromptManifest(workspace, { documentId: document.id, intentIds: ['annotation_other_document'] }), (error) => error.code === 'MODIFICATION_INTENT_DOCUMENT_MISMATCH');
+    await updateProject(workspace, (project) => project.annotations.push({
+      id: 'annotation_positional', documentId: document.id, target: { type: 'document', id: document.id, start: 0, end: 0, quote: 'PDF page 1 at 50%' },
+      category: 'style', severity: 'minor', body: 'Rewrite.', suggestedFix: '', status: 'open', source: { type: 'user', actor: 'pdf-intent:sentence' }, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    }));
+    await assert.rejects(materializePromptManifest(workspace, { documentId: document.id, intentIds: ['annotation_positional'] }), (error) => error.code === 'MODIFICATION_INTENT_UNRESOLVED');
+    const originalSource = await readFile(join(workspace, 'main.tex'), 'utf-8');
+    await assert.rejects(materializePromptManifest(workspace, { documentId: document.id, intentIds: ['annotation_manifest_task'], sourceContent: `shift${originalSource}` }), (error) => error.code === 'PROMPT_TARGET_STALE');
+    const loaded = await loadPromptManifest(workspace, result.manifestPath);
+    assert.equal(loaded.manifest.tasks[0].taskId, 'annotation_manifest_task');
+    await writeFile(join(workspace, result.manifest.resources.projectContext), 'tampered', 'utf-8');
+    await assert.rejects(loadPromptManifest(workspace, result.manifestPath), (error) => error.code === 'PROMPT_MANIFEST_RESOURCE_CHANGED');
+  } finally { await rm(workspace, { recursive: true, force: true }); }
 });
 
 test('Workspace index lists paths and target range without inlining document text', async () => {

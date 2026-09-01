@@ -6,6 +6,7 @@ import { buildLibraryContext, composeMockParagraph } from './library-engine.js';
 import { DEFAULT_REVIEW_RUBRIC, generateMockPeerReview } from './review-panel.js';
 import { composeMockPaper } from './revise-workflow.js';
 import { runAcademicReviewAgent, runPaperGenerationAgent, runWritingAgent } from './agent-adapters.js';
+import { agentFailureAudit } from './agent-errors.js';
 
 export const ORCHESTRATION_CAPABILITIES = ['suggest', 'review', 'paragraph', 'generate'];
 export const ORCHESTRATION_PROVIDERS = ['mock', 'codex', 'claude-code', 'opencode', 'pi'];
@@ -378,13 +379,13 @@ async function runExternalNode(node, inputText, options) {
       prompt: node.prompt || 'Improve the supplied academic text.',
       resourceContext: '', resourceIds: [],
     }, options);
-    return { summary: summarize(result.summary, 300), data: JSON.stringify(result), contentType: 'suggestions' };
+    return { summary: summarize(result.summary, 300), data: JSON.stringify({ ...result, agentMeta: result.agentMeta }), contentType: 'suggestions' };
   }
   if (capability === 'review') {
     const reviewer = defaultReviewer(node);
     const rubric = nodeRubric(node);
     const result = await runAcademicReviewAgent(node.provider, { content: inputText || ' ', reviewer, rubric }, options);
-    return { summary: summarize(result.summary, 300), data: JSON.stringify(result), contentType: 'review' };
+    return { summary: summarize(result.summary, 300), data: JSON.stringify({ ...result, agentMeta: result.agentMeta }), contentType: 'review' };
   }
   if (capability === 'paragraph') {
     const sentinel = '[[PAPERGOD_PARAGRAPH_DRAFT]]';
@@ -395,14 +396,14 @@ async function runExternalNode(node, inputText, options) {
     }, options);
     const draft = result.suggestions?.find((item) => item.originalText === sentinel)?.suggestedText || result.suggestions?.[0]?.suggestedText || '';
     if (!draft.trim()) throw problem('Agent did not return a paragraph draft', 502);
-    return { summary: summarize(draft, 300), data: JSON.stringify({ draft, summary: result.summary }), contentType: 'paragraph' };
+    return { summary: summarize(draft, 300), data: JSON.stringify({ draft, summary: result.summary, agentMeta: result.agentMeta }), contentType: 'paragraph' };
   }
   if (capability === 'generate') {
     const result = await runPaperGenerationAgent(node.provider, {
       instruction: [node.prompt, inputText ? `Upstream context:\n${inputText.slice(0, MAX_UPSTREAM_CHARS)}` : ''].filter(Boolean).join('\n') || 'Generate a complete academic paper.',
       projectContext: '', outlineContext: '', resourceContext: '', resourceIds: [],
     }, options);
-    return { summary: summarize(result.summary, 300), data: JSON.stringify(result), contentType: 'generated-paper' };
+    return { summary: summarize(result.summary, 300), data: JSON.stringify({ ...result, agentMeta: result.agentMeta }), contentType: 'generated-paper' };
   }
   throw problem(`Unknown capability: ${capability}`, 400);
 }
@@ -466,14 +467,16 @@ async function executeAgentNode(workspaceRoot, orchestrationId, nodeId, options)
       });
     const finishedAt = now();
     await setNodeFields(workspaceRoot, orchestrationId, nodeId, { status: 'complete', output, finishedAt });
-    await updateAgentRun(workspaceRoot, run.id, { status: 'complete', output: JSON.stringify({ summary: output.summary, characters: output.data.length }), finishedAt });
+    let agentMeta;
+    try { agentMeta = JSON.parse(output.data)?.agentMeta; } catch {}
+    await updateAgentRun(workspaceRoot, run.id, { status: 'complete', output: JSON.stringify({ summary: output.summary, characters: output.data.length, agentMeta }), finishedAt });
     await propagateEdgeSummaries(workspaceRoot, orchestrationId, nodeId, output);
     return { ok: true, nodeId };
   } catch (error) {
     const finishedAt = now();
     const message = String(error?.message || 'Agent node failed').slice(0, 4000);
     await setNodeFields(workspaceRoot, orchestrationId, nodeId, { status: 'failed', error: message, finishedAt });
-    await updateAgentRun(workspaceRoot, run.id, { status: 'failed', error: message, finishedAt });
+    await updateAgentRun(workspaceRoot, run.id, { status: 'failed', error: agentFailureAudit(error), finishedAt });
     return { ok: false, nodeId, error: message };
   }
 }

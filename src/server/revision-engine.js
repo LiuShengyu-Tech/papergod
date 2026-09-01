@@ -7,6 +7,7 @@ import { syncDocumentStructure } from './document-structure.js';
 import { getHistoricalRevisionSource } from './change-history.js';
 import { createAgentRun, updateAgentRun } from './project-resources.js';
 import { runReviewOrchestrationAgent } from './agent-adapters.js';
+import { agentFailureAudit } from './agent-errors.js';
 import { materializeLibraries } from './library-files.js';
 
 const revisionQueues = new Map();
@@ -236,10 +237,10 @@ export async function orchestrateReviewOpinions(workspaceRoot, { documentId, tex
       annotations[index].dependsOn = opinion.dependsOn.map((order) => annotations[order - 1].id);
     });
     await updateProject(workspaceRoot, (draft) => draft.annotations.push(...annotations));
-    await updateAgentRun(workspaceRoot, run.id, { status: 'complete', output: JSON.stringify(result), finishedAt: now() });
+    await updateAgentRun(workspaceRoot, run.id, { status: 'complete', output: JSON.stringify({ ...result, agentMeta: result.agentMeta }), finishedAt: now() });
     return { annotations, runId: run.id, summary: result.summary };
   } catch (error) {
-    await updateAgentRun(workspaceRoot, run.id, { status: 'failed', error: error.message.slice(0, 4000), finishedAt: now() });
+    await updateAgentRun(workspaceRoot, run.id, { status: 'failed', error: agentFailureAudit(error), finishedAt: now() });
     error.status = error.status || 502; throw error;
   }
 }
@@ -527,7 +528,7 @@ export async function applySuggestionsAsRevision(workspaceRoot, file, suggestion
       id: id('change'), target: { type: 'range', id: suggestion.nodeId || document.id, start, end, quote: suggestion.originalText },
       before: suggestion.originalText, after: suggestion.suggestedText,
       reason: suggestion.reason || suggestion.description || 'Agent suggestion', status: 'accepted', executable: suggestion.originalText !== suggestion.suggestedText,
-      dependsOn: [], conflictsWith: [],
+      taskId: suggestion.taskId || '', suggestionId: suggestion.id || '', dependsOn: [], conflictsWith: [],
     };
   });
   const changes = [];

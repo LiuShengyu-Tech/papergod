@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Papergod</title>
+  <link rel="icon" type="image/png" href="/brand/papergod-logo.png">
   <link rel="stylesheet" href="/vendor/codemirror/lib/codemirror.css">
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="/react/assets/main.css">
@@ -83,6 +84,7 @@
     <button data-pdf-scope="word" type="button" data-i18n="pdf.word">Word</button>
     <button data-pdf-scope="sentence" type="button" data-i18n="pdf.sentence">Sentence</button>
     <button data-pdf-scope="paragraph" type="button" data-i18n="pdf.paragraph">Paragraph</button>
+    <button id="pdf-locate-source" class="pdf-menu-secondary" type="button" data-i18n="pdf.locateSource">Locate in LaTeX source</button>
     <button id="pdf-sentence-reader-open" type="button" data-i18n="pdf.reader">Sentence reader</button>
   </div>
 
@@ -121,21 +123,38 @@
         <form id="agent-config-form">
           <label for="agent-config-provider" data-i18n="agentConfig.provider">Provider</label>
           <select id="agent-config-provider"></select>
-          <label for="agent-config-command" data-i18n="agentConfig.command">CLI command</label>
-          <input id="agent-config-command" placeholder="codex">
-          <label for="agent-config-model" data-i18n="agentConfig.model">Model override</label>
-          <div class="agent-model-picker">
-            <input id="agent-config-model" placeholder="Use the CLI default" autocomplete="off">
-            <div id="agent-model-dropdown" class="agent-model-dropdown hidden" role="listbox" aria-label="Available models"></div>
-          </div>
-          <label for="agent-config-args" data-i18n="agentConfig.args">Prefix args (one per line)</label>
-          <textarea id="agent-config-args" rows="3"></textarea>
           <p id="agent-config-note" aria-live="polite"></p>
           <div class="agent-config-actions">
-            <button id="agent-config-probe" type="button" data-i18n="agentConfig.check">Check setup</button>
-            <button id="agent-config-save" type="submit" class="primary" data-i18n="agentConfig.save">Save and use</button>
+            <button id="agent-config-login" type="button" class="hidden">Sign in</button>
+            <button id="agent-config-probe" type="button" data-i18n="agentConfig.check">Test subscription</button>
+            <button id="agent-config-save" type="submit" class="primary" data-i18n="agentConfig.save">Use this Agent</button>
           </div>
+          <details class="agent-advanced-settings">
+            <summary>Advanced settings</summary>
+            <div class="agent-advanced-grid">
+              <label for="agent-config-command" data-i18n="agentConfig.command">CLI command</label>
+              <input id="agent-config-command" placeholder="codex">
+              <label for="agent-config-model" data-i18n="agentConfig.model">Model override</label>
+              <div class="agent-model-picker">
+                <input id="agent-config-model" placeholder="Use the CLI default" autocomplete="off">
+                <div id="agent-model-dropdown" class="agent-model-dropdown hidden" role="listbox" aria-label="Available models"></div>
+              </div>
+              <label for="agent-config-reasoning">Reasoning effort</label>
+              <select id="agent-config-reasoning"><option value="">Automatic by task</option><option value="minimal">Minimal</option><option value="low">Low</option><option value="medium">Medium</option><option value="high">High</option><option value="xhigh">Extra high</option></select>
+              <label for="agent-config-args" data-i18n="agentConfig.args">Prefix args (one per line)</label>
+              <textarea id="agent-config-args" rows="3"></textarea>
+            </div>
+          </details>
         </form>
+      </div>
+    </section>
+  </div>
+
+  <div id="agent-activity-details-overlay" class="hidden compact-overlay" role="dialog" aria-modal="true" aria-labelledby="agent-activity-details-title">
+    <section id="agent-activity-details-dialog" class="compact-dialog">
+      <div class="library-header"><div><h2 id="agent-activity-details-title" data-i18n="activity.detailsTitle">Agent CLI details</h2><p id="agent-activity-details-meta" data-i18n="activity.detailsHelp">Inspect the exact background command progress and provider output.</p></div><button id="agent-activity-details-close" type="button" aria-label="Close">×</button></div>
+      <div class="agent-activity-details-body">
+        <pre id="agent-activity-details-log" data-i18n="activity.liveOutput">Live CLI output will appear here.</pre>
       </div>
     </section>
   </div>
@@ -143,7 +162,12 @@
   <div id="prompt-preview-overlay" class="hidden compact-overlay" role="dialog" aria-modal="true" aria-labelledby="prompt-preview-title">
     <section class="compact-dialog prompt-dialog">
       <div class="library-header"><div><h2 id="prompt-preview-title" data-i18n="promptPreview.title">Final Agent Prompt</h2><p id="prompt-preview-meta" data-i18n="promptPreview.empty">Not generated yet</p></div><button id="prompt-preview-close" aria-label="Close">×</button></div>
+      <h3>Actual CLI payload</h3>
       <pre id="prompt-preview-content" data-i18n="promptPreview.bodyEmpty">Prompt not generated yet.</pre>
+      <details class="prompt-manifest-details" open>
+        <summary>Prompt Manifest · tasks, stable targets, and local resource addresses</summary>
+        <pre id="prompt-preview-manifest">Manifest not generated yet.</pre>
+      </details>
     </section>
   </div>
 

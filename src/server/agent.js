@@ -104,6 +104,11 @@ export function registerSuggestions(items) {
       originalText: item.originalText,
       suggestedText: item.suggestedText,
       reason: item.reason || '',
+      taskId: item.taskId || '',
+      nodeId: item.nodeId || '',
+      usedTemplateIds: Array.isArray(item.usedTemplateIds) ? item.usedTemplateIds : [],
+      usedCitekeys: Array.isArray(item.usedCitekeys) ? item.usedCitekeys : [],
+      targetAnchor: item.targetAnchor || null,
     };
     suggestionStore.set(suggestion.id, suggestion);
     return suggestion;
@@ -114,14 +119,25 @@ export function attachSuggestionContext(items, { file = '', nodeId = '', nodeSta
   for (const item of items) {
     const suggestion = suggestionStore.get(item.id);
     if (!suggestion) continue;
-    const relativeStart = selectedContent.indexOf(suggestion.originalText);
-    if (relativeStart === -1) continue;
-    suggestion.file = file;
-    suggestion.nodeId = nodeId;
-    suggestion.sourceRange = {
-      start: nodeStart + relativeStart,
-      end: nodeStart + relativeStart + suggestion.originalText.length,
-    };
+    if (suggestion.targetAnchor?.sourceRange) {
+      suggestion.file = suggestion.targetAnchor.file || file;
+      suggestion.nodeId = suggestion.targetAnchor.nodeId || suggestion.nodeId || nodeId;
+      suggestion.sourceRange = { start: suggestion.targetAnchor.sourceRange.start, end: suggestion.targetAnchor.sourceRange.end };
+    } else {
+      const matches = [];
+      let offset = selectedContent.indexOf(suggestion.originalText);
+      while (offset !== -1) {
+        matches.push(offset);
+        offset = selectedContent.indexOf(suggestion.originalText, offset + Math.max(1, suggestion.originalText.length));
+      }
+      if (matches.length !== 1) continue;
+      suggestion.file = file;
+      suggestion.nodeId = nodeId;
+      suggestion.sourceRange = {
+        start: nodeStart + matches[0],
+        end: nodeStart + matches[0] + suggestion.originalText.length,
+      };
+    }
     Object.assign(item, {
       nodeId: suggestion.nodeId,
       sourceRange: suggestion.sourceRange,

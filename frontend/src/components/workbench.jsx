@@ -1,14 +1,15 @@
 import {
-  BarChart3, BookMarked, BookOpen, Bot, Braces, FileCode, FileText, FolderKanban, FolderOpen,
-  GitPullRequest, History, Library, Network, Play, PlayCircle, RefreshCw, Save, ScanText,
-  Settings, Sparkles, SquareTerminal, Users,
+  BarChart3, BookMarked, BookOpen, Bot, Braces, FileCode, FolderKanban, FolderOpen,
+  Bug, Download, GitPullRequest, History, Library, Network, Play, PlayCircle, RefreshCw, Rocket, Save, ScanText,
+  Settings, Sparkles, SquareTerminal, Users, X,
 } from 'lucide-react';
 import { Button } from './ui/button.jsx';
+import packageData from '../../../package.json';
 
 function ProductHeader() {
   return (
     <header id="header">
-      <div className="brand-mark"><FileText size={17} strokeWidth={1.8} /><span className="logo">Papergod</span><span id="active-workspace-name" title="Current workspace">Workspace</span></div>
+      <div className="brand-mark"><img className="brand-logo" src="/brand/papergod-logo.png" alt="" aria-hidden="true" /><span className="logo">Papergod</span><span id="active-workspace-name" title="Current workspace">Workspace</span></div>
       <nav className="header-actions" aria-label="Workspace tools">
         <Button id="library-open" variant="ghost" size="sm"><BookOpen size={14} /><span data-i18n="header.libraries">Writing libraries</span></Button>
         <Button id="focus-annotation-open" variant="ghost" size="sm"><ScanText size={14} /><span data-i18n="header.focus">Focus annotation</span></Button>
@@ -53,6 +54,11 @@ function Navigator() {
         </div>
         <div className="sidebar-heading tool-files-heading"><h3 data-i18n="tools.backendFiles">Backend files</h3></div><ul id="file-tree" />
       </section>
+      <button id="version-status" className="version-status" type="button" aria-haspopup="dialog" aria-controls="version-overlay">
+        <span className="version-status-icon"><Download size={13} /></span>
+        <span className="version-status-copy"><span data-i18n="version.product">Papergod</span><strong id="current-version" data-current-version={packageData.version}>v{packageData.version}</strong></span>
+        <span id="version-update-badge" className="version-update-badge hidden" data-i18n="version.available">Update</span>
+      </button>
     </aside>
   );
 }
@@ -109,33 +115,68 @@ function AssistantPanel() {
           </div>
           <section className="ai-module invoke-module">
             <Button id="ai-invoke" variant="primary"><Sparkles size={16} /><span data-i18n="ai.invoke">Invoke Agent</span><span id="ai-invoke-intent-count" className="hidden" /></Button>
-            <div id="agent-activity" className="agent-activity idle">
-              <button id="agent-activity-toggle" type="button" aria-expanded="false" aria-controls="agent-activity-panel">
-                <span className="agent-activity-dot" aria-hidden="true" />
-                <span id="agent-activity-label" data-i18n="activity.idle">Agent idle</span>
-                <span id="agent-activity-elapsed">—</span>
-                <span className="agent-activity-chevron" aria-hidden="true">⌄</span>
-              </button>
-              <div id="agent-activity-panel" className="hidden">
-                <div id="agent-activity-subtitle" data-i18n="activity.none">No Agent task has run in this session.</div>
-                <ol id="agent-activity-stages">
-                  <li data-stage="prepare" data-i18n="activity.context">Context</li><li data-stage="run" data-i18n="activity.agent">Agent</li><li data-stage="apply" data-i18n="activity.apply">Apply</li><li data-stage="compile" data-i18n="activity.compile">Compile</li>
-                </ol>
-                <pre id="agent-activity-log" data-i18n="activity.liveOutput">Live CLI output will appear here.</pre>
-                <div className="agent-activity-result hidden" id="agent-activity-result" />
-                <div className="agent-activity-actions"><button id="agent-activity-cancel" className="hidden" type="button" data-i18n="activity.cancel">Cancel</button><button id="agent-activity-undo" className="hidden" type="button" data-i18n="activity.undo">Undo this revision</button></div>
-              </div>
-            </div>
           </section>
         </div>
         <div id="library-usage" className="hidden" />
         <div id="paragraph-draft" className="hidden" />
         <div id="ai-suggestions" />
+        <div id="agent-activity" className="agent-activity idle">
+          <button id="agent-activity-toggle" type="button" aria-haspopup="dialog" aria-controls="agent-activity-details-overlay">
+            <span className="agent-activity-dot" aria-hidden="true" />
+            <span className="agent-activity-heading"><span id="agent-activity-label" data-i18n="activity.idle">Agent idle</span><span id="agent-activity-subtitle" data-i18n="activity.none">No Agent task has run in this session.</span></span>
+            <span id="agent-activity-elapsed">—</span>
+            <span className="agent-activity-detail-hint" data-i18n="activity.viewCli">View CLI</span>
+          </button>
+          <div id="agent-activity-panel">
+            <ol id="agent-activity-stages">
+              <li data-stage="prepare"><span className="activity-stage-index" /><span data-i18n="activity.context">Context</span></li>
+              <li data-stage="run"><span className="activity-stage-index" /><span data-i18n="activity.agent">Agent</span></li>
+              <li data-stage="apply"><span className="activity-stage-index" /><span data-i18n="activity.apply">Apply</span></li>
+              <li data-stage="compile"><span className="activity-stage-index" /><span data-i18n="activity.compile">Compile</span></li>
+            </ol>
+            <pre id="agent-activity-log" className="hidden" aria-hidden="true" data-i18n="activity.liveOutput">Live CLI output will appear here.</pre>
+            <div className="agent-activity-result hidden" id="agent-activity-result" />
+            <div className="agent-activity-actions"><button id="agent-activity-details" type="button" data-i18n="activity.details">CLI details</button><button id="agent-activity-cancel" className="hidden" type="button" data-i18n="activity.cancel">Cancel</button><button id="agent-activity-undo" className="hidden" type="button" data-i18n="activity.undo">Undo this revision</button></div>
+          </div>
+        </div>
       </div>
     </aside>
   );
 }
 
+function VersionDialog() {
+  return (
+    <div id="version-overlay" className="compact-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="version-title">
+      <section id="version-dialog" className="compact-dialog">
+        <header className="version-dialog-header">
+          <div className="version-dialog-heading">
+            <span className="version-dialog-icon"><Rocket size={20} /></span>
+            <div><span className="version-eyebrow" data-i18n="version.releaseNotes">Release notes</span><h2 id="version-title" data-i18n="version.upToDate">You’re up to date</h2></div>
+          </div>
+          <button id="version-close" type="button" aria-label="Close" data-i18n-aria-label="common.close"><X size={17} /></button>
+        </header>
+        <div className="version-dialog-body">
+          <div className="version-summary">
+            <div><span data-i18n="version.installed">Installed</span><strong id="version-installed">v{packageData.version}</strong></div>
+            <span className="version-arrow">→</span>
+            <div><span data-i18n="version.latest">Latest</span><strong id="version-latest">v{packageData.version}</strong></div>
+            <span id="version-date" className="version-date" />
+          </div>
+          <p id="version-check-note" className="version-check-note" data-i18n="version.checking">Checking for updates…</p>
+          <div id="version-notes" className="version-notes hidden">
+            <section><div className="version-section-title"><Rocket size={15} /><h3 data-i18n="version.whatsNew">What’s new</h3></div><ul id="version-highlights" /></section>
+            <section><div className="version-section-title version-section-title--fix"><Bug size={15} /><h3 data-i18n="version.fixes">Bug fixes</h3></div><ul id="version-fixes" /></section>
+          </div>
+        </div>
+        <footer className="version-dialog-footer">
+          <span data-i18n="version.safeNote">Review the release details before updating.</span>
+          <a id="version-release-link" className="ui-button ui-button--primary ui-button--sm hidden" target="_blank" rel="noreferrer"><Download size={14} /><span data-i18n="version.viewUpdate">View update</span></a>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
 export function Workbench() {
-  return <div id="app"><ProductHeader /><Navigator /><EditorWorkspace /><AssistantPanel /></div>;
+  return <div id="app"><ProductHeader /><Navigator /><EditorWorkspace /><AssistantPanel /><VersionDialog /></div>;
 }

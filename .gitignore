@@ -1,6 +1,7 @@
 node_modules/
 .papergod/
 .hive/
+.dsh-vision-toolkit/
 *.aux
 *.log
 *.synctex.gz

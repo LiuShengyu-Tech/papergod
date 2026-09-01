@@ -1,5 +1,6 @@
 import * as pdfjsLib from '/vendor/pdfjs-dist/build/pdf.mjs';
 import { getLocale, setLocale, t, translateDom } from '/i18n.js';
+import { buildOrderedSentenceMappings, sentenceMappingAt } from '/pdf-sentence-mapping.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs-dist/build/pdf.worker.mjs';
 
@@ -46,6 +47,15 @@ let agentActivityStage = '';
 let lastAiRevisionId = null;
 let lastAiIntentIds = [];
 let pdfAnnotationTarget = null;
+let pdfTextIndex = null;
+let pdfSentenceMappings = [];
+let pdfHeadingMappings = [];
+let pdfMetadataMappings = [];
+let lastCompiledSource = null;
+let lastCompiledSentenceSnapshot = [];
+let recentChangedSentenceIds = new Set();
+let pdfHoverFrame = null;
+let pdfHoverKey = '';
 let latexEngineAvailable = false;
 let modificationIntents = [];
 let sentenceReaderItems = [];
@@ -66,6 +76,7 @@ let terminalResizeObserver = null;
 let referenceData = null;
 let zoteroReferenceResults = [];
 let selectedReferenceCitekeys = new Set();
+let appVersionInfo = null;
 
 class ModificationIntent {
   constructor(annotation) {
@@ -113,6 +124,9 @@ async function showCompiledPdf(url, { switchView = true } = {}) {
   document.getElementById('pdf-scope-menu').classList.add('hidden');
   document.getElementById('pdf-edit-menu').classList.add('hidden');
   clearPdfScopeHighlight();
+  clearPdfHoverHighlight();
+  pdfTextIndex = null;
+  pdfSentenceMappings = [];
   container.replaceChildren();
   placeholder.textContent = 'Rendering paper…';
   placeholder.classList.remove('hidden');
@@ -163,13 +177,24 @@ async function showCompiledPdf(url, { switchView = true } = {}) {
       const textItems = textContent.items.filter((item) => item.str?.trim());
       let itemCursor = 0;
       renderedSpans.forEach((span) => {
-        while (itemCursor < textItems.length && textItems[itemCursor].str !== span.textContent) itemCursor += 1;
-        if (itemCursor < textItems.length) {
-          span.dataset.pdfHasEol = String(Boolean(textItems[itemCursor].hasEOL));
-          itemCursor += 1;
+        const searchEnd = Math.min(textItems.length, itemCursor + 12);
+        let matchedItem = -1;
+        for (let candidate = itemCursor; candidate < searchEnd; candidate += 1) {
+          if (textItems[candidate].str === span.textContent) { matchedItem = candidate; break; }
+        }
+        if (matchedItem !== -1) {
+          span.dataset.pdfHasEol = String(Boolean(textItems[matchedItem].hasEOL));
+          itemCursor = matchedItem + 1;
         }
       });
       textLayer.addEventListener('click', handlePdfTextClick);
+      textLayer.addEventListener('pointermove', handlePdfTextHover);
+      textLayer.addEventListener('pointerleave', clearPdfHoverHighlight);
+      if (renderGeneration === pdfRenderGeneration) {
+        // Keep already-rendered pages interactive while later pages continue rendering.
+        pdfTextIndex = buildPdfTextIndex();
+        rebuildPdfSentenceMappings();
+      }
     }
     if (renderGeneration === pdfRenderGeneration) placeholder.classList.add('hidden');
   } catch (error) {
@@ -181,7 +206,11 @@ async function showCompiledPdf(url, { switchView = true } = {}) {
 }
 
 function canonicalPdfUnit(value) {
-  return String(value || '').normalize('NFKC')
+  return String(value || '')
+    .replace(/\u001b/g, 'ff').replace(/\u001c/g, 'fi').replace(/\u001d/g, 'fl')
+    .replace(/\u001e/g, 'ffi').replace(/\u001f/g, 'ffl')
+    .replace(/[\u0010-\u0013]/g, '"')
+    .normalize('NFKC')
     .replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/[‐‑‒–—]/g, '-')
     .toLocaleLowerCase().replace(/\s+/g, ' ');
 }
@@ -192,10 +221,39 @@ function canonicalPdfText(value) {
 
 function sourceMatchText(value) {
   let result = String(value || '').replace(/~/g, ' ').replace(/\\([%&_#$])/g, '$1');
+  result = result
+    .replace(/\\href\*?\{[^{}]*\}\{([^{}]*)\}/g, '$1')
+    .replace(/\\(?:cite\w*|ref|eqref|pageref|autoref|label)\*?(?:\[[^\]]*\])*\{[^{}]*\}/g, ' ');
   for (let pass = 0; pass < 3; pass += 1) {
     result = result.replace(/\\(?:emph|textbf|textit|textrm|texttt|underline|mbox)\*?(?:\[[^\]]*\])?\{([^{}]*)\}/g, '$1');
   }
   return canonicalPdfText(result.replace(/\\[a-zA-Z@]+\*?(?:\[[^\]]*\])?/g, '').replace(/[{}]/g, ''));
+}
+
+function latexCommandMetadata(source, command) {
+  const matcher = new RegExp(`\\\\${command}\\s*(?:\\[[^\\]]*\\]\\s*)?\\{`, 'g');
+  const match = matcher.exec(source);
+  if (!match) return null;
+  const contentStart = match.index + match[0].length;
+  let depth = 1;
+  let cursor = contentStart;
+  for (; cursor < source.length && depth > 0; cursor += 1) {
+    if (source[cursor] === '{' && source[cursor - 1] !== '\\') depth += 1;
+    if (source[cursor] === '}' && source[cursor - 1] !== '\\') depth -= 1;
+  }
+  if (depth !== 0) return null;
+  const contentEnd = cursor - 1;
+  const raw = source.slice(contentStart, contentEnd).trim();
+  const leading = source.slice(contentStart, contentEnd).indexOf(raw);
+  const displayText = sourceMatchText(raw.replace(/\\\\/g, ' ').replace(/\\and\b/g, ' '));
+  if (!raw || !displayText) return null;
+  return {
+    command,
+    label: command[0].toUpperCase() + command.slice(1),
+    raw,
+    displayText,
+    sourceRange: { start: contentStart + Math.max(0, leading), end: contentStart + Math.max(0, leading) + raw.length },
+  };
 }
 
 function buildPdfTextIndex(root = document, selector = '.pdf-text-layer') {
@@ -223,10 +281,8 @@ function buildPdfTextIndex(root = document, selector = '.pdf-text-layer') {
       if (previousSpan) {
         const previousRect = previousSpan.getBoundingClientRect();
         const currentRect = span.getBoundingClientRect();
-        const wrappedLine = currentRect.left < previousRect.right - Math.max(2, previousRect.height * 0.3);
         const lineBreak = previousSpan.dataset.pdfHasEol === 'true'
-          || Math.abs(currentRect.top - previousRect.top) > Math.max(2, previousRect.height * 0.45)
-          || wrappedLine;
+          || Math.abs(currentRect.top - previousRect.top) > Math.max(2, previousRect.height * 0.55);
         const visibleGap = currentRect.left - previousRect.right > Math.max(1, previousRect.height * 0.12);
         if (lineBreak && characters.at(-1) === '-') {
           characters.pop(); positions.pop();
@@ -241,6 +297,11 @@ function buildPdfTextIndex(root = document, selector = '.pdf-text-layer') {
   const rawText = characters.join('');
   const leading = rawText.length - rawText.trimStart().length;
   const text = rawText.trim();
+  spanRanges.forEach((range, span) => {
+    const start = Math.max(0, Math.min(text.length, range.start - leading));
+    const end = Math.max(start, Math.min(text.length, range.end - leading));
+    spanRanges.set(span, { start, end });
+  });
   return { text, positions: positions.slice(leading, leading + text.length), spanRanges };
 }
 
@@ -272,6 +333,37 @@ function matchingOccurrences(index, quote) {
   return exact.length ? exact : tokenOccurrences(index.text, quote);
 }
 
+function headingOccurrences(index, quote) {
+  const matches = matchingOccurrences(index, quote);
+  if (matches.length) return matches;
+  const target = [...sourceMatchText(quote).matchAll(/[\p{L}\p{N}]+(?:'[\p{L}\p{N}]+)*/gu)].map((match) => match[0]);
+  if (target.length !== 1) return [];
+  return [...index.text.matchAll(/[\p{L}\p{N}]+(?:'[\p{L}\p{N}]+)*/gu)]
+    .filter((match) => match[0] === target[0])
+    .map((match) => ({ start: match.index, end: match.index + match[0].length }));
+}
+
+function expandPdfHeadingRange(index, match) {
+  const matchedSpans = new Set(index.positions.slice(match.start, match.end).map((item) => item?.span).filter(Boolean));
+  if (!matchedSpans.size) return match;
+  const matchedLines = [...matchedSpans].map((span) => ({
+    layer: span.closest('.pdf-text-layer'),
+    rect: span.getBoundingClientRect(),
+  }));
+  let start = match.start;
+  let end = match.end;
+  index.spanRanges.forEach((range, span) => {
+    const layer = span.closest('.pdf-text-layer');
+    const rect = span.getBoundingClientRect();
+    const sameHeadingLine = matchedLines.some((line) => line.layer === layer
+      && rect.bottom >= line.rect.top - 2 && rect.top <= line.rect.bottom + 2);
+    if (!sameHeadingLine) return;
+    start = Math.min(start, range.start);
+    end = Math.max(end, range.end);
+  });
+  return { start, end };
+}
+
 function occurrenceAt(index, quote, clickedIndex) {
   const matches = matchingOccurrences(index, quote);
   return matches.find((item) => item.start <= clickedIndex && clickedIndex < item.end) || null;
@@ -294,35 +386,36 @@ function textOffsetAtPoint(span, clientX, clientY) {
   return nearest.offset;
 }
 
-function paragraphScopeRanges(index, paragraph, anchorSentence, anchorRange) {
-  const sentences = paragraph.children || [];
-  const anchorIndex = sentences.findIndex((item) => item.id === anchorSentence.id);
-  if (anchorIndex === -1) return [anchorRange];
-  const ranges = new Array(sentences.length);
-  ranges[anchorIndex] = anchorRange;
-  for (let position = anchorIndex - 1; position >= 0; position -= 1) {
-    const matches = matchingOccurrences(index, sentences[position].text)
-      .filter((item) => item.end <= ranges[position + 1].start)
-      .sort((a, b) => b.end - a.end);
-    if (!matches[0] || ranges[position + 1].start - matches[0].end > 8) break;
-    ranges[position] = matches[0];
+function pdfIndexAtPoint(index, span, clientX, clientY) {
+  if (!span || !index) return null;
+  const localOffset = textOffsetAtPoint(span, clientX, clientY);
+  const spanRange = index.spanRanges.get(span);
+  if (!spanRange) return null;
+  let lastPosition = spanRange.start;
+  for (let position = spanRange.start; position < spanRange.end; position += 1) {
+    const anchor = index.positions[position];
+    if (anchor?.span !== span) continue;
+    lastPosition = position;
+    if (anchor.offset >= localOffset) return position;
   }
-  for (let position = anchorIndex + 1; position < sentences.length; position += 1) {
-    const matches = matchingOccurrences(index, sentences[position].text)
-      .filter((item) => item.start >= ranges[position - 1].end)
-      .sort((a, b) => a.start - b.start);
-    if (!matches[0] || matches[0].start - ranges[position - 1].end > 8) break;
-    ranges[position] = matches[0];
-  }
-  return ranges.filter(Boolean);
+  return lastPosition;
 }
 
 function clearPdfScopeHighlight() {
-  document.querySelectorAll('.pdf-scope-highlight, .pdf-position-marker').forEach((item) => item.remove());
+  document.querySelectorAll('.pdf-active-highlight, .pdf-position-marker').forEach((item) => item.remove());
 }
 
-function highlightPdfRanges(index, ranges, scope) {
-  clearPdfScopeHighlight();
+function clearPdfHoverHighlight() {
+  if (pdfHoverFrame) cancelAnimationFrame(pdfHoverFrame);
+  pdfHoverFrame = null;
+  pdfHoverKey = '';
+  document.querySelectorAll('.pdf-hover-highlight').forEach((item) => item.remove());
+}
+
+function highlightPdfRanges(index, ranges, scope, mode = 'active') {
+  if (mode === 'hover') document.querySelectorAll('.pdf-hover-highlight').forEach((item) => item.remove());
+  else if (mode === 'recent') document.querySelectorAll('.pdf-recent-highlight').forEach((item) => item.remove());
+  else clearPdfScopeHighlight();
   const spanOffsets = new Map();
   for (const range of ranges || []) {
     for (let position = range.start; position < range.end; position += 1) {
@@ -346,7 +439,7 @@ function highlightPdfRanges(index, ranges, scope) {
       const right = Math.min(pageRect.width, rect.right - pageRect.left);
       if (right <= left) continue;
       const marker = document.createElement('span');
-      marker.className = `pdf-scope-highlight scope-${scope}`;
+      marker.className = `pdf-scope-highlight scope-${scope} pdf-${mode}-highlight`;
       marker.style.left = `${left}px`;
       marker.style.top = `${rect.top - pageRect.top}px`;
       marker.style.width = `${right - left}px`;
@@ -375,6 +468,8 @@ function positionPdfMenu(menu, point) {
 function openPdfScopeMenu(event) {
   document.getElementById('pdf-edit-menu').classList.add('hidden');
   const menu = document.getElementById('pdf-scope-menu');
+  document.getElementById('pdf-sentence-reader-open').classList.toggle('hidden', !pdfAnnotationTarget?.sentence);
+  document.getElementById('pdf-locate-source').classList.toggle('hidden', !pdfAnnotationTarget?.node?.sourceRange);
   pdfMenuPoint = { x: event.clientX, y: event.clientY };
   positionPdfMenu(menu, pdfMenuPoint);
   menu.classList.remove('hidden');
@@ -382,6 +477,15 @@ function openPdfScopeMenu(event) {
 
 function closePdfScopeMenu() {
   document.getElementById('pdf-scope-menu').classList.add('hidden');
+}
+
+function dismissPdfSelection() {
+  document.getElementById('pdf-scope-menu').classList.add('hidden');
+  document.getElementById('pdf-edit-menu').classList.add('hidden');
+  clearPdfScopeHighlight();
+  clearPdfHoverHighlight();
+  pdfAnnotationTarget = null;
+  pdfMenuPoint = null;
 }
 
 function openPdfEditMenu() {
@@ -393,98 +497,270 @@ function openPdfEditMenu() {
   document.getElementById('pdf-edit-comment').focus();
 }
 
-function createPositionalPdfIntent(event, textLayer, clickedSpan = null, index = buildPdfTextIndex()) {
-  const page = textLayer.closest('.pdf-page');
+function currentPdfSentenceCandidates() {
+  if (!currentDocument) return [];
+  const paragraphs = currentDocument.sections.flatMap((section) => section.children || []);
+  return paragraphs.flatMap((paragraph) => (paragraph.children || []).map((sentence) => ({ sentence, paragraph })));
+}
+
+function compiledSentenceSnapshot() {
+  return currentPdfSentenceCandidates().map(({ sentence }) => ({ id: sentence.id, text: sentence.text }));
+}
+
+function recordSuccessfulCompile(source) {
+  if (!currentDocument) return 0;
+  const nextSnapshot = compiledSentenceSnapshot();
+  let changedCount = 0;
+  if (lastCompiledSource === null) {
+    recentChangedSentenceIds = new Set();
+  } else if (source !== lastCompiledSource) {
+    const previousById = new Map(lastCompiledSentenceSnapshot.map((item) => [item.id, item.text]));
+    recentChangedSentenceIds = new Set(nextSnapshot
+      .filter((item) => previousById.get(item.id) !== item.text)
+      .map((item) => item.id));
+    changedCount = recentChangedSentenceIds.size;
+  }
+  lastCompiledSource = source;
+  lastCompiledSentenceSnapshot = nextSnapshot;
+  return changedCount;
+}
+
+function renderRecentPdfChanges() {
+  if (!pdfTextIndex) return;
+  const ranges = pdfSentenceMappings
+    .filter((mapping) => recentChangedSentenceIds.has(mapping.sentence?.id))
+    .map((mapping) => ({ start: mapping.start, end: mapping.end }));
+  highlightPdfRanges(pdfTextIndex, ranges, 'recent-change', 'recent');
+  document.getElementById('pdf-preview').dataset.recentChangedSentences = String(ranges.length);
+}
+
+function rebuildPdfSentenceMappings() {
+  if (!pdfTextIndex || !currentDocument) {
+    pdfSentenceMappings = [];
+    pdfHeadingMappings = [];
+    pdfMetadataMappings = [];
+    return;
+  }
+  const candidates = currentPdfSentenceCandidates().map((item) => ({
+    ...item,
+    matchText: sourceMatchText(item.sentence.text),
+  }));
+  pdfSentenceMappings = buildOrderedSentenceMappings(pdfTextIndex.text, candidates).mappings;
+  const sectionSentenceRanges = new Map(currentDocument.sections.map((section) => [section.id, []]));
+  pdfSentenceMappings.forEach((mapping) => {
+    const ranges = sectionSentenceRanges.get(mapping.paragraph?.parentId);
+    if (ranges) ranges.push(mapping);
+  });
+  const firstBodyStart = pdfSentenceMappings[0]?.start ?? pdfTextIndex.text.length;
+  const mappings = [];
+  if (currentDocument.title) {
+    const titleMatch = headingOccurrences(pdfTextIndex, currentDocument.title)
+      .find((item) => item.start < firstBodyStart);
+    if (titleMatch) mappings.push({ ...expandPdfHeadingRange(pdfTextIndex, titleMatch), node: { ...currentDocument, type: 'document', text: currentDocument.title } });
+  }
+  currentDocument.sections.forEach((section, sectionIndex) => {
+    const ownRanges = sectionSentenceRanges.get(section.id) || [];
+    const previousRanges = currentDocument.sections.slice(0, sectionIndex)
+      .flatMap((item) => sectionSentenceRanges.get(item.id) || []);
+    const nextRanges = currentDocument.sections.slice(sectionIndex + 1)
+      .flatMap((item) => sectionSentenceRanges.get(item.id) || []);
+    const lowerBound = previousRanges.at(-1)?.end ?? 0;
+    const upperBound = ownRanges[0]?.start ?? nextRanges[0]?.start ?? pdfTextIndex.text.length;
+    const boundedMatches = headingOccurrences(pdfTextIndex, section.title)
+      .filter((item) => item.start >= lowerBound && item.end <= upperBound);
+    let match = boundedMatches.at(-1);
+    if (!match && ownRanges.length) {
+      let anchor = upperBound - 1;
+      while (anchor >= lowerBound && !pdfTextIndex.positions[anchor]?.span) anchor -= 1;
+      if (anchor >= lowerBound) match = { start: anchor, end: anchor + 1 };
+    }
+    if (match) mappings.push({ ...expandPdfHeadingRange(pdfTextIndex, match), node: { ...section, text: section.title } });
+  });
+  pdfHeadingMappings = mappings;
+  const source = editor?.getValue?.() || '';
+  const metadataCommands = ['author', 'date', 'subtitle', 'institute', 'affiliation', 'email', 'keywords'];
+  const occupied = [...pdfHeadingMappings];
+  pdfMetadataMappings = metadataCommands.flatMap((command) => {
+    const metadata = latexCommandMetadata(source, command);
+    if (!metadata) return [];
+    const match = headingOccurrences(pdfTextIndex, metadata.displayText)
+      .find((item) => item.start < firstBodyStart && !occupied.some((range) => item.start < range.end && item.end > range.start));
+    if (!match) return [];
+    const range = expandPdfHeadingRange(pdfTextIndex, match);
+    occupied.push(range);
+    return [{ ...range, ...metadata, key: `${command}:${metadata.sourceRange.start}` }];
+  });
+  document.querySelectorAll('.pdf-text-layer span[data-pdf-heading-node], .pdf-text-layer span[data-pdf-metadata-key]').forEach((span) => {
+    delete span.dataset.pdfHeadingNode;
+    delete span.dataset.pdfMetadataKey;
+  });
+  pdfHeadingMappings.forEach((mapping) => {
+    const spans = new Set(pdfTextIndex.positions.slice(mapping.start, mapping.end)
+      .map((position) => position?.span).filter(Boolean));
+    spans.forEach((span) => { span.dataset.pdfHeadingNode = mapping.node.id; });
+  });
+  pdfMetadataMappings.forEach((mapping) => {
+    const spans = new Set(pdfTextIndex.positions.slice(mapping.start, mapping.end)
+      .map((position) => position?.span).filter(Boolean));
+    spans.forEach((span) => { span.dataset.pdfMetadataKey = mapping.key; });
+  });
+  const preview = document.getElementById('pdf-preview');
+  preview.dataset.mappedSentences = String(pdfSentenceMappings.length);
+  preview.dataset.sourceSentences = String(candidates.length);
+  preview.dataset.mappedHeadings = String(pdfHeadingMappings.length);
+  renderRecentPdfChanges();
+}
+
+function headingMappingAt(clickedIndex) {
+  return pdfHeadingMappings.find((item) => item.start <= clickedIndex && clickedIndex < item.end) || null;
+}
+
+function headingMappingForSpan(span) {
+  const nodeId = span?.dataset?.pdfHeadingNode;
+  return nodeId ? pdfHeadingMappings.find((item) => item.node.id === nodeId) || null : null;
+}
+
+function metadataMappingForSpan(span) {
+  const key = span?.dataset?.pdfMetadataKey;
+  return key ? pdfMetadataMappings.find((item) => item.key === key) || null : null;
+}
+
+function pdfWordRange(index, clickedIndex) {
+  let start = clickedIndex;
+  let end = clickedIndex + 1;
+  while (start > 0 && /[\p{L}\p{N}'-]/u.test(index.text[start - 1])) start -= 1;
+  while (end < index.text.length && /[\p{L}\p{N}'-]/u.test(index.text[end])) end += 1;
+  return { start, end };
+}
+
+function pdfVisualRange(index, span, lineRadius = 0) {
+  const layer = span.closest('.pdf-text-layer');
+  const anchorRect = span.getBoundingClientRect();
+  let start = index.spanRanges.get(span)?.start ?? 0;
+  let end = index.spanRanges.get(span)?.end ?? start;
+  index.spanRanges.forEach((range, candidate) => {
+    if (candidate.closest('.pdf-text-layer') !== layer) return;
+    const rect = candidate.getBoundingClientRect();
+    const tolerance = Math.max(2, anchorRect.height * (lineRadius + .55));
+    if (Math.abs((rect.top + rect.height / 2) - (anchorRect.top + anchorRect.height / 2)) > tolerance) return;
+    start = Math.min(start, range.start);
+    end = Math.max(end, range.end);
+  });
+  return { start, end };
+}
+
+function positionalPdfTarget(event, span, index, clickedIndex) {
+  const page = span.closest('.pdf-page');
   const pageRect = page.getBoundingClientRect();
-  const spans = [...textLayer.querySelectorAll('span')].filter((item) => item.textContent.trim());
-  let anchorSpan = clickedSpan;
-  if (!anchorSpan) {
-    anchorSpan = spans.map((span) => {
-      const rect = span.getBoundingClientRect();
-      const x = Math.max(rect.left, Math.min(event.clientX, rect.right));
-      const y = Math.max(rect.top, Math.min(event.clientY, rect.bottom));
-      return { span, distance: Math.hypot(event.clientX - x, event.clientY - y) };
-    }).sort((a, b) => a.distance - b.distance)[0]?.span || null;
-  }
-  const anchorIndex = spans.indexOf(anchorSpan);
-  const nearbySpans = anchorIndex === -1 ? [] : spans.slice(Math.max(0, anchorIndex - 1), anchorIndex + 2);
-  const sentenceText = anchorSpan?.textContent.trim() || '';
-  const paragraphText = nearbySpans.map((span) => span.textContent.trim()).filter(Boolean).join(' ');
-  let word = sentenceText.match(/[\p{L}\p{N}'’-]+/u)?.[0] || 'selected position';
-  const ranges = { word: [], sentence: [], paragraph: [] };
-  if (clickedSpan && anchorSpan && index.spanRanges.has(anchorSpan)) {
-    const spanRange = index.spanRanges.get(anchorSpan);
-    const localOffset = clickedSpan ? textOffsetAtPoint(anchorSpan, event.clientX, event.clientY) : 0;
-    const positions = index.positions.map((anchor, position) => ({ anchor, position })).filter((item) => item.anchor?.span === anchorSpan);
-    const clickedIndex = positions.find((item) => item.anchor.offset >= localOffset)?.position ?? spanRange.start;
-    let wordStart = clickedIndex;
-    let wordEnd = clickedIndex + 1;
-    while (wordStart > spanRange.start && /[\p{L}\p{N}'-]/u.test(index.text[wordStart - 1])) wordStart -= 1;
-    while (wordEnd < spanRange.end && /[\p{L}\p{N}'-]/u.test(index.text[wordEnd])) wordEnd += 1;
-    word = index.text.slice(wordStart, wordEnd) || word;
-    ranges.word = [{ start: wordStart, end: wordEnd }];
-    ranges.sentence = [spanRange];
-    ranges.paragraph = nearbySpans.map((span) => index.spanRanges.get(span)).filter(Boolean);
-  }
+  const wordRange = pdfWordRange(index, clickedIndex);
+  const lineRange = pdfVisualRange(index, span, 0);
+  const contextRange = pdfVisualRange(index, span, 2);
   const pageLabel = page.getAttribute('aria-label') || 'PDF page';
   const xPercent = Math.round((event.clientX - pageRect.left) / Math.max(1, pageRect.width) * 100);
   const yPercent = Math.round((event.clientY - pageRect.top) / Math.max(1, pageRect.height) * 100);
   const location = `${pageLabel} · ${xPercent}% from left · ${yPercent}% from top`;
-  const quoteFor = (value) => `${location}${value ? `\nNearby PDF text: ${value}` : ''}`;
-  pdfAnnotationTarget = {
-    fallback: true, scope: 'sentence', word, sentence: null, paragraph: null,
-    node: { id: currentDocument.id, type: 'document' }, index,
-    quote: quoteFor(sentenceText), fallbackQuotes: {
-      word: quoteFor(word), sentence: quoteFor(sentenceText), paragraph: quoteFor(paragraphText),
-    },
-    ranges,
+  const quoteFor = (range) => `${location}\nNearby PDF text: ${index.text.slice(range.start, range.end).trim()}`;
+  return {
+    fallback: true,
+    scope: 'sentence',
+    node: { ...currentDocument, type: 'document' },
+    word: index.text.slice(wordRange.start, wordRange.end),
+    quote: quoteFor(lineRange),
+    fallbackQuotes: { word: quoteFor(wordRange), sentence: quoteFor(lineRange), paragraph: quoteFor(contextRange) },
+    index,
+    ranges: { word: [wordRange], sentence: [lineRange], paragraph: [contextRange] },
     point: { page, left: event.clientX - pageRect.left, top: event.clientY - pageRect.top },
   };
-  highlightPdfRanges(index, ranges.sentence, 'sentence');
-  if (!ranges.sentence.length) showPdfPositionMarker(pdfAnnotationTarget.point);
-  openPdfScopeMenu(event);
+}
+
+function anchoredPdfTarget(index, clickedIndex, pdfRange, node, sourceRange, quote) {
+  const wordRange = pdfWordRange(index, clickedIndex);
+  return {
+    generic: true,
+    scope: 'sentence',
+    node: { ...node, sourceRange },
+    word: index.text.slice(wordRange.start, wordRange.end),
+    quote,
+    scopeQuotes: { word: index.text.slice(wordRange.start, wordRange.end), sentence: quote, paragraph: quote },
+    index,
+    ranges: { word: [wordRange], sentence: [pdfRange], paragraph: [pdfRange] },
+  };
+}
+
+function handlePdfTextHover(event) {
+  if (pdfHoverFrame) cancelAnimationFrame(pdfHoverFrame);
+  pdfHoverFrame = requestAnimationFrame(() => {
+    pdfHoverFrame = null;
+    const span = event.target.closest('.pdf-text-layer span');
+    if (!span) return clearPdfHoverHighlight();
+    const index = pdfTextIndex || buildPdfTextIndex();
+    const clickedIndex = pdfIndexAtPoint(index, span, event.clientX, event.clientY);
+    const heading = headingMappingForSpan(span) || headingMappingAt(clickedIndex);
+    const metadata = metadataMappingForSpan(span);
+    const mapping = !heading && !metadata && sentenceMappingAt(pdfSentenceMappings, clickedIndex);
+    const fallbackRange = !heading && !metadata && !mapping ? index.spanRanges.get(span) : null;
+    const targetRange = heading || metadata || mapping || fallbackRange;
+    if (!targetRange) return clearPdfHoverHighlight();
+    const key = `${heading ? 'heading' : metadata ? 'metadata' : mapping ? 'sentence' : 'text'}:${targetRange.start}:${targetRange.end}`;
+    if (key === pdfHoverKey) return;
+    pdfHoverKey = key;
+    highlightPdfRanges(index, [{ start: targetRange.start, end: targetRange.end }], heading || metadata ? 'outline' : 'sentence', 'hover');
+  });
 }
 
 function handlePdfTextClick(event) {
-  const scopeMenu = document.getElementById('pdf-scope-menu');
-  const editMenu = document.getElementById('pdf-edit-menu');
-  // Toggle feel: if a menu is already open, any click (including on other PDF
-  // text) just dismisses it instead of immediately opening a new one.
-  if (!scopeMenu.classList.contains('hidden') || !editMenu.classList.contains('hidden')) {
-    scopeMenu.classList.add('hidden');
-    editMenu.classList.add('hidden');
-    clearPdfScopeHighlight();
+  if (!currentDocument) return showStatus('Document structure is still loading', 'error');
+  document.getElementById('pdf-edit-menu').classList.add('hidden');
+  const span = event.target.closest('.pdf-text-layer span');
+  const index = pdfTextIndex || buildPdfTextIndex();
+  if (!span) {
+    dismissPdfSelection();
     return;
   }
-  if (!currentDocument) return;
-  const span = event.target.closest('.pdf-text-layer span');
-  const index = buildPdfTextIndex();
-  if (!span) return createPositionalPdfIntent(event, event.currentTarget, null, index);
-  const localOffset = textOffsetAtPoint(span, event.clientX, event.clientY);
-  const spanRange = index.spanRanges.get(span);
-  const candidates = index.positions.map((anchor, position) => ({ anchor, position }))
-    .filter(({ anchor }) => anchor?.span === span);
-  const clickedIndex = candidates.find(({ anchor }) => anchor.offset >= localOffset)?.position
-    ?? candidates.at(-1)?.position ?? spanRange?.start;
+  const clickedIndex = pdfIndexAtPoint(index, span, event.clientX, event.clientY);
   if (!Number.isInteger(clickedIndex)) return;
-  let wordStart = clickedIndex;
-  let wordEnd = clickedIndex + 1;
-  while (wordStart > 0 && /[\p{L}\p{N}'-]/u.test(index.text[wordStart - 1])) wordStart -= 1;
-  while (wordEnd < index.text.length && /[\p{L}\p{N}'-]/u.test(index.text[wordEnd])) wordEnd += 1;
-  const word = index.text.slice(wordStart, wordEnd);
-  const paragraphs = currentDocument.sections.flatMap((section) => section.children || []);
-  const sentenceCandidates = paragraphs.flatMap((paragraph) => (paragraph.children || []).map((sentence) => ({ sentence, paragraph })));
-  const matched = sentenceCandidates.map((item) => ({ ...item, range: occurrenceAt(index, item.sentence.text, clickedIndex) }))
-    .filter((item) => item.range).sort((a, b) => (a.range.end - a.range.start) - (b.range.end - b.range.start))[0] || null;
-  if (!matched) {
-    return createPositionalPdfIntent(event, event.currentTarget, span, index);
+  const heading = headingMappingForSpan(span) || headingMappingAt(clickedIndex);
+  const metadata = metadataMappingForSpan(span);
+  if (heading) {
+    const sourceRange = headingSourceRange(heading.node);
+    pdfAnnotationTarget = sourceRange
+      ? anchoredPdfTarget(index, clickedIndex, heading, heading.node, sourceRange, heading.node.title || heading.node.text)
+      : positionalPdfTarget(event, span, index, clickedIndex);
+    clearPdfHoverHighlight();
+    highlightPdfRanges(index, pdfAnnotationTarget.ranges.sentence, 'outline');
+    openPdfScopeMenu(event);
+    return;
   }
-  const paragraphRanges = paragraphScopeRanges(index, matched.paragraph, matched.sentence, matched.range);
+  if (metadata) {
+    pdfAnnotationTarget = anchoredPdfTarget(
+      index, clickedIndex, metadata,
+      { ...currentDocument, type: 'document' }, metadata.sourceRange, metadata.raw,
+    );
+    clearPdfHoverHighlight();
+    highlightPdfRanges(index, pdfAnnotationTarget.ranges.sentence, 'outline');
+    openPdfScopeMenu(event);
+    return;
+  }
+  const mapping = sentenceMappingAt(pdfSentenceMappings, clickedIndex);
+  if (!mapping) {
+    pdfAnnotationTarget = positionalPdfTarget(event, span, index, clickedIndex);
+    clearPdfHoverHighlight();
+    highlightPdfRanges(index, pdfAnnotationTarget.ranges.sentence, 'sentence');
+    openPdfScopeMenu(event);
+    return;
+  }
+  const wordRange = pdfWordRange(index, clickedIndex);
+  const word = index.text.slice(wordRange.start, wordRange.end);
+  const sentenceRange = { start: mapping.start, end: mapping.end };
+  const paragraphRanges = pdfSentenceMappings
+    .filter((item) => item.paragraph?.id === mapping.paragraph?.id)
+    .map((item) => ({ start: item.start, end: item.end }));
   pdfAnnotationTarget = {
-    scope: 'sentence', word, sentence: matched.sentence, paragraph: matched.paragraph,
-    node: matched.sentence, quote: matched.sentence.text, index,
-    ranges: { word: [{ start: wordStart, end: wordEnd }], sentence: [matched.range], paragraph: paragraphRanges },
+    scope: 'sentence', word, sentence: mapping.sentence, paragraph: mapping.paragraph,
+    node: mapping.sentence, quote: mapping.sentence.text, index,
+    ranges: { word: [wordRange], sentence: [sentenceRange], paragraph: paragraphRanges },
   };
+  clearPdfHoverHighlight();
   highlightPdfRanges(index, pdfAnnotationTarget.ranges.sentence, 'sentence');
   openPdfScopeMenu(event);
 }
@@ -493,15 +769,38 @@ function choosePdfAnnotationScope(scope) {
   if (!pdfAnnotationTarget) return;
   const target = pdfAnnotationTarget.fallback
     ? { node: pdfAnnotationTarget.node, quote: pdfAnnotationTarget.fallbackQuotes[scope] }
-    : scope === 'word'
-    ? { node: pdfAnnotationTarget.sentence || pdfAnnotationTarget.paragraph, quote: pdfAnnotationTarget.word }
-    : scope === 'paragraph'
-      ? { node: pdfAnnotationTarget.paragraph, quote: pdfAnnotationTarget.paragraph?.text }
-      : { node: pdfAnnotationTarget.sentence || pdfAnnotationTarget.paragraph, quote: pdfAnnotationTarget.sentence?.text || pdfAnnotationTarget.paragraph?.text };
+    : pdfAnnotationTarget.generic
+      ? { node: pdfAnnotationTarget.node, quote: pdfAnnotationTarget.scopeQuotes[scope] }
+      : scope === 'word'
+        ? { node: pdfAnnotationTarget.sentence || pdfAnnotationTarget.paragraph, quote: pdfAnnotationTarget.word }
+        : scope === 'paragraph'
+          ? { node: pdfAnnotationTarget.paragraph, quote: pdfAnnotationTarget.paragraph?.text }
+          : { node: pdfAnnotationTarget.sentence || pdfAnnotationTarget.paragraph, quote: pdfAnnotationTarget.sentence?.text || pdfAnnotationTarget.paragraph?.text };
   if (!target.node || !target.quote) return;
   Object.assign(pdfAnnotationTarget, { scope, ...target });
   highlightPdfRanges(pdfAnnotationTarget.index, pdfAnnotationTarget.ranges[scope], scope);
   if (pdfAnnotationTarget.fallback && !pdfAnnotationTarget.ranges[scope].length) showPdfPositionMarker(pdfAnnotationTarget.point);
+}
+
+function locatePdfSentenceInSource() {
+  const node = pdfAnnotationTarget?.sentence || pdfAnnotationTarget?.node || pdfAnnotationTarget?.paragraph;
+  if (!node?.id || !node.sourceRange) {
+    showStatus('This PDF sentence has no reliable LaTeX source location.', 'error');
+    return;
+  }
+  const range = node.sourceRange;
+  const generic = pdfAnnotationTarget?.generic;
+  dismissPdfSelection();
+  if (generic) {
+    setWorkspaceView('source');
+    const start = editor.posFromIndex(range.start);
+    const end = editor.posFromIndex(range.end);
+    editor.setSelection(start, end);
+    editor.scrollIntoView({ from: start, to: end }, 80);
+    editor.focus();
+    return;
+  }
+  selectStructureNode(node.id, { forceSource: true });
 }
 
 function readableSentenceTokens(raw) {
@@ -603,7 +902,10 @@ async function queueModificationIntent(target, comment, scope) {
     }),
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Modification intent could not be saved');
+  if (!res.ok) {
+    const details = Array.isArray(data.details) && data.details.length ? `: ${data.details.join('; ')}` : '';
+    throw new Error((data.error || 'Modification intent could not be saved') + details);
+  }
   await loadModificationIntents();
 }
 
@@ -656,7 +958,10 @@ function pdfIntentTarget() {
       quote = editor.getValue().slice(start, end);
     }
   }
-  return { type: target.scope === 'word' ? 'range' : target.scope, id: node.id, start, end, quote };
+  const type = target.generic
+    ? (node.type === 'document' ? 'document' : 'range')
+    : target.scope === 'word' ? 'range' : target.scope;
+  return { type, id: node.id, start, end, quote };
 }
 
 function modificationIntentPrompt() {
@@ -673,6 +978,13 @@ function combinedTemporaryPrompt() {
   return [modificationIntentPrompt(), document.getElementById('ai-prompt').value.trim()].filter(Boolean).join('\n\nAdditional run instruction:\n');
 }
 
+function modificationIntentLocation(intent) {
+  const task = currentPromptPreview?.manifest?.tasks?.find((item) => item.taskId === intent.id);
+  const location = task?.humanLocation;
+  if (!location) return '';
+  return [location.sectionTitle || (location.section ? `Section ${location.section}` : ''), location.paragraph ? `Paragraph ${location.paragraph}` : '', location.sentence ? `Sentence ${location.sentence}` : ''].filter(Boolean).join(' · ');
+}
+
 function renderModificationIntents() {
   const container = document.getElementById('modification-intent-list');
   if (!container) return;
@@ -685,7 +997,7 @@ function renderModificationIntents() {
     return;
   }
   container.innerHTML = modificationIntents.map((intent) => '<article class="modification-intent" data-intent-id="' + escapeHtml(intent.id) + '">'
-    + '<div class="modification-intent-head"><span class="modification-intent-scope">' + escapeHtml(intent.scope + (intent.positional ? ' · PDF position' : '')) + '</span><button class="modification-intent-remove" type="button">Remove</button></div>'
+    + '<div class="modification-intent-head"><span class="modification-intent-scope">' + escapeHtml([intent.scope + (intent.positional ? ' · PDF position' : ''), modificationIntentLocation(intent)].filter(Boolean).join(' · ')) + '</span><button class="modification-intent-remove" type="button">Remove</button></div>'
     + '<blockquote>' + escapeHtml(shorten(intent.quote, 150)) + '</blockquote>'
     + '<textarea aria-label="Modification instruction">' + escapeHtml(intent.comment) + '</textarea></article>').join('');
   container.querySelectorAll('.modification-intent').forEach((element) => {
@@ -1178,16 +1490,28 @@ async function submitPdfAnnotation() {
   if (!comment) return showStatus(t('status.intentRequired'), 'error');
   const target = pdfIntentTarget();
   if (!target) return showStatus('This PDF selection has no stable source target', 'error');
+  const button = document.getElementById('pdf-edit-submit');
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Saving…';
+  showStatus('Saving modification intent…', '');
   try {
     await queueModificationIntent(target, comment, pdfAnnotationTarget.scope);
-    document.getElementById('pdf-edit-menu').classList.add('hidden');
-    clearPdfScopeHighlight();
+    dismissPdfSelection();
     showStatus(t('status.intentQueued'), 'success');
-  } catch (error) { showStatus(error.message, 'error'); }
+  } catch (error) {
+    showStatus(error.message, 'error');
+  } finally {
+    button.disabled = false;
+    button.textContent = label;
+  }
 }
 
 function resetCompiledPreview() {
   pdfRenderGeneration += 1;
+  lastCompiledSource = null;
+  lastCompiledSentenceSnapshot = [];
+  recentChangedSentenceIds = new Set();
   if (pdfLoadingTask) pdfLoadingTask.destroy().catch(() => {});
   pdfLoadingTask = null;
   document.getElementById('pdf-preview').replaceChildren();
@@ -1210,15 +1534,96 @@ function showStatus(msg, type) {
   el._timer = setTimeout(() => { el.textContent = ''; el.className = ''; }, 3500);
 }
 
+function renderVersionInfo() {
+  if (!appVersionInfo) return;
+  const current = `v${appVersionInfo.currentVersion}`;
+  const latest = `v${appVersionInfo.latestVersion || appVersionInfo.currentVersion}`;
+  document.getElementById('current-version').textContent = current;
+  document.getElementById('version-installed').textContent = current;
+  document.getElementById('version-latest').textContent = latest;
+  const statusButton = document.getElementById('version-status');
+  statusButton.classList.toggle('has-update', appVersionInfo.updateAvailable);
+  document.getElementById('version-update-badge').classList.toggle('hidden', !appVersionInfo.updateAvailable);
+  document.getElementById('version-title').textContent = appVersionInfo.updateAvailable
+    ? t('version.updateReady', { version: latest })
+    : t('version.upToDate');
+  const note = document.getElementById('version-check-note');
+  note.textContent = !appVersionInfo.checked
+    ? t('version.offline')
+    : appVersionInfo.updateAvailable ? t('version.availableNote', { version: latest }) : t('version.currentNote');
+  note.className = `version-check-note ${!appVersionInfo.checked ? 'warning' : 'success'}`;
+  const date = document.getElementById('version-date');
+  date.textContent = appVersionInfo.publishedAt
+    ? new Intl.DateTimeFormat(getLocale(), { year: 'numeric', month: 'short', day: 'numeric' }).format(new Date(appVersionInfo.publishedAt))
+    : '';
+  const notes = document.getElementById('version-notes');
+  const renderList = (id, items, fallbackKey) => {
+    const list = document.getElementById(id);
+    list.replaceChildren();
+    const values = items?.length ? items : [t(fallbackKey)];
+    values.forEach((value) => {
+      const item = document.createElement('li');
+      item.textContent = value;
+      list.appendChild(item);
+    });
+  };
+  if (appVersionInfo.updateAvailable) {
+    renderList('version-highlights', appVersionInfo.highlights, 'version.notesOnRelease');
+    renderList('version-fixes', appVersionInfo.fixes, 'version.noFixesListed');
+    notes.classList.remove('hidden');
+  } else notes.classList.add('hidden');
+  const releaseLink = document.getElementById('version-release-link');
+  releaseLink.classList.toggle('hidden', !appVersionInfo.updateAvailable || !appVersionInfo.releaseUrl);
+  if (appVersionInfo.releaseUrl) releaseLink.href = appVersionInfo.releaseUrl;
+}
+
+async function loadVersionInfo() {
+  try {
+    const response = await fetch('/api/version');
+    if (!response.ok) throw new Error('Version check failed');
+    appVersionInfo = await response.json();
+  } catch {
+    const versionElement = document.getElementById('current-version');
+    const bundledVersion = versionElement.dataset.currentVersion || versionElement.textContent.replace(/^v/, '');
+    appVersionInfo = { currentVersion: bundledVersion, latestVersion: bundledVersion, updateAvailable: false, checked: false };
+  }
+  renderVersionInfo();
+}
+
+function openVersionDialog() {
+  renderVersionInfo();
+  document.getElementById('version-overlay').classList.remove('hidden');
+}
+
+function closeVersionDialog() {
+  document.getElementById('version-overlay').classList.add('hidden');
+}
+
 const AGENT_ACTIVITY_STAGE_ORDER = ['prepare', 'run', 'apply', 'compile'];
 const AGENT_ACTIVITY_STAGE_KEYS = { prepare: 'activity.preparing', run: 'activity.running', apply: 'activity.applying', compile: 'activity.compiling', done: 'activity.complete' };
 
 function renderAgentActivityLog() {
   const system = agentActivitySystemLog.map((item) => `Papergod · ${item}`).join('\n');
   const terminal = agentActivityTerminalLog.trim();
+  const text = [system, terminal && `\n${t('activity.cliOutput')}\n${terminal}`].filter(Boolean).join('\n') || t('activity.waiting');
   const log = document.getElementById('agent-activity-log');
-  log.textContent = [system, terminal && `\n${t('activity.cliOutput')}\n${terminal}`].filter(Boolean).join('\n') || t('activity.waiting');
-  log.scrollTop = log.scrollHeight;
+  log.textContent = text;
+  const detailsLog = document.getElementById('agent-activity-details-log');
+  if (detailsLog) {
+    detailsLog.textContent = text;
+    detailsLog.scrollTop = detailsLog.scrollHeight;
+  }
+}
+
+function openAgentActivityDetails() {
+  renderAgentActivityLog();
+  const meta = document.getElementById('agent-activity-details-meta');
+  meta.textContent = `${document.getElementById('agent-activity-label').textContent} · ${document.getElementById('agent-activity-subtitle').textContent} · ${document.getElementById('agent-activity-elapsed').textContent}`;
+  document.getElementById('agent-activity-details-overlay').classList.remove('hidden');
+}
+
+function closeAgentActivityDetails() {
+  document.getElementById('agent-activity-details-overlay').classList.add('hidden');
 }
 
 async function pollAgentActivity() {
@@ -1415,7 +1820,7 @@ async function postTerminal(path, body = {}) {
   return data;
 }
 
-async function openWorkspaceTerminal() {
+async function openWorkspaceTerminal(initialCommand = '') {
   const overlay = document.getElementById('terminal-overlay');
   const status = document.getElementById('terminal-status');
   overlay.classList.remove('hidden');
@@ -1434,6 +1839,7 @@ async function openWorkspaceTerminal() {
     });
     terminalFitAddon = new terminalApi.FitAddon();
     terminalView.loadAddon(terminalFitAddon);
+    if (terminalApi.WebLinksAddon) terminalView.loadAddon(new terminalApi.WebLinksAddon((_event, uri) => window.open(uri, '_blank', 'noopener')));
     terminalView.open(document.getElementById('terminal-screen'));
     requestAnimationFrame(() => { terminalFitAddon.fit(); postTerminal(`/api/terminal/${encodeURIComponent(session.id)}/resize`, { cols: terminalView.cols, rows: terminalView.rows }).catch(() => {}); terminalView.focus(); });
     terminalView.onData((data) => postTerminal(`/api/terminal/${encodeURIComponent(session.id)}/input`, { data }).catch((error) => { status.textContent = error.message; }));
@@ -1442,6 +1848,11 @@ async function openWorkspaceTerminal() {
       const payload = JSON.parse(event.data);
       if (payload.history) terminalView?.write(payload.history);
       status.textContent = t('terminal.connected');
+      if (initialCommand) {
+        const command = initialCommand;
+        initialCommand = '';
+        postTerminal(`/api/terminal/${encodeURIComponent(session.id)}/input`, { data: `${command}\n` }).catch((error) => { status.textContent = error.message; });
+      }
     });
     terminalEvents.addEventListener('output', event => terminalView?.write(JSON.parse(event.data).data || ''));
     terminalEvents.addEventListener('exit', event => {
@@ -1460,6 +1871,13 @@ async function openWorkspaceTerminal() {
   } catch (error) {
     status.textContent = error.message || t('terminal.failed');
   }
+}
+
+async function openAgentLoginTerminal() {
+  const profile = selectedAgentProfile();
+  if (profile?.id !== 'codex') return;
+  document.getElementById('agent-config-overlay').classList.add('hidden');
+  await openWorkspaceTerminal('codex login');
 }
 
 async function loadWorkspaces() {
@@ -1668,17 +2086,27 @@ function fillAgentConfigForm() {
   if (!profile) return;
   document.getElementById('agent-config-command').value = profile.command || '';
   document.getElementById('agent-config-model').value = profile.model || '';
+  document.getElementById('agent-config-reasoning').value = profile.reasoningEffort || '';
   document.getElementById('agent-config-args').value = (profile.args || []).join('\n');
   renderAgentModelDropdown(profile.models || [], profile.model || '');
   const activeModel = profile.model
     ? ` · model: ${profile.model}`
     : (profile.models?.length ? ' · model: CLI default (choose below)' : '');
+  const capabilityNote = profile.id === 'mock' ? '' : ` · ${profile.compatible === false ? 'CLI incompatible' : 'structured output ' + (profile.capabilities?.structuredOutput ? 'ready' : 'unverified')}`;
+  const freshnessNote = profile.modelCatalog?.source ? ` · models: ${profile.modelCatalog.source}${profile.modelCatalog.stale ? ' (stale)' : ''}` : '';
+  const healthNote = profile.health?.available === false ? ` · cooling down (${Math.ceil(profile.health.retryAfterMs / 1000)}s)` : '';
+  const warningNote = profile.warnings?.length ? ` · warning: ${profile.warnings[0]}` : '';
+  const liveNote = profile.liveCheck ? ` · live test ${profile.liveCheck.ok ? `passed${profile.liveCheck.latencyMs ? ` in ${profile.liveCheck.latencyMs} ms` : ''}` : `failed${profile.liveCheck.code ? ` (${profile.liveCheck.code})` : ''}`}` : ' · live subscription not tested';
   const note = profile.id === 'mock'
     ? t('agent.mockNote')
-    : `${profile.available ? t('agent.cliDetected') : t('agent.cliMissing')} ${profile.authStatus || t('agent.authUnchecked')}${activeModel}${profile.id === currentProvider ? ' ' + t('agent.currentUse') : ' ' + t('agent.saveActivate')}`;
-  setAgentConfigNote(note, profile.id === 'mock' || profile.available && profile.authenticated ? 'success' : profile.available ? 'warning' : 'error');
+    : `${profile.available ? t('agent.cliDetected') : t('agent.cliMissing')} ${profile.authStatus || t('agent.authUnchecked')}${liveNote}${activeModel}${capabilityNote}${freshnessNote}${healthNote}${warningNote}${profile.id === currentProvider ? ' ' + t('agent.currentUse') : ' ' + t('agent.saveActivate')}`;
+  setAgentConfigNote(note, profile.liveCheck?.ok === false ? 'error' : profile.id === 'mock' || profile.available && profile.authenticated && profile.liveCheck?.ok ? 'success' : profile.available ? 'warning' : 'error');
+  const loginButton = document.getElementById('agent-config-login');
+  const canLoginHere = profile.id === 'codex' && profile.available && (!profile.authenticated || profile.liveCheck?.code === 'AGENT_AUTH_REQUIRED');
+  loginButton.classList.toggle('hidden', !canLoginHere);
+  loginButton.textContent = 'Sign in to Codex';
   document.getElementById('agent-config-probe').textContent = profile.id === 'mock' ? t('agent.checkMock') : t('agent.checkSetup', { name: profile.label });
-  document.getElementById('agent-config-save').textContent = profile.id === currentProvider ? t('agent.saveSettings') : t('agent.use', { name: profile.label });
+  document.getElementById('agent-config-save').textContent = profile.id === currentProvider ? 'Use this Agent' : t('agent.use', { name: profile.label });
 }
 
 function agentModelFilterValue() {
@@ -1721,20 +2149,24 @@ function renderAgentModelDropdown(models, selectedId = '') {
 function renderAgentConfiguration() {
   const current = agentProviders.find((item) => item.id === currentProvider);
   document.getElementById('agent-config-summary').textContent = current
-    ? `${current.label} · ${current.available ? current.authenticated ? t('agent.ready') : t('agent.signin') : t('agent.cliMissing')}`
+    ? `${current.label} · ${current.liveCheck?.ok === false ? 'live subscription test failed' : current.available ? current.authenticated ? t('agent.ready') : t('agent.signin') : t('agent.cliMissing')}`
     : currentProvider;
   const list = document.getElementById('agent-provider-list');
   const select = document.getElementById('agent-config-provider');
   const selected = agentProviders.some((item) => item.id === select.value) ? select.value : currentProvider;
   list.innerHTML = agentProviders.map((item) => {
-    const state = item.available && item.authenticated ? 'available' : item.available ? 'attention' : '';
-    const stateText = item.available && item.authenticated ? t('agent.ready') : item.available ? t('agent.signin') : t('agent.notInstalled');
+    const liveFailed = item.liveCheck?.ok === false;
+    const livePassed = item.liveCheck?.ok === true;
+    const state = liveFailed ? 'attention' : item.available && item.authenticated ? 'available' : item.available ? 'attention' : '';
+    const stateText = liveFailed ? 'LIVE TEST FAILED' : livePassed ? 'LIVE TEST PASSED' : item.available && item.authenticated ? t('agent.ready') : item.available ? t('agent.signin') : t('agent.notInstalled');
+    const providerKind = item.id === 'mock' ? 'Built-in local test Agent' : 'Local subscription CLI';
     return '<button type="button" class="agent-provider-card ' + (item.id === selected ? 'selected ' : '') + (item.id === currentProvider ? 'active' : '')
       + '" data-provider="' + escapeHtml(item.id) + '" aria-pressed="' + String(item.id === selected) + '"><span class="provider-card-head"><strong>'
       + escapeHtml(item.label) + '</strong><span class="' + state + '">' + stateText + '</span></span><span class="provider-card-details">'
-      + escapeHtml(item.adapter) + ' · ' + escapeHtml((item.capabilities || []).join(', ') || t('agent.future'))
-      + (item.version ? '<br>' + escapeHtml(item.version) : '')
-      + (item.authStatus ? '<br>' + escapeHtml(item.authStatus) : '') + '</span>'
+      + escapeHtml(providerKind)
+      + (item.version ? ' · ' + escapeHtml(item.version) : '')
+      + (item.authStatus ? '<br>' + escapeHtml(item.authStatus) : '')
+      + (item.liveCheck ? '<br>Live test: ' + escapeHtml(item.liveCheck.ok ? `passed${item.liveCheck.latencyMs ? ` · ${item.liveCheck.latencyMs} ms` : ''}` : `failed${item.liveCheck.code ? ` · ${item.liveCheck.code}` : ''}${item.liveCheck.error ? ` · ${item.liveCheck.error}` : ''}`) + (item.liveCheck.checkedAt ? '<br>' + escapeHtml(new Date(item.liveCheck.checkedAt).toLocaleString()) : '') : '') + '</span>'
       + (item.id === currentProvider ? '<span class="provider-use">' + escapeHtml(t('agent.currently')) + '</span>' : item.available ? '<span class="provider-action">' + escapeHtml(t('agent.clickUse')) + '</span>' : '') + '</button>';
   }).join('');
   select.innerHTML = agentProviders.map((item) => '<option value="' + escapeHtml(item.id) + '">' + escapeHtml(item.label) + '</option>').join('');
@@ -1747,6 +2179,23 @@ function selectAgentProvider(id) {
   document.getElementById('agent-config-provider').value = id;
   renderAgentConfiguration();
   document.getElementById('agent-config-form').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
+function reflectAgentRunConnection({ provider: providerId, ok, code = '', error = '' }) {
+  const profile = agentProviders.find((item) => item.id === providerId);
+  if (profile) {
+    profile.liveCheck = { ok, status: ok ? 'complete' : 'failed', code, error, checkedAt: new Date().toISOString() };
+    if (ok) {
+      profile.authenticated = true;
+      profile.authStatus = 'Last real Agent request passed';
+    } else if (code === 'AGENT_AUTH_REQUIRED') {
+      profile.authenticated = false;
+      profile.authStatus = 'Authentication failed · sign in again';
+    }
+    renderQuickAgentSelector();
+    renderAgentConfiguration();
+  }
+  void loadAgentConfiguration();
 }
 
 async function loadAgentConfiguration() {
@@ -1771,6 +2220,7 @@ async function saveAgentConfiguration(event) {
     id: profile.id,
     command: document.getElementById('agent-config-command').value.trim(),
     model: document.getElementById('agent-config-model').value.trim(),
+    reasoningEffort: document.getElementById('agent-config-reasoning').value,
     args: document.getElementById('agent-config-args').value.split('\n').map((item) => item.trim()).filter(Boolean),
     activate: true,
   };
@@ -1789,6 +2239,20 @@ async function saveAgentConfiguration(event) {
   finally { button.disabled = false; fillAgentConfigForm(); }
 }
 
+async function waitForAgentProbe(testId) {
+  const deadline = Date.now() + 65_000;
+  while (Date.now() < deadline) {
+    const res = await fetch(`/api/agents/probe/${encodeURIComponent(testId)}`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Live subscription test could not be read');
+    const test = data.test;
+    if (['complete', 'failed', 'cancelled'].includes(test.status)) return test;
+    setAgentConfigNote(`Live subscription test ${test.status}…`, 'neutral');
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error('Live subscription test timed out');
+}
+
 async function probeAgentConfiguration() {
   const profile = selectedAgentProfile();
   if (!profile) return;
@@ -1803,20 +2267,25 @@ async function probeAgentConfiguration() {
       command: document.getElementById('agent-config-command').value.trim(),
       model: document.getElementById('agent-config-model').value.trim(),
       args: document.getElementById('agent-config-args').value.split('\n').map((item) => item.trim()).filter(Boolean),
-      live: false,
+      live: true,
     };
     const res = await fetch('/api/agents/probe', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Agent connection check failed');
-    Object.assign(profile, data.agent || {});
+    if (!res.ok) throw new Error(data.error || 'Agent subscription test failed to start');
+    const test = await waitForAgentProbe(data.test.id);
+    if (test.agent) Object.assign(profile, test.agent);
+    profile.liveCheck = { ...(test.liveTest || {}), status: test.status, checkedAt: test.finishedAt };
+    if (!test.liveTest?.ok) {
+      profile.authenticated = test.liveTest?.code === 'AGENT_AUTH_REQUIRED' ? false : profile.authenticated;
+      profile.authStatus = test.liveTest?.code === 'AGENT_AUTH_REQUIRED' ? 'Live subscription test failed · sign in again' : (profile.authStatus || 'Live test failed');
+    }
     renderAgentConfiguration();
+    await loadAgentConfiguration();
     const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
-    const message = profile.available
-      ? `Setup check finished in ${seconds}s · ${profile.version || 'CLI detected'} · ${profile.authStatus || 'Authentication not confirmed'}`
-      : `Setup check finished in ${seconds}s · ${profile.error || 'CLI not detected'}`;
-    const ready = profile.available && (profile.authenticated || profile.id === 'pi');
-    setAgentConfigNote(message, ready ? 'success' : profile.available ? 'warning' : 'error');
-    showStatus(ready ? `${profile.label} setup is ready` : `${profile.label} setup needs attention`, ready ? 'success' : 'error');
+    if (!test.liveTest?.ok) throw new Error(`${test.liveTest?.error || 'Live subscription test failed'}${test.liveTest?.code ? ` (${test.liveTest.code})` : ''}`);
+    const message = `Live subscription test passed in ${seconds}s · ${test.agent?.version || profile.version || 'CLI detected'} · structured response validated`;
+    setAgentConfigNote(message, 'success');
+    showStatus(`${profile.label} subscription works`, 'success');
   } catch (error) {
     setAgentConfigNote(error.message, 'error');
     showStatus(error.message, 'error');
@@ -1843,6 +2312,8 @@ async function refreshPromptContextPreview() {
         nodeId: selectedId, documentId: currentDocument.id,
         content: selectedId ? '' : editor.getValue(),
         temporaryPrompt: combinedTemporaryPrompt(),
+        additionalRequirements: document.getElementById('ai-prompt').value.trim(),
+        intentIds: modificationIntents.map((intent) => intent.id),
         resourceIds: [...selectedResourceIds],
         citekeys: [...selectedReferenceCitekeys],
       }),
@@ -1850,10 +2321,12 @@ async function refreshPromptContextPreview() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Prompt preview failed');
     currentPromptPreview = data;
-    document.getElementById('prompt-context-meta').textContent = `${data.layers.length} context layers · ${data.characterCount.toLocaleString()} chars`;
-    document.getElementById('prompt-context-excerpt').textContent = data.contextPrompt;
-    document.getElementById('prompt-preview-meta').textContent = `${data.provider} · ${data.scope} · ${data.characterCount.toLocaleString()} characters`;
-    document.getElementById('prompt-preview-content').textContent = data.assembledPrompt;
+    if (modificationIntents.length) renderModificationIntents();
+    document.getElementById('prompt-context-meta').textContent = `${data.layers.length} context layers · ${data.characterCount.toLocaleString()} chars · ~${(data.tokenEstimate || 0).toLocaleString()} tokens · ${(data.budget?.remainingCharacters || 0).toLocaleString()} chars remaining`;
+    document.getElementById('prompt-context-excerpt').textContent = data.layers.map((layer) => `${layer.name}: ${layer.characters.toLocaleString()} chars${layer.path ? ` · ${typeof layer.path === 'string' ? layer.path : JSON.stringify(layer.path)}` : ''}`).join('\n');
+    document.getElementById('prompt-preview-meta').textContent = `${data.provider} · ${data.scope} · ${data.characterCount.toLocaleString()} characters · ~${(data.tokenEstimate || 0).toLocaleString()} tokens · ${data.payload?.schemaTransport || 'unknown'} schema`;
+    document.getElementById('prompt-preview-content').textContent = data.payload?.text || data.assembledPrompt;
+    document.getElementById('prompt-preview-manifest').textContent = data.manifest ? JSON.stringify(data.manifest, null, 2) : 'Legacy prompt without a manifest.';
   } catch (error) {
     document.getElementById('prompt-context-meta').textContent = error.message;
   }
@@ -2772,6 +3245,7 @@ async function verifyRevisionWorkflow(revisionId) {
     if (!res.ok) throw new Error(reviewApiError(data, 'Revision verification failed'));
     await loadSelfReviseWorkspace();
     if (data.verification.compile.ok) {
+      recordSuccessfulCompile(editor.getValue());
       showCompiledPdf('/workspace/' + currentFile.replace(/\.tex$/, '.pdf'));
     }
     showStatus(data.verification.complete ? 'Revision is compiled and all opinions are closed' : 'Verification finished with remaining work', data.verification.complete ? 'success' : 'error');
@@ -3061,31 +3535,16 @@ function renderOutline() {
     container.innerHTML = '<div class="outline-empty">No structure available</div>';
     return;
   }
-  const sentenceHtml = (sentence, index) =>
-    '<button class="outline-node sentence" data-node-id="' + escapeHtml(sentence.id) + '" title="' + escapeHtml(sentence.intent || '') + '">'
-    + (index + 1) + '. ' + escapeHtml(shorten(sentence.text, 45)) + '</button>';
-  const paragraphHtml = (paragraph, index) =>
-    '<details class="outline-paragraph"><summary class="outline-node" data-node-id="' + escapeHtml(paragraph.id) + '">¶ '
-    + (index + 1) + ' · ' + escapeHtml(shorten(paragraph.summary || paragraph.text, 38))
-    + '<button class="outline-analyze" type="button" data-analysis-node="' + escapeHtml(paragraph.id) + '" title="Analyze paragraph rhythm" aria-label="Analyze paragraph">📊</button></summary>'
-    + '<div class="outline-sentences">' + paragraph.children.map(sentenceHtml).join('') + '</div></details>';
   const sectionHtml = (section) =>
-    '<details open class="outline-section level-' + section.level + '"><summary class="outline-node" data-node-id="' + escapeHtml(section.id) + '">'
-    + escapeHtml(section.title) + '</summary>' + section.children.map(paragraphHtml).join('') + '</details>';
-  container.innerHTML = '<button class="outline-document" data-node-id="' + escapeHtml(currentDocument.id) + '">'
-    + escapeHtml(currentDocument.title || currentDocument.file) + '</button>'
+    '<button type="button" class="outline-node outline-heading-node level-' + Math.min(section.level || 1, 6)
+    + '" data-node-id="' + escapeHtml(section.id) + '" title="Jump to ' + escapeHtml(section.title) + ' in PDF">'
+    + escapeHtml(section.title) + '</button>';
+  container.innerHTML = '<button type="button" class="outline-document" data-node-id="' + escapeHtml(currentDocument.id)
+    + '" title="Jump to document title in PDF">' + escapeHtml(currentDocument.title || currentDocument.file) + '</button>'
     + currentDocument.sections.map(sectionHtml).join('');
   container.querySelectorAll('[data-node-id]').forEach(element => {
-    element.addEventListener('click', (event) => {
-      event.stopPropagation();
-      selectStructureNode(element.dataset.nodeId);
-    });
-  });
-  container.querySelectorAll('[data-analysis-node]').forEach(element => {
-    element.addEventListener('click', (event) => {
-      event.stopPropagation();
-      event.preventDefault();
-      openParagraphAnalysis(element.dataset.analysisNode);
+    element.addEventListener('click', () => {
+      selectStructureNode(element.dataset.nodeId, { forcePreview: true });
     });
   });
   updateOutlineSelection();
@@ -3133,10 +3592,19 @@ function scrollPdfToRange(index, range) {
 function focusPdfNode(node) {
   const preview = document.getElementById('pdf-preview');
   if (!preview || !preview.querySelector('.pdf-page')) return false;
+  const index = pdfTextIndex || buildPdfTextIndex();
+  if (!index.text) return false;
+  const headingRange = (node.type === 'document' || node.type === 'section')
+    ? pdfHeadingMappings.find((mapping) => mapping.node.id === node.id)
+    : null;
+  if (headingRange) {
+    clearPdfScopeHighlight();
+    highlightPdfRanges(index, [headingRange], 'outline');
+    scrollPdfToRange(index, headingRange);
+    return true;
+  }
   const targetText = pdfNodeTargetText(node);
   if (!targetText) return false;
-  const index = buildPdfTextIndex();
-  if (!index.text) return false;
   const ranges = matchingOccurrences(index, targetText);
   if (!ranges.length) return false;
   clearPdfScopeHighlight();
@@ -3145,7 +3613,26 @@ function focusPdfNode(node) {
   return true;
 }
 
-function selectStructureNode(nodeId, { focus = true } = {}) {
+function headingSourceRange(node) {
+  const source = editor?.getValue?.() || '';
+  if (!source || !node) return null;
+  if (node.type === 'document') {
+    const commandStart = source.search(/\\title\s*\{/);
+    if (commandStart < 0 || !node.title) return null;
+    const titleStart = source.indexOf(node.title, commandStart);
+    return titleStart < 0 ? null : { start: titleStart, end: titleStart + node.title.length };
+  }
+  if (node.type !== 'section' || !node.sourceRange) return null;
+  const headingStart = node.sourceRange.start;
+  const headingEnd = node.sourceRange.contentStart || node.sourceRange.end;
+  const titleOffset = source.slice(headingStart, headingEnd).indexOf(node.title || '');
+  return titleOffset < 0 ? null : {
+    start: headingStart + titleOffset,
+    end: headingStart + titleOffset + node.title.length,
+  };
+}
+
+function selectStructureNode(nodeId, { focus = true, editHeading = false, forceSource = false, forcePreview = false } = {}) {
   if (!currentDocument) return;
   const node = nodeId === currentDocument.id ? { ...currentDocument, type: 'document' } : findNode(currentDocument.sections, nodeId);
   if (!node) return;
@@ -3161,17 +3648,30 @@ function selectStructureNode(nodeId, { focus = true } = {}) {
     : 'Add a one-time ' + node.type + ' goal or constraint (optional)…';
   updateOutlineSelection();
   schedulePromptContextPreview();
-  if (focus && node.sourceRange) {
-    const start = editor.posFromIndex(node.sourceRange.start);
-    const end = editor.posFromIndex(node.sourceRange.end);
+  const editRange = editHeading ? headingSourceRange(node) : node.sourceRange;
+  if (focus && forceSource && workspaceView !== 'source') setWorkspaceView('source');
+  if (focus && forcePreview) {
+    const previewReady = !document.getElementById('preview-view-btn').disabled
+      && document.querySelector('#pdf-preview .pdf-page');
+    if (!previewReady) {
+      showStatus('Compile the PDF before using outline navigation.', '');
+      return;
+    }
+    if (workspaceView !== 'preview') setWorkspaceView('preview');
+  }
+  if (focus && editRange && !forcePreview) {
+    const start = editor.posFromIndex(editRange.start);
+    const end = editor.posFromIndex(editRange.end);
     editor.setSelection(start, end);
     if (workspaceView === 'source') {
-      editor.scrollIntoView({ from: start, to: end }, 80);
-      editor.focus();
+      requestAnimationFrame(() => {
+        editor.scrollIntoView({ from: start, to: end }, 80);
+        editor.focus();
+      });
     }
   }
-  if (focus && node.type !== 'document' && !focusPdfNode(node) && workspaceView === 'preview') {
-    showStatus('Could not locate this paragraph in the PDF. Recompile to refresh the text layer.', '');
+  if (focus && !forceSource && !focusPdfNode(node) && (workspaceView === 'preview' || forcePreview)) {
+    showStatus('Could not locate this content in the PDF. Recompile to refresh the text layer.', '');
   }
 }
 
@@ -3186,6 +3686,7 @@ async function syncStructure({ silent = false } = {}) {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Structure sync failed');
     currentDocument = data.document;
+    rebuildPdfSentenceMappings();
     renderOutline();
     const nextId = selectedId && (selectedId === currentDocument.id || findNode(currentDocument.sections, selectedId))
       ? selectedId : currentDocument.id;
@@ -3194,6 +3695,7 @@ async function syncStructure({ silent = false } = {}) {
     return true;
   } catch (error) {
     currentDocument = null;
+    pdfSentenceMappings = [];
     selectedNode = null;
     renderOutline();
     if (!silent) showStatus(error.message, 'error');
@@ -3223,6 +3725,7 @@ async function saveContext() {
     if (!res.ok) throw new Error(data.error || 'Context save failed');
     if (data.document) {
       currentDocument = data.document;
+      rebuildPdfSentenceMappings();
       selectedNode = { ...currentDocument, type: 'document' };
     } else {
       Object.assign(selectedNode, data.node);
@@ -3247,8 +3750,9 @@ async function compileFile({ silent = false } = {}) {
     });
     const data = await res.json();
     if (data.ok) {
+      const changedCount = recordSuccessfulCompile(editor.getValue());
       showCompiledPdf(data.pdf);
-      if (!silent) showStatus('Compiled (' + data.engine + ')', 'success');
+      if (!silent) showStatus('Compiled (' + data.engine + ')' + (changedCount ? ` · ${changedCount} changed sentence${changedCount === 1 ? '' : 's'} highlighted` : ''), 'success');
       return true;
     } else {
       showStatus('Compile error', 'error');
@@ -3262,11 +3766,12 @@ async function compileFile({ silent = false } = {}) {
 }
 
 async function invokeAgent() {
+  if (!await saveFile()) return showStatus('Save the paper before preparing the Agent manifest.', 'error');
+  await syncStructure({ silent: true });
   await refreshPromptContextPreview();
   if (!currentPromptPreview) return showStatus('Prompt context is not ready', 'error');
-  const temporaryCharacters = combinedTemporaryPrompt().length;
-  const batchSummary = modificationIntents.length ? ` · ${modificationIntents.length} queued modification intent${modificationIntents.length === 1 ? '' : 's'}` : '';
-  document.getElementById('invoke-confirm-summary').textContent = `${currentProvider} · ${currentPromptPreview.scope}${batchSummary} · ${currentPromptPreview.contextPrompt.length.toLocaleString()} context characters + ${temporaryCharacters.toLocaleString()} instruction characters`;
+  const batchSummary = modificationIntents.length ? ` · ${modificationIntents.length} atomic modification task${modificationIntents.length === 1 ? '' : 's'}` : '';
+  document.getElementById('invoke-confirm-summary').textContent = `${currentProvider} · ${currentPromptPreview.scope}${batchSummary} · ${currentPromptPreview.characterCount.toLocaleString()} actual CLI characters · ~${(currentPromptPreview.tokenEstimate || 0).toLocaleString()} tokens · ${(currentPromptPreview.payloadRoutes?.length || 1)} confirmed route payload${(currentPromptPreview.payloadRoutes?.length || 1) === 1 ? '' : 's'} · manifest ${currentPromptPreview.manifestPath || 'legacy'}`;
   document.getElementById('invoke-confirm-overlay').classList.remove('hidden');
 }
 
@@ -3288,12 +3793,28 @@ async function askAgent(composedPrompt = null, isComposed = Boolean(composedProm
       headers: { 'Content-Type': 'application/json' },
       signal: agentActivityController.signal,
       body: JSON.stringify(selectedId
-        ? { nodeId: selectedId, prompt, promptIsComposed: isComposed, resourceIds: [...selectedResourceIds], citekeys: [...selectedReferenceCitekeys], activityId: agentActivityId }
-        : { documentId: currentDocument?.id, content, prompt, promptIsComposed: isComposed, resourceIds: [...selectedResourceIds], citekeys: [...selectedReferenceCitekeys], activityId: agentActivityId }),
+        ? { nodeId: selectedId, prompt, promptIsComposed: isComposed, resourceIds: [...selectedResourceIds], citekeys: [...selectedReferenceCitekeys], intentIds, additionalRequirements: document.getElementById('ai-prompt').value.trim(), manifestPath: currentPromptPreview?.manifestPath, payloadHash: currentPromptPreview?.payload?.hash, payloadRouteHashes: currentPromptPreview?.payloadRoutes?.map((route) => ({ provider: route.provider, model: route.model || '', hash: route.hash })), activityId: agentActivityId }
+        : { documentId: currentDocument?.id, content, prompt, promptIsComposed: isComposed, resourceIds: [...selectedResourceIds], citekeys: [...selectedReferenceCitekeys], intentIds, additionalRequirements: document.getElementById('ai-prompt').value.trim(), manifestPath: currentPromptPreview?.manifestPath, payloadHash: currentPromptPreview?.payload?.hash, payloadRouteHashes: currentPromptPreview?.payloadRoutes?.map((route) => ({ provider: route.provider, model: route.model || '', hash: route.hash })), activityId: agentActivityId }),
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Agent request failed');
+    if (!res.ok) {
+      const requestError = new Error(data.error || 'Agent request failed');
+      requestError.code = data.code || '';
+      throw requestError;
+    }
+    reflectAgentRunConnection({ provider: data.effectiveProvider || data.agentMeta?.provider || currentProvider, ok: true });
     suggestions = data.suggestions || [];
+    const unresolvedTasks = Array.isArray(data.unresolvedTasks) ? data.unresolvedTasks : [];
+    if (unresolvedTasks.length) {
+      agentActivitySystemLog.push(`Unresolved manifest tasks:\n${unresolvedTasks.map((item) => `${item.taskId}: ${item.reason}`).join('\n')}`);
+      renderAgentActivityLog();
+    }
+    if (data.agentMeta) {
+      const routes = (data.agentMeta.routes || []).map((route) => `${route.provider}${route.model ? `/${route.model}` : ''}: ${route.status}${route.code ? ` (${route.code})` : ''}`).join(' → ');
+      const attempts = (data.agentMeta.attempts || []).map((attempt) => `#${attempt.attempt} ${attempt.status}${attempt.code ? ` (${attempt.code})` : ''}`).join(', ');
+      agentActivitySystemLog.push(`Effective Agent: ${data.effectiveProvider || data.agentMeta.provider}${data.agentMeta.reasoningEffort ? ` · effort ${data.agentMeta.reasoningEffort}` : ''}${routes ? `\nRoutes: ${routes}` : ''}${attempts ? `\nAttempts: ${attempts}` : ''}`);
+      renderAgentActivityLog();
+    }
     lastLibraryUsage = data.library || null;
     renderLibraryUsage();
     document.getElementById('ai-prompt').value = '';
@@ -3313,6 +3834,7 @@ async function askAgent(composedPrompt = null, isComposed = Boolean(composedProm
     });
     const applied = await applyResponse.json();
     if (!applyResponse.ok) throw new Error(applied.error || 'AI revision could not be applied');
+    const appliedIntentIds = [...new Set((applied.revision?.changes || []).map((change) => change.taskId).filter((taskId) => intentIds.includes(taskId)))];
     editor.setValue(applied.content);
     suggestions = [];
     renderSuggestions();
@@ -3321,14 +3843,16 @@ async function askAgent(composedPrompt = null, isComposed = Boolean(composedProm
     const compiled = await compileFile({ silent: true });
     const appliedCount = applied.revision?.changes?.filter((item) => item.status === 'applied').length || 0;
     let intentResolutionNote = '';
-    if (intentIds.length) {
-      try { await resolveModificationIntents(intentIds); }
+    if (appliedIntentIds.length) {
+      try { await resolveModificationIntents(appliedIntentIds); }
       catch (error) { intentResolutionNote = ` ${error.message}`; }
     }
-    finishAgentActivity(`${appliedCount} change${appliedCount === 1 ? '' : 's'} applied${compiled ? ' and the PDF was rebuilt' : '; PDF compilation needs attention'}.${intentResolutionNote}`, { revisionId: applied.revision?.id || null, intentIds });
+    if (unresolvedTasks.length) intentResolutionNote += ` ${unresolvedTasks.length} task${unresolvedTasks.length === 1 ? '' : 's'} remain open.`;
+    finishAgentActivity(`${appliedCount} change${appliedCount === 1 ? '' : 's'} applied${compiled ? ' and the PDF was rebuilt' : '; PDF compilation needs attention'}.${intentResolutionNote}`, { revisionId: applied.revision?.id || null, intentIds: appliedIntentIds, unresolvedTaskIds: unresolvedTasks.map((item) => item.taskId) });
     await loadRecentChangeHistory({ silent: true });
     showStatus(t('history.saved', { count: appliedCount }), 'success');
   } catch (error) {
+    if (error.code === 'AGENT_AUTH_REQUIRED') reflectAgentRunConnection({ provider: currentProvider, ok: false, code: error.code, error: error.message });
     const message = error.name === 'AbortError' ? 'AI task cancelled.' : error.message || 'Agent request failed';
     finishAgentActivity(message, { error: true });
     showStatus(message, 'error');
@@ -4463,6 +4987,7 @@ function init() {
     if (changeHistoryEntries.length) { renderChangeHistoryList(); renderChangeHistoryDetail(); }
     if (agentActivityStage) setAgentActivityStage(agentActivityStage);
     else renderAgentActivityLog();
+    renderVersionInfo();
     if (orchestrations.length) {
       renderOrchestrationCanvas();
       renderOrchestrationInspector();
@@ -4480,6 +5005,9 @@ function init() {
   };
   document.getElementById('navigator-outline-tab').addEventListener('click', () => setNavigatorTab('outline'));
   document.getElementById('navigator-tools-tab').addEventListener('click', () => setNavigatorTab('tools'));
+  document.getElementById('version-status').addEventListener('click', openVersionDialog);
+  document.getElementById('version-close').addEventListener('click', closeVersionDialog);
+  document.getElementById('version-overlay').addEventListener('click', event => { if (event.target.id === 'version-overlay') closeVersionDialog(); });
   document.getElementById('tool-show-source').addEventListener('click', () => setWorkspaceView('source'));
   document.getElementById('tool-workspaces').addEventListener('click', openWorkspaceManager);
   document.getElementById('tool-references').addEventListener('click', openReferences);
@@ -4698,10 +5226,11 @@ function init() {
       showStatus('Paper folder opened', 'success');
     } catch (error) { showStatus(error.message, 'error'); }
   });
-  document.getElementById('agent-activity-toggle').addEventListener('click', () => {
-    const panel = document.getElementById('agent-activity-panel');
-    const expanded = panel.classList.toggle('hidden') === false;
-    document.getElementById('agent-activity-toggle').setAttribute('aria-expanded', String(expanded));
+  document.getElementById('agent-activity-toggle').addEventListener('click', openAgentActivityDetails);
+  document.getElementById('agent-activity-details').addEventListener('click', openAgentActivityDetails);
+  document.getElementById('agent-activity-details-close').addEventListener('click', closeAgentActivityDetails);
+  document.getElementById('agent-activity-details-overlay').addEventListener('click', event => {
+    if (event.target.id === 'agent-activity-details-overlay') closeAgentActivityDetails();
   });
   document.getElementById('agent-activity-cancel').addEventListener('click', () => agentActivityController?.abort());
   document.getElementById('agent-activity-undo').addEventListener('click', undoLastAiRevision);
@@ -4712,6 +5241,10 @@ function init() {
     closePdfScopeMenu();
     openPdfEditMenu();
   }));
+  document.getElementById('pdf-locate-source').addEventListener('click', (event) => {
+    event.stopPropagation();
+    locatePdfSentenceInSource();
+  });
   document.getElementById('pdf-sentence-reader-open').addEventListener('click', (event) => {
     event.stopPropagation();
     closePdfScopeMenu();
@@ -4726,14 +5259,9 @@ function init() {
     if (event.target.closest('.pdf-text-layer')) return; // PDF text click opens a new scope menu
     if (scopeOpen && event.target.closest('#pdf-scope-menu')) return;
     if (editOpen && event.target.closest('#pdf-edit-menu')) return;
-    scopeMenu.classList.add('hidden');
-    editMenu.classList.add('hidden');
-    clearPdfScopeHighlight();
+    dismissPdfSelection();
   });
-  document.getElementById('pdf-edit-cancel').addEventListener('click', () => {
-    document.getElementById('pdf-edit-menu').classList.add('hidden');
-    clearPdfScopeHighlight();
-  });
+  document.getElementById('pdf-edit-cancel').addEventListener('click', dismissPdfSelection);
   document.getElementById('pdf-edit-submit').addEventListener('click', submitPdfAnnotation);
   document.getElementById('sentence-reader-close').addEventListener('click', closeSentenceReader);
   document.getElementById('sentence-reader-overlay').addEventListener('click', event => {
@@ -4778,6 +5306,7 @@ function init() {
   });
   document.getElementById('agent-config-provider').addEventListener('change', event => selectAgentProvider(event.target.value));
   document.getElementById('agent-config-form').addEventListener('submit', saveAgentConfiguration);
+  document.getElementById('agent-config-login').addEventListener('click', openAgentLoginTerminal);
   document.getElementById('agent-config-probe').addEventListener('click', probeAgentConfiguration);
   const modelInput = document.getElementById('agent-config-model');
   const modelDropdown = document.getElementById('agent-model-dropdown');
@@ -4923,6 +5452,7 @@ function init() {
       document.getElementById('change-history-overlay').classList.add('hidden');
       document.getElementById('workspace-manager-overlay').classList.add('hidden');
       document.getElementById('references-overlay').classList.add('hidden');
+      closeVersionDialog();
       closeOrchestration();
       closeParagraphAnalysis();
       closeTerminalOverlay();
@@ -4939,6 +5469,7 @@ function init() {
   document.getElementById('ai-prompt').addEventListener('input', schedulePromptContextPreview);
 
   loadEngineStatus().then(() => loadFile(currentFile));
+  loadVersionInfo();
   loadConfig();
   loadAgentConfiguration();
   updateLibrarySelectionStatus();

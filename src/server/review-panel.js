@@ -5,6 +5,7 @@ import { loadProject, updateProject } from './project-store.js';
 import { createAgentRun, updateAgentRun } from './project-resources.js';
 import { syncDocumentStructure } from './document-structure.js';
 import { runAcademicReviewAgent } from './agent-adapters.js';
+import { agentFailureAudit } from './agent-errors.js';
 import { createRevisionPlan } from './revision-engine.js';
 import { materializeLibraries } from './library-files.js';
 
@@ -177,10 +178,10 @@ async function runOneReviewer(workspaceRoot, provider, content, reviewer, rubric
       summary: result.summary, verdict: result.verdict, confidence: result.confidence,
       items: result.items.map((item) => normalizeItem(item, reviewer.id)), error: '', createdAt: now(),
     };
-    await updateAgentRun(workspaceRoot, run.id, { status: 'complete', output: JSON.stringify(result), finishedAt: now() });
+    await updateAgentRun(workspaceRoot, run.id, { status: 'complete', output: JSON.stringify({ ...result, agentMeta: result.agentMeta }), finishedAt: now() });
     return report;
   } catch (error) {
-    await updateAgentRun(workspaceRoot, run.id, { status: 'failed', error: error.message.slice(0, 4000), finishedAt: now() });
+    await updateAgentRun(workspaceRoot, run.id, { status: 'failed', error: agentFailureAudit(error), finishedAt: now() });
     return { id: id('review_report'), reviewerId: reviewer.id, runId: run.id, status: 'failed', summary: '', verdict: 'reject', confidence: 0, items: [], error: error.message.slice(0, 4000), createdAt: now() };
   }
 }

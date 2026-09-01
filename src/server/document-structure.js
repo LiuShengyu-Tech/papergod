@@ -21,6 +21,63 @@ function resolveTexFile(workspaceRoot, file) {
   return path;
 }
 
+function normalizeAnchor(value) {
+  return String(value || '').replace(/\\[a-zA-Z@]+\*?(?:\[[^\]]*\])?/g, ' ')
+    .replace(/[{}]/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function documentNodes(document) {
+  const nodes = [];
+  const visit = (items) => {
+    for (const item of items || []) {
+      nodes.push(item);
+      visit(item.children);
+    }
+  };
+  visit(document.sections);
+  return nodes;
+}
+
+function reconcileDocumentAnnotations(project, document, content) {
+  const nodes = documentNodes(document);
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  const sourceFor = (node) => node.sourceRange
+    ? content.slice(node.sourceRange.start, node.sourceRange.end)
+    : String(node.text || '');
+  const matchesQuote = (node, quote) => {
+    if (!quote) return true;
+    const raw = sourceFor(node);
+    return raw.includes(quote) || normalizeAnchor(raw).includes(normalizeAnchor(quote));
+  };
+  for (const annotation of project.annotations || []) {
+    if (annotation.documentId !== document.id || annotation.target?.type === 'document') continue;
+    const quote = String(annotation.target?.quote || '');
+    const current = nodeById.get(annotation.target.id);
+    if (current && matchesQuote(current, quote)) continue;
+    const preferredType = annotation.target.type === 'range' ? 'sentence' : annotation.target.type;
+    const candidates = nodes.filter((node) => node.type === preferredType && matchesQuote(node, quote));
+    const replacement = candidates.sort((left, right) => sourceFor(left).length - sourceFor(right).length)[0]
+      || nodes.filter((node) => node.type === 'sentence' && matchesQuote(node, quote))[0]
+      || null;
+    if (!replacement) {
+      annotation.target = { ...annotation.target, type: 'document', id: document.id, start: 0, end: 0 };
+      continue;
+    }
+    const raw = sourceFor(replacement);
+    const relativeStart = quote ? raw.indexOf(quote) : -1;
+    const base = replacement.sourceRange?.start || 0;
+    const start = relativeStart >= 0 ? base + relativeStart : base;
+    const end = relativeStart >= 0 ? start + quote.length : (replacement.sourceRange?.end || start);
+    annotation.target = {
+      ...annotation.target,
+      type: annotation.target.type === 'range' ? 'range' : replacement.type,
+      id: replacement.id,
+      start,
+      end,
+    };
+  }
+}
+
 export async function syncDocumentStructure(workspaceRoot, file) {
   const path = resolveTexFile(workspaceRoot, file);
   let content;
@@ -44,6 +101,7 @@ export async function syncDocumentStructure(workspaceRoot, file) {
     document.sections = parsed.sections;
     document.sourceHash = hash;
     document.sourceLength = parsed.sourceLength;
+    reconcileDocumentAnnotations(project, document, content);
     return structuredClone(document);
   });
   return result;

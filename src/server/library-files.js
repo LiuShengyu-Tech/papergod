@@ -111,7 +111,7 @@ export async function materializeLibraries(workspaceRoot) {
   for (const layout of LIBRARY_FILE_LAYOUT) {
     const items = layout.pick(libraries) || [];
     const content = layout.render(libraries);
-    const relative = `${LIBRARY_SUBDIR}/${layout.file}`;
+    const relative = `${LIBRARY_DIR}/${LIBRARY_SUBDIR}/${layout.file}`;
     await writeFile(join(directory, layout.file), content, 'utf-8');
     files.push({ kind: layout.kind, file: relative, count: items.length });
     paths.push(relative);

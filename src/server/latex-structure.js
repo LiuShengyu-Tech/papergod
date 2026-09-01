@@ -131,19 +131,32 @@ export function sentenceEndIndex(source, punctIndex, end = source.length) {
   let cursor = punctIndex + 1;
   while (cursor < end && CLOSING_PUNCTUATION.includes(source[cursor])) cursor += 1;
   const follower = source[cursor];
-  if (cursor < end && follower !== undefined && !/\s/.test(follower)) return -1; // glued
+  if (cursor < end && follower !== undefined && !/\s/.test(follower)) {
+    const visibleCommand = source.slice(cursor, end).match(/^\\(?:emph|textbf|textit|textrm|texttt|underline|mbox)\b/);
+    if (!visibleCommand) return -1; // glued to a word or a non-prose command
+  }
   return cursor;
 }
 
 function sentenceRanges(source, start, end) {
   const ranges = [];
   let sentenceStart = start;
-  let braceDepth = 0;
+  const suppressedBraces = [];
   for (let cursor = start; cursor < end; cursor += 1) {
     const character = source[cursor];
-    if (character === '{' && !isEscaped(source, cursor)) braceDepth += 1;
-    else if (character === '}' && !isEscaped(source, cursor)) braceDepth = Math.max(0, braceDepth - 1);
-    if (!'.?!'.includes(character) || isEscaped(source, cursor) || braceDepth > 0) continue;
+    if (character === '{' && !isEscaped(source, cursor)) {
+      const command = source.slice(Math.max(start, cursor - 120), cursor)
+        .match(/\\([a-zA-Z@]+)\*?(?:\[[^\]]*\])*\s*$/)?.[1]?.toLowerCase() || '';
+      const suppressed = Boolean(suppressedBraces.at(-1))
+        || /^(?:cite\w*|ref|eqref|pageref|autoref|label|footnote|url)$/.test(command);
+      suppressedBraces.push(suppressed);
+      continue;
+    }
+    if (character === '}' && !isEscaped(source, cursor)) {
+      suppressedBraces.pop();
+      continue;
+    }
+    if (!'.?!'.includes(character) || isEscaped(source, cursor) || suppressedBraces.at(-1)) continue;
     const previous = source[cursor - 1];
     const boundary = sentenceEndIndex(source, cursor, end);
     if (boundary === -1) continue; // glued to command, citation, etc.

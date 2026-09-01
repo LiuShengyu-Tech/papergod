@@ -571,6 +571,18 @@ export function validateProject(data) {
     validateString(data.project.name, 'project.name', errors, { allowEmpty: false });
     validateString(data.project.corePrompt, 'project.corePrompt', errors);
     if (data.project.activeAgentProvider !== undefined) validateEnum(data.project.activeAgentProvider, ['mock', 'codex', 'claude-code', 'opencode', 'pi'], 'project.activeAgentProvider', errors);
+    if (data.project.agentProfiles !== undefined) {
+      if (!isObject(data.project.agentProfiles)) errors.push('project.agentProfiles must be an object');
+      else for (const [provider, profile] of Object.entries(data.project.agentProfiles)) {
+        const path = `project.agentProfiles.${provider}`;
+        if (!['mock', 'codex', 'claude-code', 'opencode', 'pi'].includes(provider)) errors.push(`${path} uses an unknown provider`);
+        if (!isObject(profile)) { errors.push(`${path} must be an object`); continue; }
+        if (profile.command !== undefined && (typeof profile.command !== 'string' || profile.command.length > 500)) errors.push(`${path}.command must be a string up to 500 characters`);
+        if (profile.model !== undefined && (typeof profile.model !== 'string' || profile.model.length > 200)) errors.push(`${path}.model must be a string up to 200 characters`);
+        if (profile.reasoningEffort !== undefined && !['', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(profile.reasoningEffort)) errors.push(`${path}.reasoningEffort is invalid`);
+        if (profile.args !== undefined && (!Array.isArray(profile.args) || profile.args.length > 30 || profile.args.some((item) => typeof item !== 'string'))) errors.push(`${path}.args must contain up to 30 strings`);
+      }
+    }
     validateString(data.project.createdAt, 'project.createdAt', errors, { allowEmpty: false });
     validateString(data.project.updatedAt, 'project.updatedAt', errors, { allowEmpty: false });
   }
@@ -701,17 +713,43 @@ function projectPath(workspaceRoot) {
   return join(workspaceRoot, PROJECT_DIR, PROJECT_FILE);
 }
 
+function repairDanglingAnnotationTargets(data) {
+  const documentIds = new Set((data.documents || []).map((document) => document.id));
+  const targetIds = new Set(documentIds);
+  const visit = (items) => {
+    for (const item of items || []) {
+      if (item?.id) targetIds.add(item.id);
+      visit(item?.children);
+    }
+  };
+  for (const document of data.documents || []) visit(document.sections);
+  let repaired = false;
+  for (const annotation of data.annotations || []) {
+    if (!documentIds.has(annotation?.documentId) || !annotation?.target?.id || targetIds.has(annotation.target.id)) continue;
+    annotation.target = {
+      ...annotation.target,
+      type: 'document',
+      id: annotation.documentId,
+      start: 0,
+      end: 0,
+    };
+    repaired = true;
+  }
+  return repaired;
+}
+
 export async function loadProject(workspaceRoot) {
   const file = projectPath(workspaceRoot);
   try {
     const parsed = JSON.parse(await readFile(file, 'utf-8'));
     const migration = migrateProjectData(parsed, workspaceRoot);
     const data = migration.data;
+    const repairedDanglingTargets = repairDanglingAnnotationTargets(data);
     const validation = validateProject(data);
     if (!validation.ok) {
       throw new Error(`Invalid project data: ${validation.errors.join('; ')}`);
     }
-    if (migration.migratedFrom !== null) return await saveProject(workspaceRoot, data);
+    if (migration.migratedFrom !== null || repairedDanglingTargets) return await saveProject(workspaceRoot, data);
     return data;
   } catch (error) {
     if (error.code !== 'ENOENT') throw error;

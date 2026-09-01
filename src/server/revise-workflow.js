@@ -7,6 +7,7 @@ import { createAgentRun, updateAgentRun } from './project-resources.js';
 import { syncDocumentStructure } from './document-structure.js';
 import { buildLibraryContext, composeMockParagraph } from './library-engine.js';
 import { runPaperGenerationAgent, validatePaperGenerationResponse } from './agent-adapters.js';
+import { agentFailureAudit } from './agent-errors.js';
 
 function now() { return new Date().toISOString(); }
 function id(prefix) { return `${prefix}_${randomUUID()}`; }
@@ -213,7 +214,7 @@ export async function generatePaperRevision(workspaceRoot, input = {}, options =
       : await runPaperGenerationAgent(provider, request, { workspaceRoot, commands: options.commands || {}, signal: options.signal });
     const validation = validatePaperGenerationResponse(generated, libraryContext.resourceIds);
     if (!validation.ok) throw problem(`Generated paper failed validation: ${validation.errors.join('; ')}`, 502);
-    await updateAgentRun(workspaceRoot, run.id, { status: 'complete', output: JSON.stringify({ summary: generated.summary, usedResourceIds: generated.usedResourceIds, characters: generated.latex.length }), finishedAt: now() });
+    await updateAgentRun(workspaceRoot, run.id, { status: 'complete', output: JSON.stringify({ summary: generated.summary, usedResourceIds: generated.usedResourceIds, characters: generated.latex.length, agentMeta: generated.agentMeta }), finishedAt: now() });
     const timestamp = now();
     const changeId = id('change');
     const revision = {
@@ -231,7 +232,7 @@ export async function generatePaperRevision(workspaceRoot, input = {}, options =
     await updateProject(workspaceRoot, (draft) => draft.revisions.push(revision));
     return { revision, draft: generated.latex, runId: run.id, library: { mode: libraryContext.mode, providedResources: libraryContext.resources, usedResourceIds: generated.usedResourceIds } };
   } catch (error) {
-    await updateAgentRun(workspaceRoot, run.id, { status: 'failed', error: error.message.slice(0, 4000), finishedAt: now() });
+    await updateAgentRun(workspaceRoot, run.id, { status: 'failed', error: agentFailureAudit(error), finishedAt: now() });
     throw error;
   }
 }
