@@ -2,23 +2,49 @@
 
 AI-powered LaTeX writing platform — a local-first Overleaf-style editor with safe compilation, structured writing context, and Mock/Codex/Claude Code/OpenCode/Pi Agent assistants.
 
-## Quick Start
+[![npm version](https://img.shields.io/npm/v/papergod.svg)](https://www.npmjs.com/package/papergod)
+[![license](https://img.shields.io/npm/l/papergod.svg)](./LICENSE)
+
+## Installation
+
+Papergod requires Node.js 18 or later. To run the latest release without installing it globally:
 
 ```bash
+npx papergod@latest .
+```
+
+The final `.` uses the current directory as the paper workspace. Papergod starts its local server at http://127.0.0.1:3000.
+
+To install the `papergod` command globally:
+
+```bash
+npm install --global papergod
+papergod .
+```
+
+You can also launch another workspace, choose a port, and select an Agent provider:
+
+```bash
+papergod ./my-paper --port 4312 --agent codex
+```
+
+To update or remove the global installation:
+
+```bash
+npm install --global papergod@latest
+npm uninstall --global papergod
+```
+
+### Install from source
+
+```bash
+git clone https://github.com/LiuShengyu-Tech/papergod.git
+cd papergod
 npm install
 npm run papergod
 ```
 
-Open http://127.0.0.1:3000 in your browser.
-
 `npm run papergod` reopens the paper workspace most recently selected in the app. On the very first run, when no workspace has been recorded yet, it falls back to the built-in demo and safely fills its missing demo content. To seed another disposable workspace explicitly, use `papergod ./demo-paper --demo`. Ordinary `papergod ./my-paper` runs add only the non-destructive starter writing library; existing resources are never overwritten.
-
-When installed as a package, run Papergod in any paper directory:
-
-```bash
-npx papergod .
-npx papergod ./my-paper --port 4312 --agent codex
-```
 
 The CLI initializes `main.tex` when the workspace contains no TeX files and stores Papergod metadata in `.papergod/project.json`. Agent choices are `mock`, `codex`, `claude-code`, `opencode`, and `pi`. External providers require an installed and authenticated CLI; Papergod invokes them non-interactively with structured output, timeouts, output limits, and analysis-only permissions.
 

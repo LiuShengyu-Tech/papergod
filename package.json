@@ -31,7 +31,7 @@
     "registry": "https://registry.npmjs.org/"
   },
   "bin": {
-    "papergod": "./src/cli.js"
+    "papergod": "src/cli.js"
   },
   "files": [
     "src",
