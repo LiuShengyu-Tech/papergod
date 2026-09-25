@@ -28,6 +28,12 @@ let pendingPaperGeneration = null;
 let workspaceView = 'source';
 let pdfRenderGeneration = 0;
 let pdfLoadingTask = null;
+let currentPdfUrl = null;
+let pdfRenderedWidth = 0;
+const WORKSPACE_VIEW_KEY = 'papergod.workspaceView';
+const SPLIT_RATIO_KEY = 'papergod.splitRatio';
+const ASSISTANT_COLLAPSED_KEY = 'papergod.assistantCollapsed';
+const EDITOR_FONT_KEY = 'papergod.editorFont';
 let agentProviders = [];
 let agentActivationGeneration = 0;
 let currentPromptPreview = null;
@@ -101,19 +107,194 @@ class ModificationIntent {
   }
 }
 
-function setWorkspaceView(view) {
+// Programmatic calls (navigation, citation insertion, compile) ask for 'source' or
+// 'preview' only to make that pane visible; in split view both already are, so
+// only an explicit user choice ({ user: true }) leaves split view.
+function setWorkspaceView(view, { user = false } = {}) {
   if (view === 'preview' && document.getElementById('preview-view-btn').disabled) return;
+  if (workspaceView === 'split' && !user) {
+    if (view === 'source' && editor) requestAnimationFrame(() => editor.refresh());
+    return;
+  }
   workspaceView = view;
-  const showingSource = view === 'source';
-  document.getElementById('source-view').classList.toggle('hidden', !showingSource);
-  document.getElementById('preview-panel').classList.toggle('hidden', showingSource);
-  const sourceButton = document.getElementById('source-view-btn');
-  const previewButton = document.getElementById('preview-view-btn');
-  sourceButton.classList.toggle('active', showingSource);
-  previewButton.classList.toggle('active', !showingSource);
-  sourceButton.setAttribute('aria-selected', String(showingSource));
-  previewButton.setAttribute('aria-selected', String(!showingSource));
-  if (showingSource && editor) requestAnimationFrame(() => editor.refresh());
+  if (user) storePreference(WORKSPACE_VIEW_KEY, view);
+  const split = view === 'split';
+  const showSource = split || view === 'source';
+  const showPreview = split || view === 'preview';
+  document.getElementById('workspace-view').classList.toggle('split', split);
+  document.getElementById('split-divider').classList.toggle('hidden', !split);
+  document.getElementById('source-view').classList.toggle('hidden', !showSource);
+  document.getElementById('preview-panel').classList.toggle('hidden', !showPreview);
+  for (const [id, active] of [['source-view-btn', view === 'source'], ['preview-view-btn', view === 'preview'], ['split-view-btn', split]]) {
+    const button = document.getElementById(id);
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', String(active));
+  }
+  if (showSource && editor) requestAnimationFrame(() => editor.refresh());
+}
+
+function sourceVisible() { return workspaceView !== 'preview'; }
+function previewVisible() { return workspaceView !== 'source'; }
+
+function readPreference(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+
+function storePreference(key, value) {
+  try {
+    if (value === null || value === undefined) localStorage.removeItem(key);
+    else localStorage.setItem(key, value);
+  } catch { /* storage unavailable: preference lasts for this page only */ }
+}
+
+// Pages are rendered fit-to-width, so a pane resize (split divider, folding the
+// assistant, window resize) re-renders the current PDF at the new width.
+function initPdfAutoFit() {
+  const container = document.getElementById('pdf-preview');
+  let timer = null;
+  new ResizeObserver(() => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      const width = container.clientWidth;
+      if (!currentPdfUrl || !width || Math.abs(width - pdfRenderedWidth) < 24) return;
+      const scrollRatio = container.scrollHeight ? container.scrollTop / container.scrollHeight : 0;
+      showCompiledPdf(currentPdfUrl, { switchView: false }).then(() => {
+        container.scrollTop = scrollRatio * container.scrollHeight;
+      });
+    }, 220);
+  }).observe(container);
+}
+
+function applySplitRatio(ratio) {
+  const clamped = Math.min(0.8, Math.max(0.2, ratio));
+  document.getElementById('workspace-view').style.setProperty('--split-source', `${(clamped * 100).toFixed(2)}%`);
+  return clamped;
+}
+
+function initSplitDivider() {
+  const divider = document.getElementById('split-divider');
+  const view = document.getElementById('workspace-view');
+  let ratio = applySplitRatio(Number(readPreference(SPLIT_RATIO_KEY)) || 0.5);
+  const commit = () => { storePreference(SPLIT_RATIO_KEY, ratio.toFixed(4)); editor?.refresh(); };
+  divider.addEventListener('pointerdown', (event) => {
+    event.preventDefault();
+    divider.setPointerCapture(event.pointerId);
+    view.classList.add('resizing');
+    const bounds = view.getBoundingClientRect();
+    const move = (moveEvent) => { ratio = applySplitRatio((moveEvent.clientX - bounds.left) / bounds.width); };
+    const up = () => {
+      divider.removeEventListener('pointermove', move);
+      divider.removeEventListener('pointerup', up);
+      divider.removeEventListener('pointercancel', up);
+      view.classList.remove('resizing');
+      commit();
+    };
+    divider.addEventListener('pointermove', move);
+    divider.addEventListener('pointerup', up);
+    divider.addEventListener('pointercancel', up);
+  });
+  divider.addEventListener('dblclick', () => { ratio = applySplitRatio(0.5); commit(); });
+  divider.addEventListener('keydown', (event) => {
+    const step = event.key === 'ArrowLeft' ? -0.05 : event.key === 'ArrowRight' ? 0.05 : 0;
+    if (!step) return;
+    event.preventDefault();
+    ratio = applySplitRatio(ratio + step);
+    commit();
+  });
+}
+
+function setAssistantCollapsed(collapsed, { persist = true } = {}) {
+  document.getElementById('app').classList.toggle('assistant-collapsed', collapsed);
+  document.getElementById('assistant-collapse').setAttribute('aria-expanded', String(!collapsed));
+  if (persist) storePreference(ASSISTANT_COLLAPSED_KEY, collapsed ? '1' : null);
+  if (editor) requestAnimationFrame(() => editor.refresh());
+}
+
+const EDITOR_FONT_DEFAULTS = { family: '', size: 13, lineHeight: '1.65' };
+
+function loadEditorFontSettings() {
+  try {
+    const saved = JSON.parse(readPreference(EDITOR_FONT_KEY) || '{}');
+    const size = Number(saved.size);
+    return {
+      family: typeof saved.family === 'string' ? saved.family : EDITOR_FONT_DEFAULTS.family,
+      size: Number.isFinite(size) && size >= 8 && size <= 36 ? size : EDITOR_FONT_DEFAULTS.size,
+      lineHeight: ['1.3', '1.5', '1.65', '1.8', '2'].includes(saved.lineHeight) ? saved.lineHeight : EDITOR_FONT_DEFAULTS.lineHeight,
+    };
+  } catch {
+    return { ...EDITOR_FONT_DEFAULTS };
+  }
+}
+
+function applyEditorFontSettings(settings) {
+  const root = document.documentElement.style;
+  if (settings.family) root.setProperty('--editor-font-family', settings.family);
+  else root.removeProperty('--editor-font-family');
+  root.setProperty('--editor-font-size', `${settings.size}px`);
+  root.setProperty('--editor-line-height', settings.lineHeight);
+  if (editor) editor.refresh();
+}
+
+function initEditorSettings() {
+  const popover = document.getElementById('editor-settings-popover');
+  const trigger = document.getElementById('editor-settings-btn');
+  const familySelect = document.getElementById('editor-font-family');
+  const customInput = document.getElementById('editor-font-custom');
+  const sizeInput = document.getElementById('editor-font-size');
+  const lineHeightSelect = document.getElementById('editor-line-height');
+  let settings = loadEditorFontSettings();
+
+  const render = () => {
+    const preset = [...familySelect.options].some((option) => option.value === settings.family && option.value !== 'custom');
+    familySelect.value = preset ? settings.family : 'custom';
+    customInput.classList.toggle('hidden', preset);
+    if (!preset) customInput.value = settings.family;
+    sizeInput.value = String(settings.size);
+    lineHeightSelect.value = settings.lineHeight;
+  };
+  const update = (patch) => {
+    settings = { ...settings, ...patch };
+    applyEditorFontSettings(settings);
+    storePreference(EDITOR_FONT_KEY, JSON.stringify(settings));
+  };
+  const setSize = (value) => {
+    const size = Math.round(Number(value));
+    if (!Number.isFinite(size)) return;
+    update({ size: Math.min(36, Math.max(8, size)) });
+    sizeInput.value = String(settings.size);
+  };
+  const open = (show) => {
+    popover.classList.toggle('hidden', !show);
+    trigger.setAttribute('aria-expanded', String(show));
+    if (show) { render(); familySelect.focus(); }
+  };
+
+  applyEditorFontSettings(settings);
+  familySelect.addEventListener('change', () => {
+    if (familySelect.value === 'custom') {
+      customInput.classList.remove('hidden');
+      customInput.focus();
+      if (customInput.value.trim()) update({ family: customInput.value.trim() });
+    } else {
+      customInput.classList.add('hidden');
+      update({ family: familySelect.value });
+    }
+  });
+  customInput.addEventListener('input', () => update({ family: customInput.value.trim() }));
+  sizeInput.addEventListener('change', () => setSize(sizeInput.value));
+  document.getElementById('editor-font-size-down').addEventListener('click', () => setSize(settings.size - 1));
+  document.getElementById('editor-font-size-up').addEventListener('click', () => setSize(settings.size + 1));
+  lineHeightSelect.addEventListener('change', () => update({ lineHeight: lineHeightSelect.value }));
+  document.getElementById('editor-settings-reset').addEventListener('click', () => { update({ ...EDITOR_FONT_DEFAULTS }); render(); });
+  trigger.addEventListener('click', () => open(popover.classList.contains('hidden')));
+  document.getElementById('tool-editor-settings').addEventListener('click', () => open(true));
+  document.getElementById('editor-settings-close').addEventListener('click', () => open(false));
+  document.addEventListener('pointerdown', (event) => {
+    if (popover.classList.contains('hidden') || popover.contains(event.target) || trigger.contains(event.target)) return;
+    if (event.target.closest('#tool-editor-settings')) return;
+    open(false);
+  });
+  popover.addEventListener('keydown', (event) => { if (event.key === 'Escape') { open(false); trigger.focus(); } });
 }
 
 async function showCompiledPdf(url, { switchView = true } = {}) {
@@ -121,6 +302,7 @@ async function showCompiledPdf(url, { switchView = true } = {}) {
   const container = document.getElementById('pdf-preview');
   const placeholder = document.getElementById('preview-placeholder');
   if (pdfLoadingTask) await pdfLoadingTask.destroy().catch(() => {});
+  currentPdfUrl = url;
   document.getElementById('pdf-scope-menu').classList.add('hidden');
   document.getElementById('pdf-edit-menu').classList.add('hidden');
   clearPdfScopeHighlight();
@@ -140,6 +322,7 @@ async function showCompiledPdf(url, { switchView = true } = {}) {
     const pdfUrl = url + (url.includes('?') ? '&' : '?') + 't=' + Date.now();
     pdfLoadingTask = pdfjsLib.getDocument({ url: pdfUrl, isEvalSupported: false });
     const pdf = await pdfLoadingTask.promise;
+    pdfRenderedWidth = container.clientWidth;
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
       if (renderGeneration !== pdfRenderGeneration) return;
       const page = await pdf.getPage(pageNumber);
@@ -1514,6 +1697,7 @@ function resetCompiledPreview() {
   recentChangedSentenceIds = new Set();
   if (pdfLoadingTask) pdfLoadingTask.destroy().catch(() => {});
   pdfLoadingTask = null;
+  currentPdfUrl = null;
   document.getElementById('pdf-preview').replaceChildren();
   const placeholder = document.getElementById('preview-placeholder');
   placeholder.textContent = 'Compile to render the paper';
@@ -3649,7 +3833,7 @@ function selectStructureNode(nodeId, { focus = true, editHeading = false, forceS
   updateOutlineSelection();
   schedulePromptContextPreview();
   const editRange = editHeading ? headingSourceRange(node) : node.sourceRange;
-  if (focus && forceSource && workspaceView !== 'source') setWorkspaceView('source');
+  if (focus && forceSource && !sourceVisible()) setWorkspaceView('source');
   if (focus && forcePreview) {
     const previewReady = !document.getElementById('preview-view-btn').disabled
       && document.querySelector('#pdf-preview .pdf-page');
@@ -3657,20 +3841,20 @@ function selectStructureNode(nodeId, { focus = true, editHeading = false, forceS
       showStatus('Compile the PDF before using outline navigation.', '');
       return;
     }
-    if (workspaceView !== 'preview') setWorkspaceView('preview');
+    if (!previewVisible()) setWorkspaceView('preview');
   }
   if (focus && editRange && !forcePreview) {
     const start = editor.posFromIndex(editRange.start);
     const end = editor.posFromIndex(editRange.end);
     editor.setSelection(start, end);
-    if (workspaceView === 'source') {
+    if (sourceVisible()) {
       requestAnimationFrame(() => {
         editor.scrollIntoView({ from: start, to: end }, 80);
         editor.focus();
       });
     }
   }
-  if (focus && !forceSource && !focusPdfNode(node) && (workspaceView === 'preview' || forcePreview)) {
+  if (focus && !forceSource && !focusPdfNode(node) && (previewVisible() || forcePreview)) {
     showStatus('Could not locate this content in the PDF. Recompile to refresh the text layer.', '');
   }
 }
@@ -4963,6 +5147,8 @@ function init() {
     lineWrapping: true,
     indentUnit: 2,
     tabSize: 2,
+    // Selecting a word highlights its other whole-word occurrences, with scrollbar ticks.
+    highlightSelectionMatches: { minChars: 2, wordsOnly: true, annotateScrollbar: true, delay: 80 },
   });
 
   editor.setOption('extraKeys', {
@@ -4975,8 +5161,16 @@ function init() {
 
   document.getElementById('save-btn').addEventListener('click', saveFile);
   document.getElementById('compile-btn').addEventListener('click', compileFile);
-  document.getElementById('source-view-btn').addEventListener('click', () => setWorkspaceView('source'));
-  document.getElementById('preview-view-btn').addEventListener('click', () => setWorkspaceView('preview'));
+  document.getElementById('source-view-btn').addEventListener('click', () => setWorkspaceView('source', { user: true }));
+  document.getElementById('preview-view-btn').addEventListener('click', () => setWorkspaceView('preview', { user: true }));
+  document.getElementById('split-view-btn').addEventListener('click', () => setWorkspaceView('split', { user: true }));
+  if (readPreference(WORKSPACE_VIEW_KEY) === 'split') setWorkspaceView('split', { user: true });
+  initSplitDivider();
+  initPdfAutoFit();
+  initEditorSettings();
+  document.getElementById('assistant-collapse').addEventListener('click', () => setAssistantCollapsed(true));
+  document.getElementById('assistant-expand').addEventListener('click', () => setAssistantCollapsed(false));
+  if (readPreference(ASSISTANT_COLLAPSED_KEY) === '1') setAssistantCollapsed(true, { persist: false });
   document.getElementById('ai-invoke').addEventListener('click', invokeAgent);
   document.getElementById('language-select').value = getLocale();
   document.getElementById('language-select').addEventListener('change', event => setLocale(event.target.value));

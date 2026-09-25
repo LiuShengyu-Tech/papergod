@@ -130,7 +130,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 #editor-toolbar > #compile-btn { color: #fff; background: var(--primary); border-color: var(--primary); }
 #editor-toolbar > #compile-btn:hover { color: #fff; background: #1d4ed8; border-color: #1d4ed8; }
 
-.CodeMirror { background: #fff; color: #27272a; font-size: 13px; line-height: 1.65; }
+.CodeMirror { background: #fff; color: #27272a; font-family: var(--editor-font-family, monospace); font-size: var(--editor-font-size, 13px); line-height: var(--editor-line-height, 1.65); }
 .CodeMirror-gutters { background: #fafafa; border-color: #eeeeef; }
 .CodeMirror-linenumber { color: #b4b4bc; }
 .CodeMirror-cursor { border-left-color: #18181b; }
@@ -254,3 +254,47 @@ input::placeholder, textarea::placeholder { color: #a1a1aa; }
   .version-summary { grid-template-columns: 1fr auto 1fr; }
   .version-date { display: none; }
 }
+
+/* Split view: source on the left, PDF on the right, with a draggable divider. */
+#editor-toolbar #workspace-view-switch #split-view-btn { display: inline-flex; align-items: center; gap: 5px; }
+#workspace-view.split #source-view { flex: 0 0 var(--split-source, 50%); }
+#workspace-view.split #preview-panel { flex: 1 1 0; }
+#split-divider { flex: 0 0 6px; margin: 0 -2px; position: relative; z-index: 2; cursor: col-resize; background: transparent; touch-action: none; }
+#split-divider::before { content: ""; position: absolute; top: 0; bottom: 0; left: 2px; width: 1px; background: var(--border); transition: background .15s, width .15s, left .15s; }
+#split-divider:hover::before, #split-divider:focus-visible::before, #workspace-view.resizing #split-divider::before { left: 1px; width: 3px; background: #93c5fd; }
+#split-divider:focus-visible { outline: none; }
+#workspace-view.resizing { cursor: col-resize; user-select: none; }
+#workspace-view.resizing .workspace-pane { pointer-events: none; }
+
+/* Foldable AI assistant: collapses to a narrow rail. */
+.ai-header-actions { display: inline-flex; align-items: center; gap: 6px; }
+#assistant-collapse, #assistant-expand { display: inline-flex; align-items: center; justify-content: center; border: 1px solid transparent; border-radius: 6px; color: #71717a; background: transparent; cursor: pointer; }
+#assistant-collapse { width: 28px; height: 28px; }
+#assistant-collapse:hover, #assistant-expand:hover { color: #18181b; background: #eeeeef; }
+#assistant-expand { display: none; flex-direction: column; gap: 10px; width: 100%; padding: 12px 0; font-size: 11px; font-weight: 600; text-transform: none; letter-spacing: 0; }
+#assistant-expand span { writing-mode: vertical-rl; }
+#app.assistant-collapsed { grid-template-columns: var(--sidebar-w) 1fr 40px; }
+#app.assistant-collapsed #ai-panel { display: none; }
+#app.assistant-collapsed #assistant-expand { display: flex; }
+
+/* Editor font settings popover. */
+#editor-panel { position: relative; }
+#editor-settings-popover { position: absolute; top: 52px; right: 12px; z-index: 40; display: grid; gap: 8px; width: 280px; padding: 12px 14px 14px; color: #27272a; background: #fff; border: 1px solid #e4e4e7; border-radius: 10px; box-shadow: 0 12px 32px rgba(0, 0, 0, .14); font-size: 12px; }
+#editor-settings-popover.hidden { display: none; }
+#editor-settings-popover header { display: flex; align-items: center; justify-content: space-between; }
+#editor-settings-popover h3 { font-size: 13px; font-weight: 600; }
+#editor-settings-popover label { color: #52525b; font-size: 11px; font-weight: 500; }
+#editor-settings-popover select, #editor-settings-popover input { width: 100%; min-height: 30px; padding: 4px 8px; color: #27272a; background: #fff; border: 1px solid #d4d4d8; border-radius: 6px; font-size: 12px; }
+#editor-settings-popover button { min-height: 28px; padding: 3px 9px; color: #3f3f46; background: #fff; border: 1px solid #d4d4d8; border-radius: 6px; cursor: pointer; }
+#editor-settings-popover button:hover { background: #f4f4f5; }
+#editor-settings-close { display: inline-flex; align-items: center; justify-content: center; width: 26px; min-height: 26px !important; padding: 0 !important; border-color: transparent !important; }
+.editor-settings-row { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 10px; }
+.editor-settings-row select { width: 96px !important; }
+.editor-settings-stepper { display: flex; align-items: center; gap: 4px; color: #71717a; }
+.editor-settings-stepper input { width: 52px !important; text-align: center; }
+.editor-settings-stepper button { width: 28px; padding: 0 !important; }
+#editor-font-preview { overflow: hidden; padding: 8px 10px; color: #27272a; background: #fafafa; border: 1px solid #eeeeef; border-radius: 6px; font-family: var(--editor-font-family, monospace); font-size: var(--editor-font-size, 13px); line-height: var(--editor-line-height, 1.65); white-space: nowrap; text-overflow: ellipsis; }
+
+/* Other occurrences of the selected word in the source editor. */
+.CodeMirror .cm-matchhighlight { background: rgba(250, 204, 21, .38); border-radius: 2px; box-shadow: 0 0 0 1px rgba(202, 138, 4, .35); }
+.CodeMirror-selection-highlight-scrollbar { background: #eab308; }

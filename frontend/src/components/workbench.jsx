@@ -1,7 +1,7 @@
 import {
-  BarChart3, BookMarked, BookOpen, Bot, Braces, FileCode, FolderKanban, FolderOpen,
-  Bug, Download, GitPullRequest, History, Library, Network, Play, PlayCircle, RefreshCw, Rocket, Save, ScanText,
-  Settings, Sparkles, SquareTerminal, Users, X,
+  BarChart3, BookMarked, BookOpen, Bot, Braces, Columns2, FileCode, FolderKanban, FolderOpen,
+  Bug, Download, GitPullRequest, History, Library, Network, PanelRightClose, PanelRightOpen, Play, PlayCircle, RefreshCw, Rocket, Save, ScanText,
+  Settings, Sparkles, SquareTerminal, Type, Users, X,
 } from 'lucide-react';
 import { Button } from './ui/button.jsx';
 import packageData from '../../../package.json';
@@ -48,6 +48,7 @@ function Navigator() {
         <div className="tool-group">
           <div className="tool-group-title" data-i18n="tools.group.document">Document</div>
           <button id="tool-show-source" type="button"><FileCode size={13} /><span data-i18n="tools.source">LaTeX source</span></button>
+          <button id="tool-editor-settings" type="button"><Type size={13} /><span data-i18n="tools.editorSettings">Editor settings</span></button>
           <button id="tool-compile" type="button"><PlayCircle size={13} /><span data-i18n="tools.compile">Compile PDF</span></button>
           <button id="tool-change-history" type="button"><History size={13} /><span data-i18n="tools.changeHistory">Change history</span></button>
           <button id="tool-libraries" type="button"><Library size={13} /><span data-i18n="tools.libraries">Writing libraries</span></button>
@@ -71,27 +72,71 @@ function EditorWorkspace() {
         <div id="workspace-view-switch" role="tablist" aria-label="Document view">
           <button id="source-view-btn" className="view-tab active" type="button" role="tab" aria-selected="true" aria-controls="source-view" data-i18n="editor.source">Source</button>
           <button id="preview-view-btn" className="view-tab" type="button" role="tab" aria-selected="false" aria-controls="preview-panel" disabled data-i18n="editor.preview">PDF Preview</button>
+          <button id="split-view-btn" className="view-tab" type="button" role="tab" aria-selected="false" aria-controls="source-view preview-panel" title="Source and PDF side by side"><Columns2 size={13} /><span data-i18n="editor.split">Split</span></button>
         </div>
+        <Button id="editor-settings-btn" variant="outline" size="sm" title="Editor font settings" aria-haspopup="dialog" aria-expanded="false" aria-controls="editor-settings-popover" data-i18n-aria-label="editorSettings.title"><Type size={14} /></Button>
         <Button id="history-open" variant="outline" size="sm" title="Change history"><History size={14} /><span data-i18n="history.title">Change history</span></Button>
         <Button id="save-btn" variant="outline" size="sm" title="Save (Ctrl+S)"><Save size={14} /><span data-i18n="editor.save">Save</span></Button>
         <Button id="compile-btn" variant="primary" size="sm" title="Compile LaTeX"><Play size={14} /><span data-i18n="editor.compile">Compile</span></Button>
       </div>
       <div id="workspace-view">
         <section id="source-view" className="workspace-pane" role="tabpanel" aria-labelledby="source-view-btn"><textarea id="editor" /></section>
+        <div id="split-divider" className="hidden" role="separator" aria-orientation="vertical" aria-label="Resize source and preview" tabIndex={0} />
         <section id="preview-panel" className="workspace-pane hidden" role="tabpanel" aria-labelledby="preview-view-btn">
           <div id="pdf-preview" aria-label="Rendered PDF pages" />
           <div id="preview-placeholder">Compile to render the paper</div>
         </section>
       </div>
+      <EditorSettingsPopover />
     </main>
+  );
+}
+
+const EDITOR_FONT_OPTIONS = [
+  ['', 'Default monospace'],
+  ['Consolas, monospace', 'Consolas'],
+  ['"Lucida Console", monospace', 'Lucida Console'],
+  ['"Lucida Sans Typewriter", "Lucida Console", monospace', 'Lucida Sans Typewriter'],
+  ['"Cascadia Code", "Cascadia Mono", Consolas, monospace', 'Cascadia Code'],
+  ['"Courier New", Courier, monospace', 'Courier New'],
+  ['Menlo, Monaco, monospace', 'Menlo / Monaco'],
+  ['"JetBrains Mono", monospace', 'JetBrains Mono'],
+  ['"Fira Code", monospace', 'Fira Code'],
+  ['"Source Code Pro", monospace', 'Source Code Pro'],
+  ['"Lucida Sans Unicode", "Lucida Grande", sans-serif', 'Lucida Sans (proportional)'],
+  ['Georgia, "Times New Roman", serif', 'Georgia (proportional)'],
+];
+
+function EditorSettingsPopover() {
+  return (
+    <section id="editor-settings-popover" className="hidden" role="dialog" aria-labelledby="editor-settings-title">
+      <header><h3 id="editor-settings-title" data-i18n="editorSettings.title">Editor font</h3><button id="editor-settings-close" type="button" aria-label="Close" data-i18n-aria-label="common.close"><X size={14} /></button></header>
+      <label htmlFor="editor-font-family" data-i18n="editorSettings.family">Font family</label>
+      <select id="editor-font-family">
+        {EDITOR_FONT_OPTIONS.map(([value, label]) => <option key={label} value={value}>{label}</option>)}
+        <option value="custom" data-i18n="editorSettings.custom">Custom…</option>
+      </select>
+      <input id="editor-font-custom" className="hidden" type="text" placeholder={'e.g. "Iosevka", monospace'} spellCheck={false} />
+      <div className="editor-settings-row">
+        <label htmlFor="editor-font-size" data-i18n="editorSettings.size">Font size</label>
+        <div className="editor-settings-stepper"><button id="editor-font-size-down" type="button" aria-label="Smaller">−</button><input id="editor-font-size" type="number" min="8" max="36" step="1" /><span>px</span><button id="editor-font-size-up" type="button" aria-label="Larger">+</button></div>
+      </div>
+      <div className="editor-settings-row">
+        <label htmlFor="editor-line-height" data-i18n="editorSettings.lineHeight">Line height</label>
+        <select id="editor-line-height"><option value="1.3">1.3</option><option value="1.5">1.5</option><option value="1.65">1.65</option><option value="1.8">1.8</option><option value="2">2.0</option></select>
+      </div>
+      <p id="editor-font-preview">{String.raw`\section{Introduction} Il1| O0 $x^2$`}</p>
+      <button id="editor-settings-reset" type="button" data-i18n="editorSettings.reset">Reset to defaults</button>
+    </section>
   );
 }
 
 function AssistantPanel() {
   return (
     <aside id="right-panel">
+      <button id="assistant-expand" type="button" title="Show AI assistant" aria-label="Show AI assistant" aria-controls="ai-panel" data-i18n-aria-label="ai.expand"><PanelRightOpen size={15} /><Bot size={15} /><span data-i18n="ai.title">AI Assistant</span></button>
       <div id="ai-panel">
-        <div id="ai-header"><span><Bot size={15} /><span data-i18n="ai.title">AI Assistant</span></span><select id="agent-provider-quick" aria-label="Active AI Agent"><option value="mock">Mock</option></select></div>
+        <div id="ai-header"><span><Bot size={15} /><span data-i18n="ai.title">AI Assistant</span></span><span className="ai-header-actions"><select id="agent-provider-quick" aria-label="Active AI Agent"><option value="mock">Mock</option></select><button id="assistant-collapse" type="button" title="Fold AI assistant" aria-label="Fold AI assistant" aria-controls="ai-panel" aria-expanded="true" data-i18n-aria-label="ai.fold"><PanelRightClose size={15} /></button></span></div>
         <div id="ai-module-list">
           <section className="ai-module" id="agent-config-module">
             <div className="ai-module-head"><div><span className="module-index">1</span><strong data-i18n="ai.agentConfig">Agent Configuration</strong></div><Button id="agent-config-open" variant="ghost" size="sm"><span data-i18n="ai.configure">Configure</span></Button></div>
