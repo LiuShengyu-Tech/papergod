@@ -1,0 +1,200 @@
+/*
+ * Editor color schemes. The source editor's colors come only from these
+ * --ed-* variables, never from the app theme, so switching the app to dark
+ * leaves the writing surface alone. The scheme is chosen with the toolbar's
+ * palette control and applied as <html data-editor-scheme="...">. Scheme
+ * selectors are not tied to :root, so a swatch element carrying the same
+ * attribute previews that scheme's real colors.
+ */
+:root,
+[data-editor-scheme="white"] {
+  --ed-color-scheme: light;
+  --ed-bg: #ffffff;
+  --ed-fg: #27272a;
+  --ed-gutter: #fafafa;
+  --ed-gutter-border: #eeeeef;
+  --ed-line-number: #b4b4bc;
+  --ed-cursor: #18181b;
+  --ed-selection: #dbeafe;
+  --ed-keyword: #7c3aed;
+  --ed-tag: #2563eb;
+  --ed-bracket: #71717a;
+  --ed-comment: #16a34a;
+  --ed-math: #b45309;
+  --ed-error: #dc2626;
+  --ed-matching-bracket: #15803d;
+  --ed-match-bg: rgba(250, 204, 21, .38);
+  --ed-match-ring: rgba(202, 138, 4, .35);
+  --ed-flash: rgba(37, 99, 235, .16);
+}
+
+[data-editor-scheme="light-grey"] {
+  --ed-color-scheme: light;
+  --ed-bg: #f2f3f5;
+  --ed-fg: #1f2937;
+  --ed-gutter: #e9ebef;
+  --ed-gutter-border: #dfe2e7;
+  --ed-line-number: #9ca3af;
+  --ed-cursor: #111827;
+  --ed-selection: #cfdcf3;
+  --ed-keyword: #6d28d9;
+  --ed-tag: #1d4ed8;
+  --ed-bracket: #6b7280;
+  --ed-comment: #15803d;
+  --ed-math: #a16207;
+  --ed-error: #dc2626;
+  --ed-matching-bracket: #15803d;
+  --ed-match-bg: rgba(250, 204, 21, .4);
+  --ed-match-ring: rgba(202, 138, 4, .4);
+  --ed-flash: rgba(37, 99, 235, .18);
+}
+
+[data-editor-scheme="sepia"] {
+  --ed-color-scheme: light;
+  --ed-bg: #f6efe0;
+  --ed-fg: #3d3427;
+  --ed-gutter: #efe6d3;
+  --ed-gutter-border: #e3d8c1;
+  --ed-line-number: #ae9f84;
+  --ed-cursor: #3d3427;
+  --ed-selection: #e4d3aa;
+  --ed-keyword: #86307f;
+  --ed-tag: #1f5f99;
+  --ed-bracket: #8a7d66;
+  --ed-comment: #5b7f3a;
+  --ed-math: #a3521b;
+  --ed-error: #b91c1c;
+  --ed-matching-bracket: #3f6f1f;
+  --ed-match-bg: rgba(214, 158, 46, .38);
+  --ed-match-ring: rgba(161, 98, 7, .4);
+  --ed-flash: rgba(31, 95, 153, .18);
+}
+
+/* The widely used "eye-care" green (#c7edcc). */
+[data-editor-scheme="green"] {
+  --ed-color-scheme: light;
+  --ed-bg: #c7edcc;
+  --ed-fg: #1d2b1f;
+  --ed-gutter: #bae3c0;
+  --ed-gutter-border: #a9d4b0;
+  --ed-line-number: #5f8a66;
+  --ed-cursor: #1d2b1f;
+  --ed-selection: #9ccfb0;
+  --ed-keyword: #6b21a8;
+  --ed-tag: #1e40af;
+  --ed-bracket: #4b6352;
+  --ed-comment: #5b6b2e;
+  --ed-math: #9a3412;
+  --ed-error: #b91c1c;
+  --ed-matching-bracket: #9a3412;
+  --ed-match-bg: rgba(250, 204, 21, .5);
+  --ed-match-ring: rgba(161, 98, 7, .45);
+  --ed-flash: rgba(30, 64, 175, .2);
+}
+
+[data-editor-scheme="solarized-light"] {
+  --ed-color-scheme: light;
+  --ed-bg: #fdf6e3;
+  --ed-fg: #586e75;
+  --ed-gutter: #eee8d5;
+  --ed-gutter-border: #e4ddc8;
+  --ed-line-number: #93a1a1;
+  --ed-cursor: #073642;
+  --ed-selection: #e3dcc5;
+  --ed-keyword: #6c71c4;
+  --ed-tag: #268bd2;
+  --ed-bracket: #93a1a1;
+  --ed-comment: #859900;
+  --ed-math: #cb4b16;
+  --ed-error: #dc322f;
+  --ed-matching-bracket: #859900;
+  --ed-match-bg: rgba(181, 137, 0, .28);
+  --ed-match-ring: rgba(181, 137, 0, .45);
+  --ed-flash: rgba(38, 139, 210, .18);
+}
+
+[data-editor-scheme="dark-grey"] {
+  --ed-color-scheme: dark;
+  --ed-bg: #2b2b2b;
+  --ed-fg: #d4d4d4;
+  --ed-gutter: #262626;
+  --ed-gutter-border: #333333;
+  --ed-line-number: #6e7681;
+  --ed-cursor: #f5f5f5;
+  --ed-selection: #264f78;
+  --ed-keyword: #c586c0;
+  --ed-tag: #569cd6;
+  --ed-bracket: #9ca3af;
+  --ed-comment: #6a9955;
+  --ed-math: #ce9178;
+  --ed-error: #f48771;
+  --ed-matching-bracket: #fde68a;
+  --ed-match-bg: rgba(234, 179, 8, .28);
+  --ed-match-ring: rgba(234, 179, 8, .45);
+  --ed-flash: rgba(96, 165, 250, .28);
+}
+
+[data-editor-scheme="midnight"] {
+  --ed-color-scheme: dark;
+  --ed-bg: #1b222c;
+  --ed-fg: #d6deeb;
+  --ed-gutter: #19202a;
+  --ed-gutter-border: #2a3442;
+  --ed-line-number: #56657a;
+  --ed-cursor: #f8fafc;
+  --ed-selection: #264f78;
+  --ed-keyword: #c792ea;
+  --ed-tag: #82aaff;
+  --ed-bracket: #8b99ad;
+  --ed-comment: #6a9955;
+  --ed-math: #f78c6c;
+  --ed-error: #ff6b6b;
+  --ed-matching-bracket: #fde68a;
+  --ed-match-bg: rgba(234, 179, 8, .28);
+  --ed-match-ring: rgba(234, 179, 8, .45);
+  --ed-flash: rgba(96, 165, 250, .28);
+}
+
+[data-editor-scheme="solarized-dark"] {
+  --ed-color-scheme: dark;
+  --ed-bg: #002b36;
+  --ed-fg: #93a1a1;
+  --ed-gutter: #073642;
+  --ed-gutter-border: #0a3a47;
+  --ed-line-number: #586e75;
+  --ed-cursor: #eee8d5;
+  --ed-selection: #0f4b5a;
+  --ed-keyword: #6c71c4;
+  --ed-tag: #268bd2;
+  --ed-bracket: #657b83;
+  --ed-comment: #859900;
+  --ed-math: #cb4b16;
+  --ed-error: #dc322f;
+  --ed-matching-bracket: #b58900;
+  --ed-match-bg: rgba(181, 137, 0, .3);
+  --ed-match-ring: rgba(181, 137, 0, .5);
+  --ed-flash: rgba(38, 139, 210, .25);
+}
+
+/* Editor surface */
+.CodeMirror { color-scheme: var(--ed-color-scheme); color: var(--ed-fg); background: var(--ed-bg); }
+.CodeMirror-gutters { background: var(--ed-gutter); border-color: var(--ed-gutter-border); }
+.CodeMirror-linenumber { color: var(--ed-line-number); }
+.CodeMirror-cursor { border-left-color: var(--ed-cursor); }
+.CodeMirror-selected, .CodeMirror-focused .CodeMirror-selected { background: var(--ed-selection) !important; }
+.CodeMirror-line::selection, .CodeMirror-line > span::selection, .CodeMirror-line > span > span::selection { background: var(--ed-selection); }
+.cm-s-default .cm-keyword { color: var(--ed-keyword); }
+.cm-s-default .cm-tag { color: var(--ed-tag); }
+.cm-s-default .cm-bracket { color: var(--ed-bracket); }
+.cm-s-default .cm-comment { color: var(--ed-comment); }
+.cm-s-default .cm-atom, .cm-s-default .cm-number, .cm-s-default .cm-variable-2,
+.cm-s-default .cm-string, .cm-s-default .cm-string-2 { color: var(--ed-math); }
+.cm-s-default .cm-error { color: var(--ed-error); }
+.CodeMirror-matchingbracket { color: var(--ed-matching-bracket) !important; }
+.CodeMirror .cm-matchhighlight { background: var(--ed-match-bg); border-radius: 2px; box-shadow: 0 0 0 1px var(--ed-match-ring); }
+.CodeMirror .cm-sync-flash { background: var(--ed-flash); border-radius: 2px; }
+
+/* Find & replace: all matches, and the current one. Tuned to read on light and dark schemes. */
+.CodeMirror .cm-searching { background: rgba(250, 204, 21, .4); border-radius: 2px; }
+.CodeMirror .cm-search-current { background: rgba(249, 115, 22, .6); border-radius: 2px; box-shadow: 0 0 0 1px rgba(194, 65, 12, .8); }
+.CodeMirror-search-match { background: #f59e0b; opacity: .7; }

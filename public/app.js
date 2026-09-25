@@ -6,6 +6,11 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs-dist/build/pdf.worker.mj
 
 let editor;
 let currentFile = 'main.tex';
+// The file whose content is actually in the editor; null until a load succeeds,
+// so a failed load can never be saved back as an empty file.
+let loadedFile = null;
+// { entryFile, saved, files } from /api/entry.
+let entryState = { entryFile: null, saved: false, files: [] };
 let suggestions = [];
 let currentDocument = null;
 let selectedNode = null;
@@ -28,6 +33,15 @@ let pendingPaperGeneration = null;
 let workspaceView = 'source';
 let pdfRenderGeneration = 0;
 let pdfLoadingTask = null;
+let currentPdfUrl = null;
+let pdfRenderedWidth = 0;
+const WORKSPACE_VIEW_KEY = 'papergod.workspaceView';
+const SPLIT_RATIO_KEY = 'papergod.splitRatio';
+const ASSISTANT_COLLAPSED_KEY = 'papergod.assistantCollapsed';
+const EDITOR_FONT_KEY = 'papergod.editorFont';
+const THEME_KEY = 'papergod.theme';
+const OUTLINE_DEPTH_KEY = 'papergod.outlineDepth';
+const EDITOR_SCHEME_KEY = 'papergod.editorScheme';
 let agentProviders = [];
 let agentActivationGeneration = 0;
 let currentPromptPreview = null;
@@ -101,19 +115,335 @@ class ModificationIntent {
   }
 }
 
-function setWorkspaceView(view) {
+// Programmatic calls (navigation, citation insertion, compile) ask for 'source' or
+// 'preview' only to make that pane visible; in split view both already are, so
+// only an explicit user choice ({ user: true }) leaves split view.
+function setWorkspaceView(view, { user = false } = {}) {
   if (view === 'preview' && document.getElementById('preview-view-btn').disabled) return;
+  if (workspaceView === 'split' && !user) {
+    if (view === 'source' && editor) requestAnimationFrame(() => editor.refresh());
+    return;
+  }
   workspaceView = view;
-  const showingSource = view === 'source';
-  document.getElementById('source-view').classList.toggle('hidden', !showingSource);
-  document.getElementById('preview-panel').classList.toggle('hidden', showingSource);
-  const sourceButton = document.getElementById('source-view-btn');
-  const previewButton = document.getElementById('preview-view-btn');
-  sourceButton.classList.toggle('active', showingSource);
-  previewButton.classList.toggle('active', !showingSource);
-  sourceButton.setAttribute('aria-selected', String(showingSource));
-  previewButton.setAttribute('aria-selected', String(!showingSource));
-  if (showingSource && editor) requestAnimationFrame(() => editor.refresh());
+  if (user) storePreference(WORKSPACE_VIEW_KEY, view);
+  const split = view === 'split';
+  const showSource = split || view === 'source';
+  const showPreview = split || view === 'preview';
+  document.getElementById('workspace-view').classList.toggle('split', split);
+  document.getElementById('split-divider').classList.toggle('hidden', !split);
+  document.getElementById('source-view').classList.toggle('hidden', !showSource);
+  document.getElementById('preview-panel').classList.toggle('hidden', !showPreview);
+  for (const [id, active] of [['source-view-btn', view === 'source'], ['preview-view-btn', view === 'preview'], ['split-view-btn', split]]) {
+    const button = document.getElementById(id);
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', String(active));
+  }
+  if (showSource && editor) requestAnimationFrame(() => editor.refresh());
+}
+
+function sourceVisible() { return workspaceView !== 'preview'; }
+function previewVisible() { return workspaceView !== 'source'; }
+
+function readPreference(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+
+function storePreference(key, value) {
+  try {
+    if (value === null || value === undefined) localStorage.removeItem(key);
+    else localStorage.setItem(key, value);
+  } catch { /* storage unavailable: preference lasts for this page only */ }
+}
+
+// Pages are rendered fit-to-width, so a pane resize (split divider, folding the
+// assistant, window resize) re-renders the current PDF at the new width.
+function initPdfAutoFit() {
+  const container = document.getElementById('pdf-preview');
+  let timer = null;
+  new ResizeObserver(() => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      const width = container.clientWidth;
+      if (!currentPdfUrl || !width || Math.abs(width - pdfRenderedWidth) < 24) return;
+      const scrollRatio = container.scrollHeight ? container.scrollTop / container.scrollHeight : 0;
+      showCompiledPdf(currentPdfUrl, { switchView: false }).then(() => {
+        container.scrollTop = scrollRatio * container.scrollHeight;
+      });
+    }, 220);
+  }).observe(container);
+}
+
+function applySplitRatio(ratio) {
+  const clamped = Math.min(0.8, Math.max(0.2, ratio));
+  document.getElementById('workspace-view').style.setProperty('--split-source', `${(clamped * 100).toFixed(2)}%`);
+  return clamped;
+}
+
+function initSplitDivider() {
+  const divider = document.getElementById('split-divider');
+  const view = document.getElementById('workspace-view');
+  let ratio = applySplitRatio(Number(readPreference(SPLIT_RATIO_KEY)) || 0.5);
+  const commit = () => { storePreference(SPLIT_RATIO_KEY, ratio.toFixed(4)); editor?.refresh(); };
+  divider.addEventListener('pointerdown', (event) => {
+    if (event.target.closest('button')) return;
+    event.preventDefault();
+    divider.setPointerCapture(event.pointerId);
+    view.classList.add('resizing');
+    const bounds = view.getBoundingClientRect();
+    const move = (moveEvent) => { ratio = applySplitRatio((moveEvent.clientX - bounds.left) / bounds.width); };
+    const up = () => {
+      divider.removeEventListener('pointermove', move);
+      divider.removeEventListener('pointerup', up);
+      divider.removeEventListener('pointercancel', up);
+      view.classList.remove('resizing');
+      commit();
+    };
+    divider.addEventListener('pointermove', move);
+    divider.addEventListener('pointerup', up);
+    divider.addEventListener('pointercancel', up);
+  });
+  divider.addEventListener('dblclick', (event) => {
+    if (event.target.closest('button')) return;
+    ratio = applySplitRatio(0.5);
+    commit();
+  });
+  divider.addEventListener('keydown', (event) => {
+    const step = event.key === 'ArrowLeft' ? -0.05 : event.key === 'ArrowRight' ? 0.05 : 0;
+    if (!step) return;
+    event.preventDefault();
+    ratio = applySplitRatio(ratio + step);
+    commit();
+  });
+}
+
+// Source <-> PDF synchronization for the split-view arrows. Both directions reuse
+// the text-layer mappings built after each render (pdfSentenceMappings for body
+// sentences, pdfHeadingMappings for the title and section headings).
+function pdfSyncTargets() {
+  const targets = [];
+  for (const mapping of pdfSentenceMappings) {
+    const range = mapping.sentence?.sourceRange;
+    if (range) targets.push({ pdf: mapping, source: range });
+  }
+  for (const mapping of pdfHeadingMappings) {
+    const range = headingSourceRange(mapping.node) || mapping.node.sourceRange;
+    if (range) targets.push({ pdf: mapping, source: range });
+  }
+  return targets;
+}
+
+function pdfReadyForSync() {
+  if (document.querySelector('#pdf-preview .pdf-page') && pdfTextIndex) return true;
+  showStatus(t('sync.compileFirst'), '');
+  return false;
+}
+
+function flashPdfRange(range) {
+  highlightPdfRanges(pdfTextIndex, [range], 'outline');
+  const marks = [...document.querySelectorAll('.pdf-active-highlight')];
+  setTimeout(() => marks.forEach((mark) => mark.remove()), 1600);
+}
+
+function syncPdfToCursor() {
+  if (!pdfReadyForSync()) return;
+  const cursor = editor.indexFromPos(editor.getCursor());
+  const targets = pdfSyncTargets();
+  // Prefer the innermost range containing the cursor; otherwise the nearest one before it.
+  const containing = targets
+    .filter(({ source }) => source.start <= cursor && cursor <= source.end)
+    .sort((a, b) => (a.source.end - a.source.start) - (b.source.end - b.source.start))[0];
+  const target = containing || targets
+    .filter(({ source }) => source.start <= cursor)
+    .sort((a, b) => b.source.start - a.source.start)[0] || targets.sort((a, b) => a.source.start - b.source.start)[0];
+  if (!target || !scrollPdfToRange(pdfTextIndex, target.pdf)) {
+    showStatus(t('sync.notFound'), '');
+    return;
+  }
+  flashPdfRange(target.pdf);
+}
+
+function syncCursorToPdf() {
+  if (!pdfReadyForSync()) return;
+  const viewTop = document.getElementById('pdf-preview').getBoundingClientRect().top + 8;
+  const targets = pdfSyncTargets().sort((a, b) => a.pdf.start - b.pdf.start);
+  // First mapped text whose line starts inside the visible area of the PDF pane.
+  const target = targets.find(({ pdf }) => {
+    for (let position = pdf.start; position < pdf.end; position += 1) {
+      const span = pdfTextIndex.positions[position]?.span;
+      if (span) return span.getBoundingClientRect().top >= viewTop;
+    }
+    return false;
+  }) || targets.at(-1);
+  if (!target) {
+    showStatus(t('sync.notFound'), '');
+    return;
+  }
+  const from = editor.posFromIndex(target.source.start);
+  const to = editor.posFromIndex(target.source.end);
+  editor.setCursor(from);
+  editor.scrollTo(null, Math.max(0, editor.charCoords(from, 'local').top - 48));
+  const mark = editor.markText(from, to, { className: 'cm-sync-flash' });
+  setTimeout(() => mark.clear(), 1600);
+  editor.focus();
+}
+
+// The source editor's color scheme is independent of the app theme; see
+// editor-schemes.css. main.jsx applies the saved scheme before first paint.
+function applyEditorScheme(scheme) {
+  document.documentElement.dataset.editorScheme = scheme;
+  document.querySelectorAll('[data-scheme-option]').forEach((option) => {
+    option.setAttribute('aria-checked', String(option.dataset.schemeOption === scheme));
+  });
+  if (editor) editor.refresh();
+}
+
+function initEditorScheme() {
+  const popover = document.getElementById('editor-scheme-popover');
+  const trigger = document.getElementById('editor-scheme-btn');
+  const options = [...popover.querySelectorAll('[data-scheme-option]')];
+  const known = new Set(options.map((option) => option.dataset.schemeOption));
+  const saved = readPreference(EDITOR_SCHEME_KEY);
+  applyEditorScheme(known.has(saved) ? saved : 'white');
+  const open = (show) => {
+    popover.classList.toggle('hidden', !show);
+    trigger.setAttribute('aria-expanded', String(show));
+    if (show) (popover.querySelector('[aria-checked="true"]') || options[0]).focus();
+  };
+  options.forEach((option) => option.addEventListener('click', () => {
+    applyEditorScheme(option.dataset.schemeOption);
+    storePreference(EDITOR_SCHEME_KEY, option.dataset.schemeOption);
+  }));
+  trigger.addEventListener('click', () => open(popover.classList.contains('hidden')));
+  document.getElementById('editor-scheme-close').addEventListener('click', () => open(false));
+  document.addEventListener('pointerdown', (event) => {
+    if (popover.classList.contains('hidden') || popover.contains(event.target) || trigger.contains(event.target)) return;
+    open(false);
+  });
+  popover.addEventListener('keydown', (event) => {
+    const index = options.indexOf(document.activeElement);
+    const step = { ArrowRight: 1, ArrowDown: 2, ArrowLeft: -1, ArrowUp: -2 }[event.key];
+    if (event.key === 'Escape') { open(false); trigger.focus(); }
+    else if (step && index >= 0) {
+      event.preventDefault();
+      options[(index + step + options.length) % options.length].focus();
+    }
+  });
+}
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  const toggle = document.getElementById('theme-toggle');
+  toggle.setAttribute('aria-pressed', String(theme === 'dark'));
+  toggle.title = t(theme === 'dark' ? 'theme.toLight' : 'theme.toDark');
+}
+
+function initThemeToggle() {
+  applyTheme(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
+  document.getElementById('theme-toggle').addEventListener('click', () => {
+    const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    storePreference(THEME_KEY, next);
+    applyTheme(next);
+  });
+  // Follow the OS setting until the user picks a theme explicitly.
+  try {
+    matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (event) => {
+      if (!readPreference(THEME_KEY)) applyTheme(event.matches ? 'dark' : 'light');
+    });
+  } catch { /* matchMedia unavailable */ }
+}
+
+function setAssistantCollapsed(collapsed, { persist = true } = {}) {
+  document.getElementById('app').classList.toggle('assistant-collapsed', collapsed);
+  document.getElementById('assistant-collapse').setAttribute('aria-expanded', String(!collapsed));
+  if (persist) storePreference(ASSISTANT_COLLAPSED_KEY, collapsed ? '1' : null);
+  if (editor) requestAnimationFrame(() => editor.refresh());
+}
+
+const EDITOR_FONT_DEFAULTS = { family: '', size: 13, lineHeight: '1.65' };
+
+function loadEditorFontSettings() {
+  try {
+    const saved = JSON.parse(readPreference(EDITOR_FONT_KEY) || '{}');
+    const size = Number(saved.size);
+    return {
+      family: typeof saved.family === 'string' ? saved.family : EDITOR_FONT_DEFAULTS.family,
+      size: Number.isFinite(size) && size >= 8 && size <= 36 ? size : EDITOR_FONT_DEFAULTS.size,
+      lineHeight: ['1.3', '1.5', '1.65', '1.8', '2'].includes(saved.lineHeight) ? saved.lineHeight : EDITOR_FONT_DEFAULTS.lineHeight,
+    };
+  } catch {
+    return { ...EDITOR_FONT_DEFAULTS };
+  }
+}
+
+function applyEditorFontSettings(settings) {
+  const root = document.documentElement.style;
+  if (settings.family) root.setProperty('--editor-font-family', settings.family);
+  else root.removeProperty('--editor-font-family');
+  root.setProperty('--editor-font-size', `${settings.size}px`);
+  root.setProperty('--editor-line-height', settings.lineHeight);
+  if (editor) editor.refresh();
+}
+
+function initEditorSettings() {
+  const popover = document.getElementById('editor-settings-popover');
+  const trigger = document.getElementById('editor-settings-btn');
+  const familySelect = document.getElementById('editor-font-family');
+  const customInput = document.getElementById('editor-font-custom');
+  const sizeInput = document.getElementById('editor-font-size');
+  const lineHeightSelect = document.getElementById('editor-line-height');
+  let settings = loadEditorFontSettings();
+
+  const render = () => {
+    const preset = [...familySelect.options].some((option) => option.value === settings.family && option.value !== 'custom');
+    familySelect.value = preset ? settings.family : 'custom';
+    customInput.classList.toggle('hidden', preset);
+    if (!preset) customInput.value = settings.family;
+    sizeInput.value = String(settings.size);
+    lineHeightSelect.value = settings.lineHeight;
+  };
+  const update = (patch) => {
+    settings = { ...settings, ...patch };
+    applyEditorFontSettings(settings);
+    storePreference(EDITOR_FONT_KEY, JSON.stringify(settings));
+  };
+  const setSize = (value) => {
+    const size = Math.round(Number(value));
+    if (!Number.isFinite(size)) return;
+    update({ size: Math.min(36, Math.max(8, size)) });
+    sizeInput.value = String(settings.size);
+  };
+  const open = (show) => {
+    popover.classList.toggle('hidden', !show);
+    trigger.setAttribute('aria-expanded', String(show));
+    if (show) { render(); familySelect.focus(); }
+  };
+
+  applyEditorFontSettings(settings);
+  familySelect.addEventListener('change', () => {
+    if (familySelect.value === 'custom') {
+      customInput.classList.remove('hidden');
+      customInput.focus();
+      if (customInput.value.trim()) update({ family: customInput.value.trim() });
+    } else {
+      customInput.classList.add('hidden');
+      update({ family: familySelect.value });
+    }
+  });
+  customInput.addEventListener('input', () => update({ family: customInput.value.trim() }));
+  sizeInput.addEventListener('change', () => setSize(sizeInput.value));
+  document.getElementById('editor-font-size-down').addEventListener('click', () => setSize(settings.size - 1));
+  document.getElementById('editor-font-size-up').addEventListener('click', () => setSize(settings.size + 1));
+  lineHeightSelect.addEventListener('change', () => update({ lineHeight: lineHeightSelect.value }));
+  document.getElementById('editor-settings-reset').addEventListener('click', () => { update({ ...EDITOR_FONT_DEFAULTS }); render(); });
+  trigger.addEventListener('click', () => open(popover.classList.contains('hidden')));
+  document.getElementById('tool-editor-settings').addEventListener('click', () => open(true));
+  document.getElementById('editor-settings-close').addEventListener('click', () => open(false));
+  document.addEventListener('pointerdown', (event) => {
+    if (popover.classList.contains('hidden') || popover.contains(event.target) || trigger.contains(event.target)) return;
+    if (event.target.closest('#tool-editor-settings')) return;
+    open(false);
+  });
+  popover.addEventListener('keydown', (event) => { if (event.key === 'Escape') { open(false); trigger.focus(); } });
 }
 
 async function showCompiledPdf(url, { switchView = true } = {}) {
@@ -121,6 +451,7 @@ async function showCompiledPdf(url, { switchView = true } = {}) {
   const container = document.getElementById('pdf-preview');
   const placeholder = document.getElementById('preview-placeholder');
   if (pdfLoadingTask) await pdfLoadingTask.destroy().catch(() => {});
+  currentPdfUrl = url;
   document.getElementById('pdf-scope-menu').classList.add('hidden');
   document.getElementById('pdf-edit-menu').classList.add('hidden');
   clearPdfScopeHighlight();
@@ -140,6 +471,7 @@ async function showCompiledPdf(url, { switchView = true } = {}) {
     const pdfUrl = url + (url.includes('?') ? '&' : '?') + 't=' + Date.now();
     pdfLoadingTask = pdfjsLib.getDocument({ url: pdfUrl, isEvalSupported: false });
     const pdf = await pdfLoadingTask.promise;
+    pdfRenderedWidth = container.clientWidth;
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
       if (renderGeneration !== pdfRenderGeneration) return;
       const page = await pdf.getPage(pageNumber);
@@ -1508,12 +1840,14 @@ async function submitPdfAnnotation() {
 }
 
 function resetCompiledPreview() {
+  hideCompileError({ clear: true });
   pdfRenderGeneration += 1;
   lastCompiledSource = null;
   lastCompiledSentenceSnapshot = [];
   recentChangedSentenceIds = new Set();
   if (pdfLoadingTask) pdfLoadingTask.destroy().catch(() => {});
   pdfLoadingTask = null;
+  currentPdfUrl = null;
   document.getElementById('pdf-preview').replaceChildren();
   const placeholder = document.getElementById('preview-placeholder');
   placeholder.textContent = 'Compile to render the paper';
@@ -1725,6 +2059,9 @@ async function undoLastAiRevision() {
 
 async function loadEngineStatus() {
   const compileBtn = document.getElementById('compile-btn');
+  // The split button's menu follows the main button's enabled state.
+  new MutationObserver(() => { document.getElementById('compile-menu-btn').disabled = compileBtn.disabled; })
+    .observe(compileBtn, { attributes: true, attributeFilter: ['disabled'] });
   try {
     const res = await fetch('/api/engines');
     const data = await res.json();
@@ -3326,6 +3663,7 @@ async function loadFile(name) {
     if (!res.ok) throw new Error('Load failed');
     const data = await res.json();
     currentFile = name;
+    loadedFile = name;
     resetCompiledPreview();
     editor.setValue(data.content);
     suggestions = [];
@@ -3343,10 +3681,15 @@ async function loadFile(name) {
     if (latexEngineAvailable) await compileFile({ silent: true });
   } catch (e) {
     showStatus('Failed to load ' + name, 'error');
+    if (!loadedFile) renderOutline();
   }
 }
 
 async function saveFile({ sync = true } = {}) {
+  if (!loadedFile || loadedFile !== currentFile) {
+    showStatus(t('entry.saveBlocked'), 'error');
+    return false;
+  }
   try {
     const content = editor.getValue();
     const res = await fetch('/api/files/' + encodeURIComponent(currentFile), {
@@ -3529,19 +3872,102 @@ async function closeFocusAnnotation() {
   if (selectedNode) selectStructureNode(selectedNode.id, { focus: false });
 }
 
+// LaTeX-style heading numbers (1, 1.1, 1.1.1; A, A.1 after \appendix).
+// The abstract and starred headings are unnumbered and do not advance counters.
+function outlineSectionNumbers(sections) {
+  const numbers = new Map();
+  const counters = [0, 0, 0, 0, 0, 0];
+  let inAppendix = false;
+  const letter = (n) => (n >= 1 && n <= 26 ? String.fromCharCode(64 + n) : String(n));
+  for (const section of sections || []) {
+    if (section.command === 'abstract' || section.starred) continue;
+    if (section.appendix && !inAppendix) {
+      inAppendix = true;
+      counters.fill(0);
+    }
+    const level = Math.min(Math.max(section.level || 1, 1), counters.length);
+    counters[level - 1] += 1;
+    counters.fill(0, level);
+    numbers.set(section.id, counters.slice(0, level).map((value, index) => (index === 0 && inAppendix ? letter(value) : String(value))).join('.'));
+  }
+  return numbers;
+}
+
+// How many heading levels the outline shows: 0 (title only) to 3, or Infinity for all.
+function outlineDepth() {
+  const saved = readPreference(OUTLINE_DEPTH_KEY);
+  if (saved === 'all') return Infinity;
+  const value = Number(saved);
+  return saved !== null && [0, 1, 2, 3].includes(value) ? value : 2;
+}
+
+function renderOutlineDepthPicker() {
+  const depth = outlineDepth();
+  const value = depth === Infinity ? 'all' : String(depth);
+  document.getElementById('outline-depth-label').textContent = value === 'all' ? t('outlineDepth.allShort') : value;
+  document.querySelectorAll('[data-outline-depth]').forEach((item) => item.setAttribute('aria-checked', String(item.dataset.outlineDepth === value)));
+}
+
+function initOutlineDepthPicker() {
+  const menu = document.getElementById('outline-depth-menu');
+  const button = document.getElementById('outline-depth-btn');
+  const open = (show) => {
+    menu.classList.toggle('hidden', !show);
+    button.setAttribute('aria-expanded', String(show));
+    if (show) menu.querySelector('[aria-checked="true"]')?.focus();
+  };
+  renderOutlineDepthPicker();
+  button.addEventListener('click', () => open(menu.classList.contains('hidden')));
+  menu.querySelectorAll('[data-outline-depth]').forEach((item) => item.addEventListener('click', () => {
+    storePreference(OUTLINE_DEPTH_KEY, item.dataset.outlineDepth);
+    renderOutlineDepthPicker();
+    open(false);
+    renderOutline();
+  }));
+  document.addEventListener('pointerdown', (event) => {
+    if (!menu.classList.contains('hidden') && !event.target.closest('#outline-depth-picker')) open(false);
+  });
+  menu.addEventListener('keydown', (event) => {
+    const items = [...menu.querySelectorAll('[data-outline-depth]')];
+    const index = items.indexOf(document.activeElement);
+    if (event.key === 'Escape') { open(false); button.focus(); }
+    else if (event.key === 'ArrowDown') { event.preventDefault(); items[(index + 1) % items.length].focus(); }
+    else if (event.key === 'ArrowUp') { event.preventDefault(); items[(index - 1 + items.length) % items.length].focus(); }
+  });
+  document.addEventListener('papergod:locale-changed', renderOutlineDepthPicker);
+}
+
 function renderOutline() {
   const container = document.getElementById('outline-tree');
-  if (!currentDocument) {
-    container.innerHTML = '<div class="outline-empty">No structure available</div>';
+  if (!currentDocument || !loadedFile) {
+    if (loadedFile) {
+      container.innerHTML = '<div class="outline-empty">No structure available</div>';
+      return;
+    }
+    // Nothing open: let the user pick the paper's entry file right here.
+    const hasFiles = entryState.files.length > 0;
+    container.innerHTML = '<div class="outline-empty outline-entry-empty"><p>'
+      + escapeHtml(t(hasFiles ? 'entry.noFileLoaded' : 'entry.none')) + '</p>'
+      + (hasFiles ? '<button type="button" id="outline-choose-entry">' + escapeHtml(t('entry.choose')) + '</button>' : '')
+      + '</div>';
+    document.getElementById('outline-choose-entry')?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      openEntryMenu(true);
+    });
     return;
   }
-  const sectionHtml = (section) =>
-    '<button type="button" class="outline-node outline-heading-node level-' + Math.min(section.level || 1, 6)
-    + '" data-node-id="' + escapeHtml(section.id) + '" title="Jump to ' + escapeHtml(section.title) + ' in PDF">'
-    + escapeHtml(section.title) + '</button>';
+  const numbers = outlineSectionNumbers(currentDocument.sections);
+  const depth = outlineDepth();
+  const sectionHtml = (section) => {
+    const number = numbers.get(section.id);
+    return '<button type="button" class="outline-node outline-heading-node level-' + Math.min(section.level || 1, 6) + (number ? ' numbered' : '')
+      + '" data-node-id="' + escapeHtml(section.id) + '" title="Jump to ' + escapeHtml((number ? number + ' ' : '') + section.title) + ' in PDF">'
+      + (number ? '<span class="outline-number">' + escapeHtml(number) + '</span>' : '')
+      + '<span class="outline-title">' + escapeHtml(section.title) + '</span></button>';
+  };
   container.innerHTML = '<button type="button" class="outline-document" data-node-id="' + escapeHtml(currentDocument.id)
     + '" title="Jump to document title in PDF">' + escapeHtml(currentDocument.title || currentDocument.file) + '</button>'
-    + currentDocument.sections.map(sectionHtml).join('');
+    + currentDocument.sections.filter((section) => (section.level || 1) <= depth).map(sectionHtml).join('');
   container.querySelectorAll('[data-node-id]').forEach(element => {
     element.addEventListener('click', () => {
       selectStructureNode(element.dataset.nodeId, { forcePreview: true });
@@ -3649,28 +4075,40 @@ function selectStructureNode(nodeId, { focus = true, editHeading = false, forceS
   updateOutlineSelection();
   schedulePromptContextPreview();
   const editRange = editHeading ? headingSourceRange(node) : node.sourceRange;
-  if (focus && forceSource && workspaceView !== 'source') setWorkspaceView('source');
+  if (focus && forceSource && !sourceVisible()) setWorkspaceView('source');
+  // Split view shows both panes, so outline navigation moves the editor too.
+  const split = workspaceView === 'split';
+  let previewReady = true;
   if (focus && forcePreview) {
-    const previewReady = !document.getElementById('preview-view-btn').disabled
-      && document.querySelector('#pdf-preview .pdf-page');
-    if (!previewReady) {
+    previewReady = !document.getElementById('preview-view-btn').disabled
+      && Boolean(document.querySelector('#pdf-preview .pdf-page'));
+    if (!previewReady && !split) {
       showStatus('Compile the PDF before using outline navigation.', '');
       return;
     }
-    if (workspaceView !== 'preview') setWorkspaceView('preview');
+    if (previewReady && !previewVisible()) setWorkspaceView('preview');
+  }
+  if (focus && forcePreview && split) {
+    const anchor = headingSourceRange(node) || node.sourceRange;
+    if (anchor) {
+      const start = editor.posFromIndex(anchor.start);
+      editor.setSelection(start, editor.posFromIndex(anchor.end));
+      editor.scrollTo(null, Math.max(0, editor.charCoords(start, 'local').top - 48));
+    }
+    if (!previewReady) return;
   }
   if (focus && editRange && !forcePreview) {
     const start = editor.posFromIndex(editRange.start);
     const end = editor.posFromIndex(editRange.end);
     editor.setSelection(start, end);
-    if (workspaceView === 'source') {
+    if (sourceVisible()) {
       requestAnimationFrame(() => {
         editor.scrollIntoView({ from: start, to: end }, 80);
         editor.focus();
       });
     }
   }
-  if (focus && !forceSource && !focusPdfNode(node) && (workspaceView === 'preview' || forcePreview)) {
+  if (focus && !forceSource && !focusPdfNode(node) && (previewVisible() || forcePreview)) {
     showStatus('Could not locate this content in the PDF. Recompile to refresh the text layer.', '');
   }
 }
@@ -3739,29 +4177,511 @@ async function saveContext() {
   }
 }
 
-async function compileFile({ silent = false } = {}) {
-  if (!await saveFile()) return false;
-  showStatus('Compiling...', '');
+// --- Find & replace (Ctrl/Cmd+F), Overleaf-style bar under the editor -------
+
+const searchState = {
+  open: false,
+  regex: null,        // compiled global RegExp for the current query, or null
+  matches: [],        // [{ start, end, text }] as document offsets
+  current: -1,
+  overlay: null,
+  currentMark: null,
+  scrollbar: null,
+  refreshTimer: null,
+};
+const SEARCH_MAX_MATCHES = 10000;
+
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function searchOption(id) {
+  return document.getElementById(id).getAttribute('aria-pressed') === 'true';
+}
+
+// Build the query RegExp from the input and toggles; null for an empty query,
+// an Error for an invalid regular expression.
+function buildSearchRegex() {
+  const text = document.getElementById('search-query').value;
+  if (!text) return null;
+  let source = searchOption('search-regex') ? text : escapeRegExp(text);
+  if (searchOption('search-word')) source = '(?<![\\p{L}\\p{N}_])(?:' + source + ')(?![\\p{L}\\p{N}_])';
+  try {
+    return new RegExp(source, 'gu' + (searchOption('search-case') ? '' : 'i') + (searchOption('search-regex') ? 'm' : ''));
+  } catch (error) {
+    return error;
+  }
+}
+
+function clearSearchDecorations() {
+  if (searchState.overlay) editor.removeOverlay(searchState.overlay);
+  searchState.overlay = null;
+  searchState.currentMark?.clear();
+  searchState.currentMark = null;
+  searchState.scrollbar?.clear();
+  searchState.scrollbar = null;
+}
+
+// Highlight every match with a line overlay (cheap even for many matches).
+function searchOverlay(regex) {
+  const lineRegex = new RegExp(regex.source, regex.flags.replace('m', ''));
+  return {
+    token(stream) {
+      lineRegex.lastIndex = stream.pos;
+      const match = lineRegex.exec(stream.string);
+      if (match && match.index === stream.pos) {
+        stream.pos += match[0].length || 1;
+        return 'searching';
+      }
+      if (match) stream.pos = match.index;
+      else stream.skipToEnd();
+      return null;
+    },
+  };
+}
+
+function refreshSearch({ keepPosition = false, reveal = true } = {}) {
+  const input = document.getElementById('search-query');
+  const regex = buildSearchRegex();
+  clearSearchDecorations();
+  searchState.matches = [];
+  searchState.regex = regex instanceof RegExp ? regex : null;
+  input.classList.toggle('invalid', regex instanceof Error);
+  input.title = regex instanceof Error ? regex.message : '';
+  if (searchState.regex) {
+    const text = editor.getValue();
+    regex.lastIndex = 0;
+    let match;
+    while ((match = regex.exec(text)) && searchState.matches.length < SEARCH_MAX_MATCHES) {
+      if (!match[0].length) { regex.lastIndex += 1; continue; }
+      searchState.matches.push({ start: match.index, end: match.index + match[0].length, text: match[0] });
+    }
+    searchState.overlay = searchOverlay(regex);
+    editor.addOverlay(searchState.overlay);
+    if (editor.showMatchesOnScrollbar) {
+      searchState.scrollbar = editor.showMatchesOnScrollbar(new RegExp(regex.source, regex.flags.replace('g', '')), false, 'CodeMirror-search-match');
+    }
+  }
+  const anchor = keepPosition && searchState.current >= 0
+    ? searchState.matches.findIndex((item) => item.start >= (searchState.anchor ?? 0))
+    : searchState.matches.findIndex((item) => item.end > editor.indexFromPos(editor.getCursor('from')));
+  selectSearchMatch(searchState.matches.length ? (anchor >= 0 ? anchor : 0) : -1, { reveal });
+}
+
+function selectSearchMatch(index, { reveal = true } = {}) {
+  searchState.currentMark?.clear();
+  searchState.currentMark = null;
+  searchState.current = index;
+  const count = document.getElementById('search-count');
+  const query = document.getElementById('search-query').value;
+  count.textContent = !query ? '' : searchState.matches.length
+    ? t('search.count', { current: index + 1, total: searchState.matches.length + (searchState.matches.length >= SEARCH_MAX_MATCHES ? '+' : '') })
+    : t('search.noResults');
+  count.classList.toggle('empty', Boolean(query) && !searchState.matches.length);
+  if (index < 0) return;
+  const match = searchState.matches[index];
+  searchState.anchor = match.start;
+  const from = editor.posFromIndex(match.start);
+  const to = editor.posFromIndex(match.end);
+  searchState.currentMark = editor.markText(from, to, { className: 'cm-search-current' });
+  editor.setSelection(from, to, { scroll: false });
+  if (reveal) editor.scrollIntoView({ from, to }, 80);
+}
+
+function stepSearch(direction) {
+  if (!searchState.matches.length) return;
+  const total = searchState.matches.length;
+  selectSearchMatch((searchState.current + direction + total) % total);
+}
+
+function replacementFor(matchText) {
+  const replace = document.getElementById('search-replace').value;
+  if (!searchOption('search-regex') || !searchState.regex) return replace;
+  // Support $1, $&, ... by re-running the match on its own text.
+  return matchText.replace(new RegExp(searchState.regex.source, searchState.regex.flags.replace('g', '')), replace);
+}
+
+function replaceCurrentMatch() {
+  const match = searchState.matches[searchState.current];
+  if (!match) return;
+  editor.replaceRange(replacementFor(match.text), editor.posFromIndex(match.start), editor.posFromIndex(match.end), '+replace');
+  searchState.anchor = match.start + replacementFor(match.text).length;
+  searchState.current = 0;
+  refreshSearch({ keepPosition: true });
+}
+
+function replaceAllMatches() {
+  const matches = searchState.matches;
+  if (!matches.length) return;
+  // One operation, applied back to front, so it is a single undo step.
+  editor.operation(() => {
+    for (let index = matches.length - 1; index >= 0; index -= 1) {
+      const match = matches[index];
+      editor.replaceRange(replacementFor(match.text), editor.posFromIndex(match.start), editor.posFromIndex(match.end), '*replace');
+    }
+  });
+  showStatus(t('search.replacedAll', { count: matches.length }), 'success');
+  refreshSearch({ reveal: false });
+}
+
+function openSearch({ replace = false } = {}) {
+  const panel = document.getElementById('search-panel');
+  const input = document.getElementById('search-query');
+  if (!sourceVisible()) setWorkspaceView('source');
+  const selection = editor.getSelection();
+  if (selection && !selection.includes('\n')) input.value = selection;
+  const wasOpen = searchState.open;
+  searchState.open = true;
+  panel.classList.remove('hidden');
+  if (!wasOpen) editor.refresh();
+  const target = replace ? document.getElementById('search-replace') : input;
+  target.focus();
+  target.select();
+  refreshSearch();
+}
+
+function closeSearch({ focusEditor = true } = {}) {
+  if (!searchState.open) return;
+  searchState.open = false;
+  clearSearchDecorations();
+  searchState.matches = [];
+  searchState.current = -1;
+  document.getElementById('search-panel').classList.add('hidden');
+  editor.refresh();
+  if (focusEditor) editor.focus();
+}
+
+function initSearchPanel() {
+  const query = document.getElementById('search-query');
+  const replace = document.getElementById('search-replace');
+  query.addEventListener('input', () => refreshSearch());
+  for (const id of ['search-case', 'search-regex', 'search-word']) {
+    document.getElementById(id).addEventListener('click', (event) => {
+      const button = event.currentTarget;
+      button.setAttribute('aria-pressed', String(button.getAttribute('aria-pressed') !== 'true'));
+      refreshSearch();
+      query.focus();
+    });
+  }
+  document.getElementById('search-prev').addEventListener('click', () => stepSearch(-1));
+  document.getElementById('search-next').addEventListener('click', () => stepSearch(1));
+  document.getElementById('search-close').addEventListener('click', () => closeSearch());
+  document.getElementById('search-replace-one').addEventListener('click', replaceCurrentMatch);
+  document.getElementById('search-replace-all').addEventListener('click', replaceAllMatches);
+  const onKey = (event) => {
+    if (event.key === 'Escape') { event.preventDefault(); closeSearch(); }
+    else if (event.key === 'F3') { event.preventDefault(); stepSearch(event.shiftKey ? -1 : 1); }
+    else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') { event.preventDefault(); query.focus(); query.select(); }
+  };
+  query.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') { event.preventDefault(); stepSearch(event.shiftKey ? -1 : 1); }
+    else onKey(event);
+  });
+  replace.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      if (event.ctrlKey || event.metaKey) replaceAllMatches();
+      else replaceCurrentMatch();
+    } else onKey(event);
+  });
+  // Keep counts and highlights current while the document is edited.
+  editor.on('changes', (_instance, changes) => {
+    if (!searchState.open || changes.every((change) => change.origin === '+replace' || change.origin === '*replace')) return;
+    clearTimeout(searchState.refreshTimer);
+    searchState.refreshTimer = setTimeout(() => refreshSearch({ keepPosition: true, reveal: false }), 150);
+  });
+  editor.on('swapDoc', () => closeSearch({ focusEditor: false }));
+}
+
+// --- Compile errors shown in the PDF area -------------------------------------
+
+let lastCompileError = null;
+
+// Pull structured errors out of a TeX transcript. With -file-line-error, errors
+// read "./file.tex:42: message" (tectonic: "error: file.tex:42: message");
+// errors without a location start with "! " and may be followed by "l.42 ...".
+function parseLatexLog(log, fallbackError, compiledFile) {
+  const lines = String(log || '').split(/\r?\n/);
+  const errors = [];
+  const seen = new Set();
+  const add = (entry) => {
+    const key = `${entry.file}:${entry.line}:${entry.message}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    errors.push(entry);
+  };
+  const contextAfter = (index) => {
+    for (let next = index + 1; next < Math.min(lines.length, index + 14); next += 1) {
+      const match = lines[next].match(/^l\.(\d+)\s?(.*)$/);
+      if (match) return { line: Number(match[1]), context: match[2].trim() };
+    }
+    return null;
+  };
+  lines.forEach((text, index) => {
+    const located = text.match(/^(?:error: )?(.+?\.(?:tex|sty|cls|bbl)):(\d+): (.+)$/);
+    if (located) {
+      const after = contextAfter(index);
+      add({ file: located[1].replace(/^\.\//, '').replace(/\\/g, '/'), line: Number(located[2]), message: located[3].trim(), context: after?.context || '', logLine: index });
+      return;
+    }
+    if (text.startsWith('! ')) {
+      const after = contextAfter(index);
+      add({ file: after ? compiledFile : null, line: after?.line || null, message: text.slice(2).trim(), context: after?.context || '', logLine: index });
+    }
+  });
+  if (!errors.length && fallbackError) add({ file: null, line: null, message: String(fallbackError), context: '', logLine: -1 });
+  // -halt-on-error appends a generic "Fatal error occurred" / "Emergency stop"
+  // line after the real error; list it only when nothing more specific exists.
+  const generic = /^==> Fatal error occurred|^Emergency stop/;
+  const specific = errors.filter((error) => !generic.test(error.message));
+  return specific.length ? specific : errors;
+}
+
+function classifyLogLine(text) {
+  if (/^(?:error: )?.+?\.(?:tex|sty|cls|bbl):\d+: |^! /.test(text)) return 'error';
+  if (/Warning|^Overfull|^Underfull|^Missing character/.test(text)) return 'warning';
+  return '';
+}
+
+function showCompileError(result, { reveal = false } = {}) {
+  const errors = parseLatexLog(result.log, result.error, result.file);
+  lastCompileError = { ...result, errors };
+  const panel = document.getElementById('compile-error-panel');
+  document.getElementById('compile-error-meta').textContent = [result.file, result.engine].filter(Boolean).join(' · ');
+  const list = document.getElementById('compile-error-list');
+  list.innerHTML = errors.map((error, index) => {
+    const where = error.file && error.line ? `${error.file}:${error.line}` : error.line ? `line ${error.line}` : '';
+    return '<li><button type="button" data-compile-error="' + index + '"' + (error.line ? '' : ' disabled') + '>'
+      + (where ? '<span class="compile-error-where">' + escapeHtml(where) + '</span>' : '')
+      + '<span class="compile-error-message">' + escapeHtml(error.message) + '</span>'
+      + (error.context ? '<code>' + escapeHtml(error.context) + '</code>' : '')
+      + '</button></li>';
+  }).join('');
+  list.querySelectorAll('[data-compile-error]').forEach((button) => button.addEventListener('click', () => {
+    const error = errors[Number(button.dataset.compileError)];
+    jumpToSourceLine(error.file || result.file, error.line);
+  }));
+  const logLines = String(result.log || '').split(/\r?\n/);
+  const logElement = document.getElementById('compile-error-log');
+  logElement.innerHTML = result.log
+    ? logLines.map((text, index) => {
+      const kind = classifyLogLine(text);
+      return '<span data-log-line="' + index + '"' + (kind ? ' class="log-' + kind + '"' : '') + '>' + escapeHtml(text) + '</span>';
+    }).join('\n')
+    : escapeHtml(t('compileError.noLog'));
+  const warnings = logLines.filter((text) => classifyLogLine(text) === 'warning').length;
+  document.getElementById('compile-error-log-stats').textContent = t('compileError.stats', { errors: errors.length, warnings });
+  panel.classList.remove('hidden');
+  document.getElementById('compile-error-banner').classList.add('hidden');
+  document.getElementById('compile-error-hide').classList.toggle('hidden', !document.querySelector('#pdf-preview .pdf-page'));
+  // Make the preview reachable even before any PDF has rendered.
+  document.getElementById('preview-view-btn').disabled = false;
+  if (reveal && !previewVisible()) setWorkspaceView('preview');
+  const firstError = errors.find((error) => error.logLine >= 0);
+  requestAnimationFrame(() => {
+    const target = firstError && logElement.querySelector('[data-log-line="' + firstError.logLine + '"]');
+    logElement.scrollTop = target ? Math.max(0, target.offsetTop - logElement.clientHeight / 3) : logElement.scrollHeight;
+  });
+}
+
+function hideCompileError({ clear = false } = {}) {
+  document.getElementById('compile-error-panel').classList.add('hidden');
+  if (clear) lastCompileError = null;
+  document.getElementById('compile-error-banner').classList.toggle('hidden', !lastCompileError);
+}
+
+async function jumpToSourceLine(file, line) {
+  if (!line) return;
+  const target = String(file || '').replace(/^\.\//, '');
+  if (target && target !== loadedFile && entryState.files.includes(target)) {
+    if (loadedFile && !await saveFile({ sync: false })) return;
+    await loadFile(target);
+  }
+  if (!sourceVisible()) setWorkspaceView('source');
+  const position = { line: Math.max(0, Math.min(editor.lineCount() - 1, line - 1)), ch: 0 };
+  editor.setSelection(position, { line: position.line, ch: editor.getLine(position.line).length });
+  requestAnimationFrame(() => {
+    editor.scrollIntoView(position, 120);
+    editor.focus();
+  });
+}
+
+function initCompileErrorPanel() {
+  document.getElementById('compile-error-hide').addEventListener('click', () => hideCompileError());
+  document.getElementById('compile-error-banner').addEventListener('click', () => {
+    if (lastCompileError) showCompileError(lastCompileError);
+  });
+  document.getElementById('compile-error-copy').addEventListener('click', async () => {
+    const text = lastCompileError?.log || lastCompileError?.error || '';
+    try {
+      await navigator.clipboard.writeText(text);
+      showStatus(t('compileError.copied'), 'success');
+    } catch {
+      showStatus(t('compileError.copyFailed'), 'error');
+    }
+  });
+}
+
+// Compile the paper's entry file (like Overleaf's main document), so editing an
+// \input chapter still rebuilds the whole paper.
+function compileTarget() {
+  return entryState.entryFile && entryState.files.includes(entryState.entryFile) ? entryState.entryFile : currentFile;
+}
+
+async function fetchEntryState() {
+  const res = await fetch('/api/entry');
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Could not read the entry file');
+  entryState = { entryFile: data.entryFile, saved: Boolean(data.saved), files: data.files || [] };
+  renderEntryPicker();
+  return entryState;
+}
+
+function renderEntryPicker() {
+  document.getElementById('entry-file-name').textContent = entryState.entryFile || t('entry.noneShort');
+  const button = document.getElementById('entry-file-button');
+  button.title = entryState.entryFile
+    ? t(entryState.saved ? 'entry.titleSaved' : 'entry.titleDetected', { file: entryState.entryFile })
+    : t('entry.none');
+  button.classList.toggle('unconfirmed', Boolean(entryState.entryFile) && !entryState.saved);
+  const menu = document.getElementById('entry-file-menu');
+  const items = entryState.files.map((file) => {
+    const isEntry = file === entryState.entryFile;
+    const badge = isEntry ? '<span class="entry-badge">' + escapeHtml(t(entryState.saved ? 'entry.badge' : 'entry.badgeDetected')) + '</span>' : '';
+    const open = file === loadedFile ? '<span class="entry-open-dot" title="' + escapeHtml(t('entry.openNow')) + '"></span>' : '';
+    return '<button type="button" role="menuitemradio" aria-checked="' + isEntry + '" data-entry-file="' + escapeHtml(file) + '">'
+      + '<span class="entry-check" aria-hidden="true">' + (isEntry ? '★' : '') + '</span>'
+      + '<span class="entry-path">' + escapeHtml(file) + '</span>' + open + badge + '</button>';
+  }).join('');
+  menu.innerHTML = '<div class="entry-menu-head"><strong>' + escapeHtml(t('entry.label')) + '</strong><span>' + escapeHtml(t('entry.help')) + '</span></div>'
+    + (entryState.entryFile && !entryState.saved ? '<p class="entry-menu-note">' + escapeHtml(t('entry.detectedNote', { file: entryState.entryFile })) + '</p>' : '')
+    + (items ? '<div class="entry-menu-list">' + items + '</div>' : '<p class="entry-menu-note">' + escapeHtml(t('entry.none')) + '</p>');
+  menu.querySelectorAll('[data-entry-file]').forEach((item) => item.addEventListener('click', () => chooseEntryFile(item.dataset.entryFile)));
+}
+
+async function openEntryMenu(show) {
+  const menu = document.getElementById('entry-file-menu');
+  const button = document.getElementById('entry-file-button');
+  if (show) {
+    try { await fetchEntryState(); } catch (error) { showStatus(error.message, 'error'); }
+  }
+  menu.classList.toggle('hidden', !show);
+  button.setAttribute('aria-expanded', String(show));
+  if (show) (menu.querySelector('[aria-checked="true"]') || menu.querySelector('[data-entry-file]'))?.focus();
+}
+
+async function chooseEntryFile(file) {
+  openEntryMenu(false);
+  try {
+    const res = await fetch('/api/entry', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not set the entry file');
+    entryState = { entryFile: data.entryFile, saved: true, files: data.files || [] };
+    renderEntryPicker();
+    showStatus(t('entry.set', { file }), 'success');
+  } catch (error) {
+    showStatus(error.message, 'error');
+    return;
+  }
+  if (file !== loadedFile) {
+    if (loadedFile && !await saveFile({ sync: false })) return;
+    await loadFile(file);
+  } else if (latexEngineAvailable) {
+    await compileFile({ silent: true });
+  }
+}
+
+async function openEntryFile() {
+  try {
+    await fetchEntryState();
+  } catch (error) {
+    showStatus(error.message, 'error');
+  }
+  if (entryState.entryFile) await loadFile(entryState.entryFile);
+  else renderOutline();
+}
+
+function initEntryPicker() {
+  const menu = document.getElementById('entry-file-menu');
+  const button = document.getElementById('entry-file-button');
+  button.addEventListener('click', () => openEntryMenu(menu.classList.contains('hidden')));
+  document.addEventListener('pointerdown', (event) => {
+    if (menu.classList.contains('hidden') || event.target.closest('#entry-file-picker')) return;
+    openEntryMenu(false);
+  });
+  menu.addEventListener('keydown', (event) => {
+    const items = [...menu.querySelectorAll('[data-entry-file]')];
+    const index = items.indexOf(document.activeElement);
+    if (event.key === 'Escape') { openEntryMenu(false); button.focus(); }
+    else if (event.key === 'ArrowDown' && items.length) { event.preventDefault(); items[(index + 1) % items.length].focus(); }
+    else if (event.key === 'ArrowUp' && items.length) { event.preventDefault(); items[(index - 1 + items.length) % items.length].focus(); }
+  });
+}
+
+let compileInFlight = false;
+
+function setCompileBusy(busy) {
+  compileInFlight = busy;
+  document.getElementById('compile-split').classList.toggle('busy', busy);
+  document.getElementById('compile-clean').disabled = busy;
+}
+
+function openCompileMenu(show) {
+  document.getElementById('compile-menu').classList.toggle('hidden', !show);
+  document.getElementById('compile-menu-btn').setAttribute('aria-expanded', String(show));
+  if (show) document.getElementById('compile-clean').focus();
+}
+
+function initCompileMenu() {
+  const menu = document.getElementById('compile-menu');
+  document.getElementById('compile-menu-btn').addEventListener('click', () => openCompileMenu(menu.classList.contains('hidden')));
+  document.getElementById('compile-clean').addEventListener('click', () => {
+    openCompileMenu(false);
+    compileFile({ clean: true });
+  });
+  document.addEventListener('pointerdown', (event) => {
+    if (!menu.classList.contains('hidden') && !event.target.closest('#compile-split')) openCompileMenu(false);
+  });
+  menu.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') { openCompileMenu(false); document.getElementById('compile-menu-btn').focus(); }
+  });
+}
+
+async function compileFile({ silent = false, clean = false } = {}) {
+  if (clean && compileInFlight) return false;
+  setCompileBusy(true);
+  if (!await saveFile()) {
+    setCompileBusy(false);
+    return false;
+  }
+  showStatus(clean ? t('compileMenu.cleaning') : 'Compiling...', '');
   try {
     const res = await fetch('/api/compile', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ file: currentFile }),
+      body: JSON.stringify({ file: compileTarget(), clean }),
     });
     const data = await res.json();
     if (data.ok) {
+      hideCompileError({ clear: true });
       const changedCount = recordSuccessfulCompile(editor.getValue());
       showCompiledPdf(data.pdf);
-      if (!silent) showStatus('Compiled (' + data.engine + ')' + (changedCount ? ` · ${changedCount} changed sentence${changedCount === 1 ? '' : 's'} highlighted` : ''), 'success');
+      if (clean) showStatus(t('compileMenu.cleanDone', { steps: (data.steps || [data.engine]).join(' → ') }), 'success');
+      else if (!silent) showStatus('Compiled (' + data.engine + ')' + (changedCount ? ` · ${changedCount} changed sentence${changedCount === 1 ? '' : 's'} highlighted` : ''), 'success');
       return true;
     } else {
       showStatus('Compile error', 'error');
-      if (!silent) alert('Compilation failed:\n' + data.error);
+      showCompileError({ error: data.error, log: data.log, engine: data.engine, file: compileTarget() }, { reveal: !silent });
       return false;
     }
   } catch {
     showStatus('Compile request failed', 'error');
+    showCompileError({ error: t('compileError.requestFailed'), log: '', engine: null, file: compileTarget() }, { reveal: !silent });
     return false;
+  } finally {
+    setCompileBusy(false);
   }
 }
 
@@ -4963,24 +5883,48 @@ function init() {
     lineWrapping: true,
     indentUnit: 2,
     tabSize: 2,
+    // Selecting a word highlights its other whole-word occurrences, with scrollbar ticks.
+    highlightSelectionMatches: { minChars: 2, wordsOnly: true, annotateScrollbar: true, delay: 80 },
   });
 
   editor.setOption('extraKeys', {
     'Ctrl-S': (cm) => { saveFile(); return false; },
     'Cmd-S': (cm) => { saveFile(); return false; },
+    'Ctrl-F': () => openSearch(),
+    'Cmd-F': () => openSearch(),
+    'Ctrl-H': () => openSearch({ replace: true }),
+    'Cmd-Alt-F': () => openSearch({ replace: true }),
+    'F3': () => (searchState.open ? stepSearch(1) : openSearch()),
+    'Shift-F3': () => (searchState.open ? stepSearch(-1) : openSearch()),
+    'Esc': () => (searchState.open ? closeSearch() : CodeMirror.Pass),
   });
+  initSearchPanel();
   editor.on('change', (_instance, change) => {
     if (change.origin !== 'setValue') schedulePromptContextPreview();
   });
 
   document.getElementById('save-btn').addEventListener('click', saveFile);
-  document.getElementById('compile-btn').addEventListener('click', compileFile);
-  document.getElementById('source-view-btn').addEventListener('click', () => setWorkspaceView('source'));
-  document.getElementById('preview-view-btn').addEventListener('click', () => setWorkspaceView('preview'));
+  document.getElementById('compile-btn').addEventListener('click', () => compileFile());
+  initCompileMenu();
+  document.getElementById('source-view-btn').addEventListener('click', () => setWorkspaceView('source', { user: true }));
+  document.getElementById('preview-view-btn').addEventListener('click', () => setWorkspaceView('preview', { user: true }));
+  document.getElementById('split-view-btn').addEventListener('click', () => setWorkspaceView('split', { user: true }));
+  if (readPreference(WORKSPACE_VIEW_KEY) === 'split') setWorkspaceView('split', { user: true });
+  initSplitDivider();
+  initPdfAutoFit();
+  initEditorSettings();
+  initThemeToggle();
+  initEditorScheme();
+  document.getElementById('sync-pdf-to-code').addEventListener('click', syncPdfToCursor);
+  document.getElementById('sync-code-to-pdf').addEventListener('click', syncCursorToPdf);
+  document.getElementById('assistant-collapse').addEventListener('click', () => setAssistantCollapsed(true));
+  document.getElementById('assistant-expand').addEventListener('click', () => setAssistantCollapsed(false));
+  if (readPreference(ASSISTANT_COLLAPSED_KEY) === '1') setAssistantCollapsed(true, { persist: false });
   document.getElementById('ai-invoke').addEventListener('click', invokeAgent);
   document.getElementById('language-select').value = getLocale();
   document.getElementById('language-select').addEventListener('change', event => setLocale(event.target.value));
   document.addEventListener('papergod:locale-changed', () => {
+    if (document.getElementById('theme-toggle').hasAttribute('aria-pressed')) applyTheme(document.documentElement.dataset.theme);
     renderModificationIntents();
     refreshSentenceReaderLocale();
     if (agentProviders.length) { renderQuickAgentSelector(); renderAgentConfiguration(); }
@@ -5468,7 +6412,10 @@ function init() {
   });
   document.getElementById('ai-prompt').addEventListener('input', schedulePromptContextPreview);
 
-  loadEngineStatus().then(() => loadFile(currentFile));
+  initEntryPicker();
+  initOutlineDepthPicker();
+  initCompileErrorPanel();
+  loadEngineStatus().then(openEntryFile);
   loadVersionInfo();
   loadConfig();
   loadAgentConfiguration();

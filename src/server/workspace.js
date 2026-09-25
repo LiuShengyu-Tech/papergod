@@ -1,4 +1,4 @@
-import { mkdir, readdir, writeFile } from 'fs/promises';
+import { mkdir, readdir, readFile, writeFile } from 'fs/promises';
 import { join } from 'path';
 import { loadProject, saveProject, updateProject } from './project-store.js';
 import { syncDocumentStructure } from './document-structure.js';
@@ -202,17 +202,86 @@ export async function seedDemoWorkspace(workspaceRoot, file = 'main.tex') {
   return project;
 }
 
+const TEX_SCAN_MAX_DEPTH = 3;
+const TEX_SCAN_SKIP = new Set(['node_modules', '__pycache__']);
+
+// Workspace-relative .tex paths (forward slashes), top-level files first.
+// Hidden folders (.git, .papergod, ...) and dependency folders are skipped.
+export async function listTexFiles(workspaceRoot) {
+  const found = [];
+  async function walk(relative, depth) {
+    let entries;
+    try {
+      entries = await readdir(relative ? join(workspaceRoot, relative) : workspaceRoot, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue;
+      const path = relative ? `${relative}/${entry.name}` : entry.name;
+      if (entry.isFile() && entry.name.toLowerCase().endsWith('.tex')) found.push(path);
+      else if (entry.isDirectory() && depth < TEX_SCAN_MAX_DEPTH && !TEX_SCAN_SKIP.has(entry.name)) await walk(path, depth + 1);
+    }
+  }
+  await walk('', 0);
+  const depthOf = (path) => path.split('/').length;
+  return found.sort((a, b) => depthOf(a) - depthOf(b) || a.localeCompare(b));
+}
+
+async function declaresDocumentClass(workspaceRoot, file) {
+  try {
+    const source = await readFile(join(workspaceRoot, file), 'utf-8');
+    return /^[ \t]*\\documentclass\b/m.test(source);
+  } catch {
+    return false;
+  }
+}
+
+// Best guess when the user has not chosen an entry file: among files that declare
+// \documentclass, main.tex first, otherwise the shallowest one; with no such file,
+// main.tex or the first .tex file. An empty or partial main.tex never wins over a
+// real paper.
+export async function detectEntryFile(workspaceRoot, texFiles) {
+  if (!texFiles.length) return null;
+  const papers = [];
+  for (const file of texFiles) {
+    if (await declaresDocumentClass(workspaceRoot, file)) papers.push(file);
+  }
+  if (papers.length) return papers.includes('main.tex') ? 'main.tex' : papers[0];
+  return texFiles.includes('main.tex') ? 'main.tex' : texFiles[0];
+}
+
+export async function resolveEntryFile(workspaceRoot) {
+  const files = await listTexFiles(workspaceRoot);
+  const project = await loadProject(workspaceRoot);
+  const saved = project.project?.entryFile;
+  if (saved && files.includes(saved)) return { entryFile: saved, saved: true, files };
+  return { entryFile: await detectEntryFile(workspaceRoot, files), saved: false, files };
+}
+
+export async function saveEntryFile(workspaceRoot, file) {
+  const files = await listTexFiles(workspaceRoot);
+  if (!files.includes(file)) throw Object.assign(new Error('Entry file must be a .tex file in this workspace'), { status: 400, code: 'INVALID_ENTRY_FILE' });
+  await updateProject(workspaceRoot, (project) => {
+    project.project.entryFile = file;
+  });
+  return { entryFile: file, saved: true, files };
+}
+
 export async function initializeWorkspace(workspaceRoot, { demo = false } = {}) {
   await mkdir(workspaceRoot, { recursive: true });
-  const entries = await readdir(workspaceRoot);
-  const texFiles = entries.filter((entry) => entry.endsWith('.tex'));
+  // Only a folder with no .tex file anywhere (including subfolders) gets a starter paper.
+  const texFiles = await listTexFiles(workspaceRoot);
   let createdSample = false;
   if (texFiles.length === 0) {
     await writeFile(join(workspaceRoot, 'main.tex'), demo ? DEMO_DOCUMENT : TEMPLATE_DOCUMENT, { encoding: 'utf-8', flag: 'wx' });
     createdSample = true;
   }
   let project = await loadProject(workspaceRoot);
-  const selectedFile = texFiles.includes('main.tex') || createdSample ? 'main.tex' : texFiles.sort()[0];
+  const savedEntry = project.project?.entryFile;
+  const selectedFile = createdSample ? 'main.tex'
+    : savedEntry && texFiles.includes(savedEntry) ? savedEntry
+      : await detectEntryFile(workspaceRoot, texFiles);
   if (project.documents.length === 1 && project.documents[0].file === 'main.tex' && selectedFile !== 'main.tex') {
     project.documents[0].file = selectedFile;
     project = await saveProject(workspaceRoot, project);
