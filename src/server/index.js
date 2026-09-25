@@ -1203,7 +1203,7 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
   });
 
   app.post('/api/compile', async (req, res) => {
-    const { file } = req.body || {};
+    const { file, clean = false } = req.body || {};
     if (!file || typeof file !== 'string') return res.status(400).json({ error: 'file is required' });
     const safe = sanitizePath(file, workspaceRoot);
     if (!safe) return res.status(403).json({ error: 'Access denied' });
@@ -1215,12 +1215,12 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
       return res.status(404).json({ error: 'File not found' });
     }
     try {
-      const result = await compile(safe, workspaceRoot);
+      const result = await compile(safe, workspaceRoot, { clean: clean === true });
       if (result.ok) {
         const pdfName = file.replace(/\.tex$/, '.pdf');
-        res.json({ ok: true, pdf: `/workspace/${pdfName}`, engine: result.engine });
+        res.json({ ok: true, pdf: `/workspace/${pdfName}`, engine: result.engine, clean: clean === true, steps: result.steps || null, removed: result.removed || null });
       } else {
-        res.json({ ok: false, error: result.error, engine: result.engine, log: result.log || null });
+        res.json({ ok: false, error: result.error, engine: result.engine, log: result.log || null, clean: clean === true });
       }
     } catch (e) {
       res.status(500).json({ error: e.message });

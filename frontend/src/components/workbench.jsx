@@ -1,7 +1,7 @@
 import {
-  ArrowLeft, ArrowRight, BarChart3, BookMarked, BookOpen, Bot, Braces, ChevronDown, Columns2, FileCode, FileText, FolderKanban, FolderOpen,
-  Bug, Download, GitPullRequest, History, Library, Moon, Network, Palette, PanelRightClose, PanelRightOpen, Play, PlayCircle, RefreshCw, Rocket, Save, ScanText,
-  Settings, Sparkles, SquareTerminal, Sun, Type, Users, X,
+  AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, BarChart3, BookMarked, BookOpen, BookOpenText, Bot, Braces, ChevronDown, Columns2, FileCode, FileText, FolderKanban, FolderOpen,
+  Bug, Download, GitPullRequest, History, Library, ListTree, Moon, Network, Palette, PanelRightClose, PanelRightOpen, Play, PlayCircle, RefreshCw, Rocket, RotateCcw, Save, ScanText,
+  Settings, Sparkles, SquarePen, SquareTerminal, Sun, Type, Users, X,
 } from 'lucide-react';
 import { Button } from './ui/button.jsx';
 import packageData from '../../../package.json';
@@ -39,7 +39,21 @@ function Navigator() {
     <aside id="sidebar">
       <div id="navigator-tabs" role="tablist" aria-label="Paper navigation"><button id="navigator-outline-tab" className="active" type="button" role="tab" aria-selected="true" data-i18n="nav.outline">Outline</button><button id="navigator-tools-tab" type="button" role="tab" aria-selected="false" data-i18n="nav.tools">Tools</button></div>
       <section id="navigator-outline-panel" className="navigator-panel" role="tabpanel">
-        <div className="sidebar-heading"><h3 data-i18n="nav.paperOutline">Paper outline</h3><Button id="sync-outline" variant="ghost" size="icon" title="Synchronize outline" aria-label="Synchronize outline"><RefreshCw size={14} /></Button></div>
+        <div className="sidebar-heading">
+          <h3 data-i18n="nav.paperOutline">Paper outline</h3>
+          <div className="outline-heading-actions">
+            <div id="outline-depth-picker">
+              <button id="outline-depth-btn" type="button" title="Heading levels to show" aria-label="Heading levels to show" aria-haspopup="menu" aria-expanded="false" aria-controls="outline-depth-menu" data-i18n-aria-label="outlineDepth.title"><ListTree size={13} /><span id="outline-depth-label">2</span></button>
+              <div id="outline-depth-menu" className="hidden" role="menu" aria-labelledby="outline-depth-btn">
+                <div className="outline-depth-head" data-i18n="outlineDepth.title">Heading levels to show</div>
+                {[['0', 'outlineDepth.none', 'None · title only'], ['1', 'outlineDepth.one', '1 level · sections'], ['2', 'outlineDepth.two', '2 levels · + subsections'], ['3', 'outlineDepth.three', '3 levels · + subsubsections'], ['all', 'outlineDepth.all', 'All levels']].map(([value, key, label]) => (
+                  <button key={value} type="button" role="menuitemradio" aria-checked="false" data-outline-depth={value}><span className="outline-depth-check" aria-hidden="true">✓</span><span data-i18n={key}>{label}</span></button>
+                ))}
+              </div>
+            </div>
+            <Button id="sync-outline" variant="ghost" size="icon" title="Synchronize outline" aria-label="Synchronize outline"><RefreshCw size={14} /></Button>
+          </div>
+        </div>
         <div id="outline-tree"><div className="outline-empty" data-i18n="nav.openPaper">Open a paper</div></div>
       </section>
       <section id="navigator-tools-panel" className="navigator-panel hidden" role="tabpanel">
@@ -82,18 +96,27 @@ function EditorWorkspace() {
       <div id="editor-toolbar">
         <div className="file-context"><Braces size={14} /><span id="current-file">main.tex</span></div>
         <div id="workspace-view-switch" role="tablist" aria-label="Document view">
-          <button id="source-view-btn" className="view-tab active" type="button" role="tab" aria-selected="true" aria-controls="source-view" data-i18n="editor.source">Source</button>
-          <button id="preview-view-btn" className="view-tab" type="button" role="tab" aria-selected="false" aria-controls="preview-panel" disabled data-i18n="editor.preview">PDF Preview</button>
-          <button id="split-view-btn" className="view-tab" type="button" role="tab" aria-selected="false" aria-controls="source-view preview-panel" title="Source and PDF side by side"><Columns2 size={13} /><span data-i18n="editor.split">Split</span></button>
+          <button id="source-view-btn" className="view-tab active" type="button" role="tab" aria-selected="true" aria-controls="source-view" title="LaTeX source editor"><SquarePen size={13} /><span data-i18n="editor.source">Editor</span></button>
+          <button id="preview-view-btn" className="view-tab" type="button" role="tab" aria-selected="false" aria-controls="preview-panel" disabled title="Compiled PDF"><BookOpenText size={13} /><span data-i18n="editor.preview">PDF</span></button>
+          <button id="split-view-btn" className="view-tab" type="button" role="tab" aria-selected="false" aria-controls="source-view preview-panel" title="Editor and PDF side by side"><Columns2 size={13} /><span data-i18n="editor.split">Split</span></button>
         </div>
         <Button id="editor-settings-btn" variant="outline" size="sm" title="Editor font settings" aria-haspopup="dialog" aria-expanded="false" aria-controls="editor-settings-popover" data-i18n-aria-label="editorSettings.title"><Type size={14} /></Button>
         <Button id="editor-scheme-btn" variant="outline" size="sm" title="Editor background" aria-haspopup="dialog" aria-expanded="false" aria-controls="editor-scheme-popover" data-i18n-aria-label="editorScheme.title"><Palette size={14} /></Button>
         <Button id="history-open" variant="outline" size="sm" title="Change history"><History size={14} /><span data-i18n="history.title">Change history</span></Button>
         <Button id="save-btn" variant="outline" size="sm" title="Save (Ctrl+S)"><Save size={14} /><span data-i18n="editor.save">Save</span></Button>
-        <Button id="compile-btn" variant="primary" size="sm" title="Compile LaTeX"><Play size={14} /><span data-i18n="editor.compile">Compile</span></Button>
+        <div id="compile-split">
+          <Button id="compile-btn" variant="primary" size="sm" title="Compile LaTeX"><Play size={14} /><span data-i18n="editor.compile">Compile</span></Button>
+          <button id="compile-menu-btn" type="button" title="More compile options" aria-label="More compile options" aria-haspopup="menu" aria-expanded="false" aria-controls="compile-menu" data-i18n-aria-label="compileMenu.more"><ChevronDown size={14} /></button>
+          <div id="compile-menu" className="hidden" role="menu" aria-labelledby="compile-menu-btn">
+            <button id="compile-clean" type="button" role="menuitem">
+              <RotateCcw size={14} />
+              <span><strong data-i18n="compileMenu.clean">Recompile from scratch</strong><small data-i18n="compileMenu.cleanHelp">Deletes cached build files (.aux, .bbl, .toc, …) and runs LaTeX, BibTeX and LaTeX again.</small></span>
+            </button>
+          </div>
+        </div>
       </div>
       <div id="workspace-view">
-        <section id="source-view" className="workspace-pane" role="tabpanel" aria-labelledby="source-view-btn"><textarea id="editor" /></section>
+        <section id="source-view" className="workspace-pane" role="tabpanel" aria-labelledby="source-view-btn"><textarea id="editor" /><SearchPanel /></section>
         <div id="split-divider" className="hidden" role="separator" aria-orientation="vertical" aria-label="Resize source and preview" tabIndex={0}>
           <div className="split-sync" role="group" aria-label="Synchronize source and PDF">
             <button id="sync-pdf-to-code" type="button" title="Show cursor position in PDF" aria-label="Show cursor position in PDF" data-i18n-aria-label="sync.toPdf"><ArrowRight size={11} strokeWidth={2.5} /></button>
@@ -104,6 +127,7 @@ function EditorWorkspace() {
         <section id="preview-panel" className="workspace-pane hidden" role="tabpanel" aria-labelledby="preview-view-btn">
           <div id="pdf-preview" aria-label="Rendered PDF pages" />
           <div id="preview-placeholder">Compile to render the paper</div>
+          <CompileErrorPanel />
         </section>
       </div>
       <EditorSettingsPopover />
@@ -154,6 +178,57 @@ function EditorSchemePopover() {
         ))}
       </div>
     </section>
+  );
+}
+
+// Overleaf-style find & replace bar at the bottom of the source editor
+// (Ctrl/Cmd+F). Behaviour lives in app.js (initSearchPanel).
+function SearchPanel() {
+  return (
+    <div id="search-panel" className="hidden" role="search" aria-label="Find and replace">
+      <div className="search-row">
+        <div className="search-field">
+          <input id="search-query" type="text" placeholder="Search for" spellCheck={false} autoComplete="off" data-i18n-placeholder="search.find" aria-label="Search for" />
+          <div className="search-toggles">
+            <button id="search-case" type="button" aria-pressed="false" title="Match case" data-i18n-aria-label="search.matchCase">Aa</button>
+            <button id="search-regex" type="button" aria-pressed="false" title="Regular expression" data-i18n-aria-label="search.regex">.*</button>
+            <button id="search-word" type="button" aria-pressed="false" title="Whole word" data-i18n-aria-label="search.wholeWord"><span className="search-word-icon">W</span></button>
+          </div>
+        </div>
+        <span id="search-count" aria-live="polite" />
+        <button id="search-prev" type="button" title="Previous match (Shift+Enter)" aria-label="Previous match" data-i18n-aria-label="search.previous"><ArrowUp size={14} /></button>
+        <button id="search-next" type="button" title="Next match (Enter)" aria-label="Next match" data-i18n-aria-label="search.next"><ArrowDown size={14} /></button>
+        <button id="search-close" type="button" title="Close (Esc)" aria-label="Close search" data-i18n-aria-label="common.close"><X size={14} /></button>
+      </div>
+      <div className="search-row">
+        <div className="search-field">
+          <input id="search-replace" type="text" placeholder="Replace with" spellCheck={false} autoComplete="off" data-i18n-placeholder="search.replaceWith" aria-label="Replace with" />
+        </div>
+        <button id="search-replace-one" type="button" data-i18n="search.replace">Replace</button>
+        <button id="search-replace-all" type="button" data-i18n="search.replaceAll">Replace all</button>
+      </div>
+    </div>
+  );
+}
+
+// Shown in the PDF area when compilation fails; filled in by app.js.
+function CompileErrorPanel() {
+  return (
+    <>
+      <section id="compile-error-panel" className="hidden" role="alert" aria-labelledby="compile-error-title">
+        <header>
+          <div className="compile-error-heading"><AlertTriangle size={16} /><strong id="compile-error-title" data-i18n="compileError.title">Compilation failed</strong><span id="compile-error-meta" /></div>
+          <div className="compile-error-actions">
+            <button id="compile-error-copy" type="button" data-i18n="compileError.copy">Copy log</button>
+            <button id="compile-error-hide" type="button" data-i18n="compileError.showPdf">Show last PDF</button>
+          </div>
+        </header>
+        <ol id="compile-error-list" />
+        <div className="compile-error-log-head"><span data-i18n="compileError.fullLog">Full log</span><span id="compile-error-log-stats" /></div>
+        <pre id="compile-error-log" tabIndex={0} />
+      </section>
+      <button id="compile-error-banner" className="hidden" type="button"><AlertTriangle size={13} /><span data-i18n="compileError.banner">Last compile failed · Show log</span></button>
+    </>
   );
 }
 

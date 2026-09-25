@@ -61,9 +61,21 @@ function findCommandValue(source, command, from = 0, to = source.length) {
   return null;
 }
 
-function findHeadings(source, from, to) {
-  const regex = /\\(section|subsection|subsubsection)\*?\s*\{/g;
+// Offset of the first uncommented \appendix in [from, to), or -1.
+function findAppendix(source, from, to) {
+  const regex = /\\appendix(?![a-zA-Z@])/g;
   regex.lastIndex = from;
+  let match;
+  while ((match = regex.exec(source)) && match.index < to) {
+    if (!isCommented(source, match.index)) return match.index;
+  }
+  return -1;
+}
+
+function findHeadings(source, from, to) {
+  const regex = /\\(section|subsection|subsubsection)(\*?)\s*\{/g;
+  regex.lastIndex = from;
+  const appendixAt = findAppendix(source, from, to);
   const headings = [];
   let match;
   while ((match = regex.exec(source)) && match.index < to) {
@@ -71,8 +83,10 @@ function findHeadings(source, from, to) {
     const open = match.index + match[0].lastIndexOf('{');
     const close = closingBrace(source, open);
     if (close === -1 || close >= to) continue;
+    // starred headings are unnumbered; headings after \appendix get letters (A, A.1, ...).
     headings.push({
       command: match[1], level: SECTION_LEVELS[match[1]], title: source.slice(open + 1, close).trim(),
+      starred: match[2] === '*', appendix: appendixAt !== -1 && match.index > appendixAt,
       start: match.index, headingEnd: close + 1,
     });
     regex.lastIndex = close + 1;
@@ -315,6 +329,7 @@ export function parseLatexDocument(source, previousDocument = {}) {
     const section = {
       id: previous?.id || id('section'), type: 'section', parentId: previousDocument.id || '', order: sectionIndex,
       level: descriptor.level, command: descriptor.command, title: descriptor.title, text: descriptor.title,
+      starred: Boolean(descriptor.starred), appendix: Boolean(descriptor.appendix),
       prompt: previous?.prompt || '', summary: previous?.summary || '',
       sourceRange: {
         start: descriptor.start, end: descriptor.end,

@@ -193,3 +193,8 @@
 .CodeMirror-matchingbracket { color: var(--ed-matching-bracket) !important; }
 .CodeMirror .cm-matchhighlight { background: var(--ed-match-bg); border-radius: 2px; box-shadow: 0 0 0 1px var(--ed-match-ring); }
 .CodeMirror .cm-sync-flash { background: var(--ed-flash); border-radius: 2px; }
+
+/* Find & replace: all matches, and the current one. Tuned to read on light and dark schemes. */
+.CodeMirror .cm-searching { background: rgba(250, 204, 21, .4); border-radius: 2px; }
+.CodeMirror .cm-search-current { background: rgba(249, 115, 22, .6); border-radius: 2px; box-shadow: 0 0 0 1px rgba(194, 65, 12, .8); }
+.CodeMirror-search-match { background: #f59e0b; opacity: .7; }

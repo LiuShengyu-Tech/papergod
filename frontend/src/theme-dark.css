@@ -83,8 +83,13 @@
 :root[data-theme="dark"] #editor-toolbar #workspace-view-switch .view-tab.active { color: var(--dk-strong); background: #3a4659; box-shadow: none; }
 :root[data-theme="dark"] #editor-toolbar > button { color: var(--text); background: var(--dk-raised); }
 :root[data-theme="dark"] #editor-toolbar > button:hover { color: var(--dk-strong); background: var(--dk-hover); border-color: #475569; }
-:root[data-theme="dark"] #editor-toolbar > #compile-btn { color: #fff; background: var(--primary); border-color: var(--primary); }
-:root[data-theme="dark"] #editor-toolbar > #compile-btn:hover { background: #2563eb; border-color: #2563eb; }
+:root[data-theme="dark"] #compile-split #compile-btn, :root[data-theme="dark"] #compile-split #compile-menu-btn { color: #fff; background: var(--primary); border-color: var(--primary); }
+:root[data-theme="dark"] #compile-split #compile-btn:hover, :root[data-theme="dark"] #compile-split #compile-menu-btn:hover { background: #2563eb; border-color: #2563eb; }
+:root[data-theme="dark"] #compile-menu { background: var(--dk-raised); border-color: var(--border); box-shadow: 0 12px 32px rgba(0, 0, 0, .45); }
+:root[data-theme="dark"] #editor-toolbar #compile-menu button { color: var(--text); }
+:root[data-theme="dark"] #editor-toolbar #compile-menu button:hover, :root[data-theme="dark"] #editor-toolbar #compile-menu button:focus-visible { color: var(--dk-strong); background: var(--dk-hover); }
+:root[data-theme="dark"] #editor-toolbar #compile-menu button svg { color: #93c5fd; }
+:root[data-theme="dark"] #compile-menu small { color: var(--text-dim); }
 
 /* The source editor keeps its own color scheme (editor-schemes.css). */
 
@@ -197,3 +202,42 @@
 :root[data-theme="dark"] #editor-scheme-close:hover { color: var(--dk-strong); background: var(--dk-hover); }
 :root[data-theme="dark"] .editor-scheme-help { color: var(--text-dim); }
 :root[data-theme="dark"] .editor-scheme-swatch[aria-checked="true"] { border-color: #60a5fa; box-shadow: 0 0 0 2px #60a5fa; }
+
+/* Compile error panel */
+:root[data-theme="dark"] #compile-error-panel { color: var(--text); background: var(--bg-panel); }
+:root[data-theme="dark"] #compile-error-panel header { background: var(--dk-tint-red); border-color: #7f1d1d; }
+:root[data-theme="dark"] .compile-error-heading, :root[data-theme="dark"] .compile-error-where { color: #fca5a5; }
+:root[data-theme="dark"] #compile-error-meta, :root[data-theme="dark"] .compile-error-log-head { color: var(--text-dim); }
+:root[data-theme="dark"] .compile-error-actions button { color: var(--text); background: var(--dk-raised); border-color: var(--border); }
+:root[data-theme="dark"] .compile-error-actions button:hover { background: var(--dk-hover); }
+:root[data-theme="dark"] #compile-error-list { border-color: var(--border); }
+:root[data-theme="dark"] #compile-error-list button { background: var(--dk-raised); border-color: #7f1d1d; border-left-color: #ef4444; }
+:root[data-theme="dark"] #compile-error-list button:hover:not(:disabled) { background: var(--dk-hover); }
+:root[data-theme="dark"] #compile-error-list code { color: var(--text-dim); }
+:root[data-theme="dark"] #compile-error-log { color: #cbd5e1; }
+:root[data-theme="dark"] #compile-error-log .log-error { color: #fca5a5; background: var(--dk-tint-red); }
+:root[data-theme="dark"] #compile-error-log .log-warning { color: #fcd34d; }
+:root[data-theme="dark"] #compile-error-banner { color: #fca5a5; background: #2a1719; border-color: #7f1d1d; }
+:root[data-theme="dark"] #compile-error-banner:hover { background: #3a1c1f; }
+
+/* Find & replace bar */
+:root[data-theme="dark"] #search-panel { color: var(--text); background: var(--bg-panel); }
+:root[data-theme="dark"] .search-field input { color: var(--text); background: var(--background); border-color: var(--border); }
+:root[data-theme="dark"] .search-field input.invalid { border-color: #ef4444; background: var(--dk-tint-red); }
+:root[data-theme="dark"] .search-toggles button { color: var(--text-dim); }
+:root[data-theme="dark"] .search-toggles button:hover { color: var(--dk-strong); background: var(--dk-hover); }
+:root[data-theme="dark"] .search-toggles button[aria-pressed="true"] { color: #bfdbfe; background: var(--dk-tint-blue); border-color: #1e40af; }
+:root[data-theme="dark"] #search-count { color: var(--text-dim); }
+:root[data-theme="dark"] #search-count.empty { color: #f87171; }
+:root[data-theme="dark"] #search-panel .search-row > button { color: var(--text); background: var(--dk-raised); border-color: var(--border); }
+:root[data-theme="dark"] #search-panel .search-row > button:hover { color: var(--dk-strong); background: var(--dk-hover); }
+
+/* Outline numbers and level picker */
+:root[data-theme="dark"] .outline-number { color: var(--dk-faint); }
+:root[data-theme="dark"] #outline-depth-btn { color: var(--text-dim); }
+:root[data-theme="dark"] #outline-depth-btn:hover, :root[data-theme="dark"] #outline-depth-btn[aria-expanded="true"] { color: var(--dk-strong); background: var(--dk-hover); }
+:root[data-theme="dark"] #outline-depth-menu { background: var(--dk-raised); border-color: var(--border); box-shadow: 0 12px 28px rgba(0, 0, 0, .45); }
+:root[data-theme="dark"] .outline-depth-head { color: var(--dk-faint); }
+:root[data-theme="dark"] #outline-depth-menu button { color: #cbd5e1; }
+:root[data-theme="dark"] #outline-depth-menu button:hover, :root[data-theme="dark"] #outline-depth-menu button:focus-visible { background: var(--dk-hover); }
+:root[data-theme="dark"] #outline-depth-menu button[aria-checked="true"], :root[data-theme="dark"] .outline-depth-check { color: #93c5fd; }
