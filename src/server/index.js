@@ -34,7 +34,7 @@ import {
   buildWorkflowExport, generatePaperRevision, generateRevisionPackage, getWorkflowHistory,
   updateRevisionResponseLetter, verifyAppliedRevision,
 } from './revise-workflow.js';
-import { initializeWorkspace } from './workspace.js';
+import { initializeWorkspace, listTexFiles, resolveEntryFile, saveEntryFile } from './workspace.js';
 import { createWorkspaceRegistry } from './workspace-registry.js';
 import { browseWorkspaceDirectories } from './workspace-browser.js';
 import { createWorkspaceTerminalManager } from './workspace-terminal.js';
@@ -1155,12 +1155,23 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
   app.get('/api/files', async (_req, res) => {
     try {
       const entries = await readdir(workspaceRoot);
-      const files = entries.filter((f) => f.endsWith('.tex'));
+      const files = await listTexFiles(workspaceRoot);
       const pdfs = entries.filter((f) => f.endsWith('.pdf'));
       res.json({ files, pdfs });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
+  });
+
+  // The paper's entry (main) file: opened on load and used for compilation.
+  app.get('/api/entry', async (_req, res) => {
+    await resourceResponse(res, () => resolveEntryFile(workspaceRoot));
+  });
+
+  app.put('/api/entry', async (req, res) => {
+    const file = req.body?.file;
+    if (typeof file !== 'string' || !file) return res.status(400).json({ error: 'file is required' });
+    await resourceResponse(res, () => saveEntryFile(workspaceRoot, file));
   });
 
   app.get('/api/files/*', async (req, res) => {

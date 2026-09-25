@@ -1,0 +1,199 @@
+/*
+ * Dark theme. Activated by <html data-theme="dark"> (see main.jsx and the
+ * header toggle). The base style.css rules already read the shared variables,
+ * so most surfaces follow the variable block; the rules below override the
+ * light colors that theme.css and style.css hard-code.
+ */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --background: #1b222c;
+  --foreground: #e2e8f0;
+  --card: #232c39;
+  --muted: #232c39;
+  --muted-foreground: #94a3b8;
+  --primary: #3b82f6;
+  --primary-foreground: #ffffff;
+  --border: #354152;
+  --ring: rgba(96, 165, 250, .35);
+  --bg-dark: var(--background);
+  --bg-panel: #212a36;
+  --bg-input: #2a3443;
+  --text: var(--foreground);
+  --text-dim: var(--muted-foreground);
+  --accent: #60a5fa;
+  --accent-hover: #93c5fd;
+  --success: #4ade80;
+  --error: #f87171;
+  --warn: #fbbf24;
+  --badge-style: #c4b5fd;
+  --badge-grammar: #fcd34d;
+  --badge-structure: #93c5fd;
+  --dk-raised: #283342;
+  --dk-hover: #313d4f;
+  --dk-strong: #f1f5f9;
+  --dk-faint: #64748b;
+  --dk-tint-blue: rgba(59, 130, 246, .16);
+  --dk-tint-green: rgba(34, 197, 94, .13);
+  --dk-tint-amber: rgba(245, 158, 11, .13);
+  --dk-tint-red: rgba(239, 68, 68, .14);
+}
+
+/* Shell */
+:root[data-theme="dark"] #header { background: #161c25; }
+:root[data-theme="dark"] .brand-mark, :root[data-theme="dark"] .logo { color: var(--dk-strong); }
+:root[data-theme="dark"] .brand-logo { filter: invert(1) hue-rotate(180deg) brightness(1.1); }
+:root[data-theme="dark"] #active-workspace-name { color: var(--text-dim); }
+:root[data-theme="dark"] .ui-button--default, :root[data-theme="dark"] .ui-button--outline { color: var(--text); background: var(--dk-raised); border-color: var(--border); }
+:root[data-theme="dark"] .ui-button--default:hover, :root[data-theme="dark"] .ui-button--outline:hover { background: var(--dk-hover); border-color: #475569; }
+:root[data-theme="dark"] .ui-button--ghost { color: #cbd5e1; }
+:root[data-theme="dark"] .ui-button--ghost:hover { color: var(--dk-strong); background: var(--dk-hover); }
+:root[data-theme="dark"] .ui-button--primary:hover { background: #2563eb; border-color: #2563eb; }
+:root[data-theme="dark"] .ui-badge { color: var(--text-dim); background: var(--dk-raised); }
+:root[data-theme="dark"] #status.success { background: var(--dk-tint-green); }
+:root[data-theme="dark"] #status.error { background: var(--dk-tint-red); }
+:root[data-theme="dark"] .language-control { color: var(--text-dim); }
+:root[data-theme="dark"] .language-control select { color: var(--text); background: var(--bg-input); }
+:root[data-theme="dark"] #theme-toggle { color: #cbd5e1; }
+:root[data-theme="dark"] #theme-toggle:hover { color: var(--dk-strong); background: var(--dk-hover); }
+
+/* Generic form controls */
+:root[data-theme="dark"] input, :root[data-theme="dark"] textarea, :root[data-theme="dark"] select { color: var(--text); background-color: var(--bg-input); border-color: var(--border); }
+:root[data-theme="dark"] input::placeholder, :root[data-theme="dark"] textarea::placeholder { color: var(--dk-faint); }
+
+/* Navigator */
+:root[data-theme="dark"] #sidebar { background: var(--bg-panel); }
+:root[data-theme="dark"] #sidebar h3 { color: var(--dk-faint); }
+:root[data-theme="dark"] #file-tree li { color: #cbd5e1; }
+:root[data-theme="dark"] #file-tree li:hover, :root[data-theme="dark"] .outline-node:hover, :root[data-theme="dark"] .outline-document:hover { background: var(--dk-hover); }
+:root[data-theme="dark"] #file-tree li.active, :root[data-theme="dark"] .outline-node.selected, :root[data-theme="dark"] .outline-document.selected { color: #93c5fd; background: var(--dk-tint-blue); }
+:root[data-theme="dark"] .outline-document { color: #93c5fd; }
+:root[data-theme="dark"] .version-status { color: var(--text-dim); }
+:root[data-theme="dark"] .version-status:hover { color: var(--text); background: var(--dk-hover); border-color: var(--border); }
+:root[data-theme="dark"] .version-status-icon { color: var(--text-dim); background: var(--dk-raised); }
+:root[data-theme="dark"] .version-status-copy strong { color: var(--text); }
+:root[data-theme="dark"] .version-status.has-update { color: #bfdbfe; background: var(--dk-tint-blue); border-color: #1e40af; }
+
+/* Editor column */
+:root[data-theme="dark"] #editor-panel, :root[data-theme="dark"] #editor-toolbar { background: var(--background); }
+:root[data-theme="dark"] .file-context { color: var(--dk-faint); }
+:root[data-theme="dark"] #current-file { color: #cbd5e1; }
+:root[data-theme="dark"] #workspace-view-switch { background: var(--bg-input); }
+:root[data-theme="dark"] #editor-toolbar #workspace-view-switch .view-tab { color: var(--text-dim); }
+:root[data-theme="dark"] #editor-toolbar #workspace-view-switch .view-tab:hover:not(:disabled) { color: var(--text); background: var(--dk-hover); }
+:root[data-theme="dark"] #editor-toolbar #workspace-view-switch .view-tab.active { color: var(--dk-strong); background: #3a4659; box-shadow: none; }
+:root[data-theme="dark"] #editor-toolbar > button { color: var(--text); background: var(--dk-raised); }
+:root[data-theme="dark"] #editor-toolbar > button:hover { color: var(--dk-strong); background: var(--dk-hover); border-color: #475569; }
+:root[data-theme="dark"] #editor-toolbar > #compile-btn { color: #fff; background: var(--primary); border-color: var(--primary); }
+:root[data-theme="dark"] #editor-toolbar > #compile-btn:hover { background: #2563eb; border-color: #2563eb; }
+
+/* The source editor keeps its own color scheme (editor-schemes.css). */
+
+/* Split bar */
+:root[data-theme="dark"] #split-divider { background: #19202a; }
+:root[data-theme="dark"] #split-divider:hover, :root[data-theme="dark"] #split-divider:focus-visible { background: #263041; }
+:root[data-theme="dark"] #workspace-view.resizing #split-divider { background: #1e3a5f; }
+:root[data-theme="dark"] .split-grip { border-color: #64748b; }
+:root[data-theme="dark"] .split-sync button { color: #93c5fd; background: var(--dk-raised); border-color: #475569; }
+:root[data-theme="dark"] .split-sync button:hover { color: #fff; background: var(--primary); border-color: var(--primary); }
+
+/* PDF preview: pages stay white, as in Overleaf's dark mode. */
+:root[data-theme="dark"] #preview-panel, :root[data-theme="dark"] #preview-placeholder { color: var(--text-dim); background: #131920; }
+:root[data-theme="dark"] .pdf-page { box-shadow: 0 2px 12px rgba(0, 0, 0, .5); }
+
+/* Editor settings popover */
+:root[data-theme="dark"] #editor-settings-popover { color: var(--text); background: var(--dk-raised); border-color: var(--border); box-shadow: 0 12px 32px rgba(0, 0, 0, .45); }
+:root[data-theme="dark"] #editor-settings-popover label { color: var(--text-dim); }
+:root[data-theme="dark"] #editor-settings-popover select, :root[data-theme="dark"] #editor-settings-popover input,
+:root[data-theme="dark"] #editor-settings-popover button { color: var(--text); background: var(--bg-input); border-color: var(--border); }
+:root[data-theme="dark"] #editor-settings-popover button:hover { background: var(--dk-hover); }
+
+/* AI assistant */
+:root[data-theme="dark"] #right-panel, :root[data-theme="dark"] #ai-header, :root[data-theme="dark"] #ai-module-list { background: var(--bg-panel); }
+:root[data-theme="dark"] #ai-header { color: #cbd5e1; }
+:root[data-theme="dark"] #agent-provider-quick { color: #93c5fd; background-color: var(--dk-tint-blue); border-color: #1e3a8a; }
+:root[data-theme="dark"] .ai-module-head strong, :root[data-theme="dark"] #context-title { color: var(--text); }
+:root[data-theme="dark"] .module-index { color: #cbd5e1; background: var(--dk-hover); }
+:root[data-theme="dark"] .ai-module-head button, :root[data-theme="dark"] #context-definition-editor button { color: var(--text-dim); }
+:root[data-theme="dark"] .ai-module-head button:hover, :root[data-theme="dark"] #context-definition-editor button:hover { color: var(--dk-strong); background: var(--dk-hover); }
+:root[data-theme="dark"] #agent-config-summary { color: #93c5fd; }
+:root[data-theme="dark"] #prompt-management-module #modification-intent-module { background: var(--dk-raised); border-color: var(--border); }
+:root[data-theme="dark"] #prompt-management-module #prompt-preview-open { color: var(--text); background: var(--dk-raised); border-color: var(--border); }
+:root[data-theme="dark"] #prompt-management-module #prompt-preview-open:hover { color: var(--dk-strong); background: var(--dk-hover); }
+:root[data-theme="dark"] #prompt-context-excerpt { color: var(--text-dim); background: var(--bg-input); border-color: var(--border); }
+:root[data-theme="dark"] #context-definition-editor textarea, :root[data-theme="dark"] #temporary-prompt-module textarea,
+:root[data-theme="dark"] #context-panel textarea, :root[data-theme="dark"] #ai-prompt { color: var(--text); background: var(--background); border-color: var(--border); }
+:root[data-theme="dark"] #ai-invoke { color: #0f172a; background: #e2e8f0; border-color: #e2e8f0; }
+:root[data-theme="dark"] #ai-invoke:hover { background: #fff; border-color: #fff; }
+:root[data-theme="dark"] #ai-invoke-intent-count { color: #e2e8f0; background: #1e293b; }
+:root[data-theme="dark"] #ai-suggestions { background: var(--bg-panel); }
+:root[data-theme="dark"] #assistant-collapse, :root[data-theme="dark"] #assistant-expand { color: var(--text-dim); }
+:root[data-theme="dark"] #assistant-collapse:hover, :root[data-theme="dark"] #assistant-expand:hover { color: var(--dk-strong); background: var(--dk-hover); }
+:root[data-theme="dark"] #library-usage, :root[data-theme="dark"] .peer-synthesis { background: var(--dk-tint-blue); }
+:root[data-theme="dark"] #paragraph-draft, :root[data-theme="dark"] #paper-generation-preview, :root[data-theme="dark"] .verification.complete { background: var(--dk-tint-green); }
+:root[data-theme="dark"] .verification.incomplete { background: var(--dk-tint-amber); }
+
+/* Dialogs and drawers */
+:root[data-theme="dark"] .compact-overlay, :root[data-theme="dark"] #focus-annotation-overlay, :root[data-theme="dark"] #library-overlay,
+:root[data-theme="dark"] #review-overlay, :root[data-theme="dark"] #peer-review-overlay { background: rgba(2, 6, 12, .55); }
+:root[data-theme="dark"] .compact-dialog, :root[data-theme="dark"] #focus-annotation-dialog, :root[data-theme="dark"] #library-drawer,
+:root[data-theme="dark"] #review-drawer, :root[data-theme="dark"] #peer-review-drawer { color: var(--text); background: var(--card); box-shadow: 0 20px 60px rgba(0, 0, 0, .5); }
+:root[data-theme="dark"] .library-header { background: var(--card); }
+:root[data-theme="dark"] .library-header h2, :root[data-theme="dark"] .version-dialog-header h2 { color: var(--dk-strong); }
+:root[data-theme="dark"] .library-header button, :root[data-theme="dark"] #version-close { color: var(--text-dim); }
+:root[data-theme="dark"] #version-close:hover { color: var(--dk-strong); background: var(--dk-hover); }
+:root[data-theme="dark"] .library-toolbar, :root[data-theme="dark"] #review-workflow-tabs, :root[data-theme="dark"] .focus-column-heading { background: var(--bg-panel); }
+:root[data-theme="dark"] #prompt-preview-content, :root[data-theme="dark"] #prompt-preview-manifest, :root[data-theme="dark"] .focus-reading-text,
+:root[data-theme="dark"] .suggestion .diff, :root[data-theme="dark"] .annotation-item blockquote, :root[data-theme="dark"] .change-before,
+:root[data-theme="dark"] .peer-finding, :root[data-theme="dark"] .peer-finding blockquote, :root[data-theme="dark"] .response-letter-form,
+:root[data-theme="dark"] .mini-diff del, :root[data-theme="dark"] .mini-diff ins, :root[data-theme="dark"] #paper-generation-preview pre { color: #cbd5e1; background: var(--background); }
+:root[data-theme="dark"] .prompt-manifest-details { background: var(--card); }
+:root[data-theme="dark"] .prompt-manifest-details summary { color: #93c5fd; background: var(--bg-panel); }
+:root[data-theme="dark"] .prompt-manifest-details summary:hover { color: #bfdbfe; background: var(--dk-tint-blue); }
+:root[data-theme="dark"] #prompt-preview-manifest { border-top-color: var(--border); }
+:root[data-theme="dark"] .focus-sentence-card, :root[data-theme="dark"] .agent-provider-card, :root[data-theme="dark"] .annotation-item,
+:root[data-theme="dark"] .revision-card, :root[data-theme="dark"] .reviewer-draft, :root[data-theme="dark"] .rubric-draft,
+:root[data-theme="dark"] .peer-review-card, :root[data-theme="dark"] .self-revision-card, :root[data-theme="dark"] .library-item,
+:root[data-theme="dark"] .candidate-item, :root[data-theme="dark"] .reference-card, :root[data-theme="dark"] .workspace-list-item { background: var(--dk-raised); }
+:root[data-theme="dark"] .focus-paragraph-button:hover, :root[data-theme="dark"] .focus-paragraph-button.active, :root[data-theme="dark"] .revision-head,
+:root[data-theme="dark"] .peer-review-head, :root[data-theme="dark"] .self-revision-head { background: var(--dk-hover); }
+:root[data-theme="dark"] #workspace-current-card, :root[data-theme="dark"] .workspace-list-item.active { background: var(--dk-tint-blue); border-color: #1e40af; }
+:root[data-theme="dark"] .workspace-list-item button, :root[data-theme="dark"] .sentence-reader-actions button,
+:root[data-theme="dark"] .history-diff-controls button { color: var(--text); background: var(--bg-input); }
+:root[data-theme="dark"] .sentence-reader-actions button.primary { color: #fff; background: var(--primary); }
+:root[data-theme="dark"] #sentence-reader-text { color: var(--text); background: var(--background); }
+
+/* Change history */
+:root[data-theme="dark"] #change-history-list, :root[data-theme="dark"] .change-history-diff > header,
+:root[data-theme="dark"] .history-diff-columns span { background: var(--bg-panel); }
+:root[data-theme="dark"] .change-history-item:hover { background: var(--dk-hover); }
+:root[data-theme="dark"] #change-history-detail, :root[data-theme="dark"] .change-history-section-title,
+:root[data-theme="dark"] #history-change-card, :root[data-theme="dark"] .change-history-source { background: var(--card); }
+:root[data-theme="dark"] .change-history-safety, :root[data-theme="dark"] .change-history-preview { color: var(--text-dim); background: var(--bg-input); }
+:root[data-theme="dark"] #history-pdf-viewport { background: #131920; }
+:root[data-theme="dark"] #change-history-rollback { color: #fca5a5; background: var(--dk-tint-red); border-color: #7f1d1d; }
+
+/* Version dialog */
+:root[data-theme="dark"] .version-dialog-icon { color: #93c5fd; background: var(--dk-tint-blue); }
+:root[data-theme="dark"] .version-eyebrow, :root[data-theme="dark"] .version-section-title { color: #93c5fd; }
+:root[data-theme="dark"] .version-summary, :root[data-theme="dark"] .version-dialog-footer { background: var(--bg-panel); border-color: var(--border); }
+:root[data-theme="dark"] .version-summary strong, :root[data-theme="dark"] .version-section-title h3 { color: var(--text); }
+:root[data-theme="dark"] .version-notes section { background: var(--dk-raised); border-color: var(--border); }
+:root[data-theme="dark"] .version-notes ul { color: #cbd5e1; }
+
+/* Entry file picker */
+:root[data-theme="dark"] #entry-file-button { color: #cbd5e1; background: var(--bg-input); }
+:root[data-theme="dark"] #entry-file-button:hover, :root[data-theme="dark"] #entry-file-button[aria-expanded="true"] { color: var(--dk-strong); background: var(--dk-hover); }
+:root[data-theme="dark"] #entry-file-button.unconfirmed { border-color: #64748b; }
+:root[data-theme="dark"] #entry-file-menu { color: var(--text); background: var(--dk-raised); border-color: var(--border); box-shadow: 0 12px 32px rgba(0, 0, 0, .45); }
+:root[data-theme="dark"] .entry-menu-head { border-color: var(--border); }
+:root[data-theme="dark"] .entry-menu-list button { color: #cbd5e1; }
+:root[data-theme="dark"] .entry-menu-list button:hover, :root[data-theme="dark"] .entry-menu-list button:focus-visible { background: var(--dk-hover); }
+:root[data-theme="dark"] .entry-menu-list button[aria-checked="true"] { color: #93c5fd; background: var(--dk-tint-blue); }
+:root[data-theme="dark"] .entry-badge { color: #bfdbfe; background: rgba(59, 130, 246, .28); }
+
+/* Editor background picker frame (swatches keep their own colors) */
+:root[data-theme="dark"] #editor-scheme-popover { color: var(--text); background: var(--dk-raised); border-color: var(--border); box-shadow: 0 12px 32px rgba(0, 0, 0, .45); }
+:root[data-theme="dark"] #editor-scheme-close { color: var(--text-dim); }
+:root[data-theme="dark"] #editor-scheme-close:hover { color: var(--dk-strong); background: var(--dk-hover); }
+:root[data-theme="dark"] .editor-scheme-help { color: var(--text-dim); }
+:root[data-theme="dark"] .editor-scheme-swatch[aria-checked="true"] { border-color: #60a5fa; box-shadow: 0 0 0 2px #60a5fa; }

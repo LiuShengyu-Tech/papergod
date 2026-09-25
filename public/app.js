@@ -6,6 +6,11 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs-dist/build/pdf.worker.mj
 
 let editor;
 let currentFile = 'main.tex';
+// The file whose content is actually in the editor; null until a load succeeds,
+// so a failed load can never be saved back as an empty file.
+let loadedFile = null;
+// { entryFile, saved, files } from /api/entry.
+let entryState = { entryFile: null, saved: false, files: [] };
 let suggestions = [];
 let currentDocument = null;
 let selectedNode = null;
@@ -34,6 +39,8 @@ const WORKSPACE_VIEW_KEY = 'papergod.workspaceView';
 const SPLIT_RATIO_KEY = 'papergod.splitRatio';
 const ASSISTANT_COLLAPSED_KEY = 'papergod.assistantCollapsed';
 const EDITOR_FONT_KEY = 'papergod.editorFont';
+const THEME_KEY = 'papergod.theme';
+const EDITOR_SCHEME_KEY = 'papergod.editorScheme';
 let agentProviders = [];
 let agentActivationGeneration = 0;
 let currentPromptPreview = null;
@@ -177,6 +184,7 @@ function initSplitDivider() {
   let ratio = applySplitRatio(Number(readPreference(SPLIT_RATIO_KEY)) || 0.5);
   const commit = () => { storePreference(SPLIT_RATIO_KEY, ratio.toFixed(4)); editor?.refresh(); };
   divider.addEventListener('pointerdown', (event) => {
+    if (event.target.closest('button')) return;
     event.preventDefault();
     divider.setPointerCapture(event.pointerId);
     view.classList.add('resizing');
@@ -193,7 +201,11 @@ function initSplitDivider() {
     divider.addEventListener('pointerup', up);
     divider.addEventListener('pointercancel', up);
   });
-  divider.addEventListener('dblclick', () => { ratio = applySplitRatio(0.5); commit(); });
+  divider.addEventListener('dblclick', (event) => {
+    if (event.target.closest('button')) return;
+    ratio = applySplitRatio(0.5);
+    commit();
+  });
   divider.addEventListener('keydown', (event) => {
     const step = event.key === 'ArrowLeft' ? -0.05 : event.key === 'ArrowRight' ? 0.05 : 0;
     if (!step) return;
@@ -201,6 +213,142 @@ function initSplitDivider() {
     ratio = applySplitRatio(ratio + step);
     commit();
   });
+}
+
+// Source <-> PDF synchronization for the split-view arrows. Both directions reuse
+// the text-layer mappings built after each render (pdfSentenceMappings for body
+// sentences, pdfHeadingMappings for the title and section headings).
+function pdfSyncTargets() {
+  const targets = [];
+  for (const mapping of pdfSentenceMappings) {
+    const range = mapping.sentence?.sourceRange;
+    if (range) targets.push({ pdf: mapping, source: range });
+  }
+  for (const mapping of pdfHeadingMappings) {
+    const range = headingSourceRange(mapping.node) || mapping.node.sourceRange;
+    if (range) targets.push({ pdf: mapping, source: range });
+  }
+  return targets;
+}
+
+function pdfReadyForSync() {
+  if (document.querySelector('#pdf-preview .pdf-page') && pdfTextIndex) return true;
+  showStatus(t('sync.compileFirst'), '');
+  return false;
+}
+
+function flashPdfRange(range) {
+  highlightPdfRanges(pdfTextIndex, [range], 'outline');
+  const marks = [...document.querySelectorAll('.pdf-active-highlight')];
+  setTimeout(() => marks.forEach((mark) => mark.remove()), 1600);
+}
+
+function syncPdfToCursor() {
+  if (!pdfReadyForSync()) return;
+  const cursor = editor.indexFromPos(editor.getCursor());
+  const targets = pdfSyncTargets();
+  // Prefer the innermost range containing the cursor; otherwise the nearest one before it.
+  const containing = targets
+    .filter(({ source }) => source.start <= cursor && cursor <= source.end)
+    .sort((a, b) => (a.source.end - a.source.start) - (b.source.end - b.source.start))[0];
+  const target = containing || targets
+    .filter(({ source }) => source.start <= cursor)
+    .sort((a, b) => b.source.start - a.source.start)[0] || targets.sort((a, b) => a.source.start - b.source.start)[0];
+  if (!target || !scrollPdfToRange(pdfTextIndex, target.pdf)) {
+    showStatus(t('sync.notFound'), '');
+    return;
+  }
+  flashPdfRange(target.pdf);
+}
+
+function syncCursorToPdf() {
+  if (!pdfReadyForSync()) return;
+  const viewTop = document.getElementById('pdf-preview').getBoundingClientRect().top + 8;
+  const targets = pdfSyncTargets().sort((a, b) => a.pdf.start - b.pdf.start);
+  // First mapped text whose line starts inside the visible area of the PDF pane.
+  const target = targets.find(({ pdf }) => {
+    for (let position = pdf.start; position < pdf.end; position += 1) {
+      const span = pdfTextIndex.positions[position]?.span;
+      if (span) return span.getBoundingClientRect().top >= viewTop;
+    }
+    return false;
+  }) || targets.at(-1);
+  if (!target) {
+    showStatus(t('sync.notFound'), '');
+    return;
+  }
+  const from = editor.posFromIndex(target.source.start);
+  const to = editor.posFromIndex(target.source.end);
+  editor.setCursor(from);
+  editor.scrollTo(null, Math.max(0, editor.charCoords(from, 'local').top - 48));
+  const mark = editor.markText(from, to, { className: 'cm-sync-flash' });
+  setTimeout(() => mark.clear(), 1600);
+  editor.focus();
+}
+
+// The source editor's color scheme is independent of the app theme; see
+// editor-schemes.css. main.jsx applies the saved scheme before first paint.
+function applyEditorScheme(scheme) {
+  document.documentElement.dataset.editorScheme = scheme;
+  document.querySelectorAll('[data-scheme-option]').forEach((option) => {
+    option.setAttribute('aria-checked', String(option.dataset.schemeOption === scheme));
+  });
+  if (editor) editor.refresh();
+}
+
+function initEditorScheme() {
+  const popover = document.getElementById('editor-scheme-popover');
+  const trigger = document.getElementById('editor-scheme-btn');
+  const options = [...popover.querySelectorAll('[data-scheme-option]')];
+  const known = new Set(options.map((option) => option.dataset.schemeOption));
+  const saved = readPreference(EDITOR_SCHEME_KEY);
+  applyEditorScheme(known.has(saved) ? saved : 'white');
+  const open = (show) => {
+    popover.classList.toggle('hidden', !show);
+    trigger.setAttribute('aria-expanded', String(show));
+    if (show) (popover.querySelector('[aria-checked="true"]') || options[0]).focus();
+  };
+  options.forEach((option) => option.addEventListener('click', () => {
+    applyEditorScheme(option.dataset.schemeOption);
+    storePreference(EDITOR_SCHEME_KEY, option.dataset.schemeOption);
+  }));
+  trigger.addEventListener('click', () => open(popover.classList.contains('hidden')));
+  document.getElementById('editor-scheme-close').addEventListener('click', () => open(false));
+  document.addEventListener('pointerdown', (event) => {
+    if (popover.classList.contains('hidden') || popover.contains(event.target) || trigger.contains(event.target)) return;
+    open(false);
+  });
+  popover.addEventListener('keydown', (event) => {
+    const index = options.indexOf(document.activeElement);
+    const step = { ArrowRight: 1, ArrowDown: 2, ArrowLeft: -1, ArrowUp: -2 }[event.key];
+    if (event.key === 'Escape') { open(false); trigger.focus(); }
+    else if (step && index >= 0) {
+      event.preventDefault();
+      options[(index + step + options.length) % options.length].focus();
+    }
+  });
+}
+
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  const toggle = document.getElementById('theme-toggle');
+  toggle.setAttribute('aria-pressed', String(theme === 'dark'));
+  toggle.title = t(theme === 'dark' ? 'theme.toLight' : 'theme.toDark');
+}
+
+function initThemeToggle() {
+  applyTheme(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
+  document.getElementById('theme-toggle').addEventListener('click', () => {
+    const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    storePreference(THEME_KEY, next);
+    applyTheme(next);
+  });
+  // Follow the OS setting until the user picks a theme explicitly.
+  try {
+    matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (event) => {
+      if (!readPreference(THEME_KEY)) applyTheme(event.matches ? 'dark' : 'light');
+    });
+  } catch { /* matchMedia unavailable */ }
 }
 
 function setAssistantCollapsed(collapsed, { persist = true } = {}) {
@@ -3510,6 +3658,7 @@ async function loadFile(name) {
     if (!res.ok) throw new Error('Load failed');
     const data = await res.json();
     currentFile = name;
+    loadedFile = name;
     resetCompiledPreview();
     editor.setValue(data.content);
     suggestions = [];
@@ -3527,10 +3676,15 @@ async function loadFile(name) {
     if (latexEngineAvailable) await compileFile({ silent: true });
   } catch (e) {
     showStatus('Failed to load ' + name, 'error');
+    if (!loadedFile) renderOutline();
   }
 }
 
 async function saveFile({ sync = true } = {}) {
+  if (!loadedFile || loadedFile !== currentFile) {
+    showStatus(t('entry.saveBlocked'), 'error');
+    return false;
+  }
   try {
     const content = editor.getValue();
     const res = await fetch('/api/files/' + encodeURIComponent(currentFile), {
@@ -3715,8 +3869,21 @@ async function closeFocusAnnotation() {
 
 function renderOutline() {
   const container = document.getElementById('outline-tree');
-  if (!currentDocument) {
-    container.innerHTML = '<div class="outline-empty">No structure available</div>';
+  if (!currentDocument || !loadedFile) {
+    if (loadedFile) {
+      container.innerHTML = '<div class="outline-empty">No structure available</div>';
+      return;
+    }
+    // Nothing open: let the user pick the paper's entry file right here.
+    const hasFiles = entryState.files.length > 0;
+    container.innerHTML = '<div class="outline-empty outline-entry-empty"><p>'
+      + escapeHtml(t(hasFiles ? 'entry.noFileLoaded' : 'entry.none')) + '</p>'
+      + (hasFiles ? '<button type="button" id="outline-choose-entry">' + escapeHtml(t('entry.choose')) + '</button>' : '')
+      + '</div>';
+    document.getElementById('outline-choose-entry')?.addEventListener('click', (event) => {
+      event.stopPropagation();
+      openEntryMenu(true);
+    });
     return;
   }
   const sectionHtml = (section) =>
@@ -3834,14 +4001,26 @@ function selectStructureNode(nodeId, { focus = true, editHeading = false, forceS
   schedulePromptContextPreview();
   const editRange = editHeading ? headingSourceRange(node) : node.sourceRange;
   if (focus && forceSource && !sourceVisible()) setWorkspaceView('source');
+  // Split view shows both panes, so outline navigation moves the editor too.
+  const split = workspaceView === 'split';
+  let previewReady = true;
   if (focus && forcePreview) {
-    const previewReady = !document.getElementById('preview-view-btn').disabled
-      && document.querySelector('#pdf-preview .pdf-page');
-    if (!previewReady) {
+    previewReady = !document.getElementById('preview-view-btn').disabled
+      && Boolean(document.querySelector('#pdf-preview .pdf-page'));
+    if (!previewReady && !split) {
       showStatus('Compile the PDF before using outline navigation.', '');
       return;
     }
-    if (!previewVisible()) setWorkspaceView('preview');
+    if (previewReady && !previewVisible()) setWorkspaceView('preview');
+  }
+  if (focus && forcePreview && split) {
+    const anchor = headingSourceRange(node) || node.sourceRange;
+    if (anchor) {
+      const start = editor.posFromIndex(anchor.start);
+      editor.setSelection(start, editor.posFromIndex(anchor.end));
+      editor.scrollTo(null, Math.max(0, editor.charCoords(start, 'local').top - 48));
+    }
+    if (!previewReady) return;
   }
   if (focus && editRange && !forcePreview) {
     const start = editor.posFromIndex(editRange.start);
@@ -3923,6 +4102,104 @@ async function saveContext() {
   }
 }
 
+// Compile the paper's entry file (like Overleaf's main document), so editing an
+// \input chapter still rebuilds the whole paper.
+function compileTarget() {
+  return entryState.entryFile && entryState.files.includes(entryState.entryFile) ? entryState.entryFile : currentFile;
+}
+
+async function fetchEntryState() {
+  const res = await fetch('/api/entry');
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Could not read the entry file');
+  entryState = { entryFile: data.entryFile, saved: Boolean(data.saved), files: data.files || [] };
+  renderEntryPicker();
+  return entryState;
+}
+
+function renderEntryPicker() {
+  document.getElementById('entry-file-name').textContent = entryState.entryFile || t('entry.noneShort');
+  const button = document.getElementById('entry-file-button');
+  button.title = entryState.entryFile
+    ? t(entryState.saved ? 'entry.titleSaved' : 'entry.titleDetected', { file: entryState.entryFile })
+    : t('entry.none');
+  button.classList.toggle('unconfirmed', Boolean(entryState.entryFile) && !entryState.saved);
+  const menu = document.getElementById('entry-file-menu');
+  const items = entryState.files.map((file) => {
+    const isEntry = file === entryState.entryFile;
+    const badge = isEntry ? '<span class="entry-badge">' + escapeHtml(t(entryState.saved ? 'entry.badge' : 'entry.badgeDetected')) + '</span>' : '';
+    const open = file === loadedFile ? '<span class="entry-open-dot" title="' + escapeHtml(t('entry.openNow')) + '"></span>' : '';
+    return '<button type="button" role="menuitemradio" aria-checked="' + isEntry + '" data-entry-file="' + escapeHtml(file) + '">'
+      + '<span class="entry-check" aria-hidden="true">' + (isEntry ? '★' : '') + '</span>'
+      + '<span class="entry-path">' + escapeHtml(file) + '</span>' + open + badge + '</button>';
+  }).join('');
+  menu.innerHTML = '<div class="entry-menu-head"><strong>' + escapeHtml(t('entry.label')) + '</strong><span>' + escapeHtml(t('entry.help')) + '</span></div>'
+    + (entryState.entryFile && !entryState.saved ? '<p class="entry-menu-note">' + escapeHtml(t('entry.detectedNote', { file: entryState.entryFile })) + '</p>' : '')
+    + (items ? '<div class="entry-menu-list">' + items + '</div>' : '<p class="entry-menu-note">' + escapeHtml(t('entry.none')) + '</p>');
+  menu.querySelectorAll('[data-entry-file]').forEach((item) => item.addEventListener('click', () => chooseEntryFile(item.dataset.entryFile)));
+}
+
+async function openEntryMenu(show) {
+  const menu = document.getElementById('entry-file-menu');
+  const button = document.getElementById('entry-file-button');
+  if (show) {
+    try { await fetchEntryState(); } catch (error) { showStatus(error.message, 'error'); }
+  }
+  menu.classList.toggle('hidden', !show);
+  button.setAttribute('aria-expanded', String(show));
+  if (show) (menu.querySelector('[aria-checked="true"]') || menu.querySelector('[data-entry-file]'))?.focus();
+}
+
+async function chooseEntryFile(file) {
+  openEntryMenu(false);
+  try {
+    const res = await fetch('/api/entry', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not set the entry file');
+    entryState = { entryFile: data.entryFile, saved: true, files: data.files || [] };
+    renderEntryPicker();
+    showStatus(t('entry.set', { file }), 'success');
+  } catch (error) {
+    showStatus(error.message, 'error');
+    return;
+  }
+  if (file !== loadedFile) {
+    if (loadedFile && !await saveFile({ sync: false })) return;
+    await loadFile(file);
+  } else if (latexEngineAvailable) {
+    await compileFile({ silent: true });
+  }
+}
+
+async function openEntryFile() {
+  try {
+    await fetchEntryState();
+  } catch (error) {
+    showStatus(error.message, 'error');
+  }
+  if (entryState.entryFile) await loadFile(entryState.entryFile);
+  else renderOutline();
+}
+
+function initEntryPicker() {
+  const menu = document.getElementById('entry-file-menu');
+  const button = document.getElementById('entry-file-button');
+  button.addEventListener('click', () => openEntryMenu(menu.classList.contains('hidden')));
+  document.addEventListener('pointerdown', (event) => {
+    if (menu.classList.contains('hidden') || event.target.closest('#entry-file-picker')) return;
+    openEntryMenu(false);
+  });
+  menu.addEventListener('keydown', (event) => {
+    const items = [...menu.querySelectorAll('[data-entry-file]')];
+    const index = items.indexOf(document.activeElement);
+    if (event.key === 'Escape') { openEntryMenu(false); button.focus(); }
+    else if (event.key === 'ArrowDown' && items.length) { event.preventDefault(); items[(index + 1) % items.length].focus(); }
+    else if (event.key === 'ArrowUp' && items.length) { event.preventDefault(); items[(index - 1 + items.length) % items.length].focus(); }
+  });
+}
+
 async function compileFile({ silent = false } = {}) {
   if (!await saveFile()) return false;
   showStatus('Compiling...', '');
@@ -3930,7 +4207,7 @@ async function compileFile({ silent = false } = {}) {
     const res = await fetch('/api/compile', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ file: currentFile }),
+      body: JSON.stringify({ file: compileTarget() }),
     });
     const data = await res.json();
     if (data.ok) {
@@ -5168,6 +5445,10 @@ function init() {
   initSplitDivider();
   initPdfAutoFit();
   initEditorSettings();
+  initThemeToggle();
+  initEditorScheme();
+  document.getElementById('sync-pdf-to-code').addEventListener('click', syncPdfToCursor);
+  document.getElementById('sync-code-to-pdf').addEventListener('click', syncCursorToPdf);
   document.getElementById('assistant-collapse').addEventListener('click', () => setAssistantCollapsed(true));
   document.getElementById('assistant-expand').addEventListener('click', () => setAssistantCollapsed(false));
   if (readPreference(ASSISTANT_COLLAPSED_KEY) === '1') setAssistantCollapsed(true, { persist: false });
@@ -5175,6 +5456,7 @@ function init() {
   document.getElementById('language-select').value = getLocale();
   document.getElementById('language-select').addEventListener('change', event => setLocale(event.target.value));
   document.addEventListener('papergod:locale-changed', () => {
+    if (document.getElementById('theme-toggle').hasAttribute('aria-pressed')) applyTheme(document.documentElement.dataset.theme);
     renderModificationIntents();
     refreshSentenceReaderLocale();
     if (agentProviders.length) { renderQuickAgentSelector(); renderAgentConfiguration(); }
@@ -5662,7 +5944,8 @@ function init() {
   });
   document.getElementById('ai-prompt').addEventListener('input', schedulePromptContextPreview);
 
-  loadEngineStatus().then(() => loadFile(currentFile));
+  initEntryPicker();
+  loadEngineStatus().then(openEntryFile);
   loadVersionInfo();
   loadConfig();
   loadAgentConfiguration();

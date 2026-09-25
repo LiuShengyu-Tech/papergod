@@ -1,7 +1,7 @@
 import {
-  BarChart3, BookMarked, BookOpen, Bot, Braces, Columns2, FileCode, FolderKanban, FolderOpen,
-  Bug, Download, GitPullRequest, History, Library, Network, PanelRightClose, PanelRightOpen, Play, PlayCircle, RefreshCw, Rocket, Save, ScanText,
-  Settings, Sparkles, SquareTerminal, Type, Users, X,
+  ArrowLeft, ArrowRight, BarChart3, BookMarked, BookOpen, Bot, Braces, ChevronDown, Columns2, FileCode, FileText, FolderKanban, FolderOpen,
+  Bug, Download, GitPullRequest, History, Library, Moon, Network, Palette, PanelRightClose, PanelRightOpen, Play, PlayCircle, RefreshCw, Rocket, Save, ScanText,
+  Settings, Sparkles, SquareTerminal, Sun, Type, Users, X,
 } from 'lucide-react';
 import { Button } from './ui/button.jsx';
 import packageData from '../../../package.json';
@@ -9,7 +9,7 @@ import packageData from '../../../package.json';
 function ProductHeader() {
   return (
     <header id="header">
-      <div className="brand-mark"><img className="brand-logo" src="/brand/papergod-logo.png" alt="" aria-hidden="true" /><span className="logo">Papergod</span><span id="active-workspace-name" title="Current workspace">Workspace</span></div>
+      <div className="brand-mark"><img className="brand-logo" src="/brand/papergod-logo.png" alt="" aria-hidden="true" /><span className="logo">Papergod</span><span id="active-workspace-name" title="Current workspace">Workspace</span><EntryFilePicker /></div>
       <nav className="header-actions" aria-label="Workspace tools">
         <Button id="library-open" variant="ghost" size="sm"><BookOpen size={14} /><span data-i18n="header.libraries">Writing libraries</span></Button>
         <Button id="focus-annotation-open" variant="ghost" size="sm"><ScanText size={14} /><span data-i18n="header.focus">Focus annotation</span></Button>
@@ -17,8 +17,20 @@ function ProductHeader() {
         <Button id="peer-review-open" variant="ghost" size="sm"><Users size={14} /><span data-i18n="header.peerReview">Peer review</span></Button>
       </nav>
       <span id="status" role="status" aria-live="polite" />
+      <button id="theme-toggle" type="button" title="Switch between light and dark theme" aria-label="Switch between light and dark theme" data-i18n-aria-label="theme.toggle"><Sun className="theme-icon-light" size={15} /><Moon className="theme-icon-dark" size={15} /></button>
       <label className="language-control"><span data-i18n="language.label">Language</span><select id="language-select" aria-label="Language"><option value="en">English</option><option value="zh-CN">简体中文</option></select></label>
     </header>
+  );
+}
+
+function EntryFilePicker() {
+  return (
+    <div id="entry-file-picker">
+      <button id="entry-file-button" type="button" aria-haspopup="menu" aria-expanded="false" aria-controls="entry-file-menu" title="Entry file">
+        <FileText size={13} /><span id="entry-file-name">—</span><ChevronDown size={12} />
+      </button>
+      <div id="entry-file-menu" className="hidden" role="menu" aria-labelledby="entry-file-button" />
+    </div>
   );
 }
 
@@ -75,19 +87,27 @@ function EditorWorkspace() {
           <button id="split-view-btn" className="view-tab" type="button" role="tab" aria-selected="false" aria-controls="source-view preview-panel" title="Source and PDF side by side"><Columns2 size={13} /><span data-i18n="editor.split">Split</span></button>
         </div>
         <Button id="editor-settings-btn" variant="outline" size="sm" title="Editor font settings" aria-haspopup="dialog" aria-expanded="false" aria-controls="editor-settings-popover" data-i18n-aria-label="editorSettings.title"><Type size={14} /></Button>
+        <Button id="editor-scheme-btn" variant="outline" size="sm" title="Editor background" aria-haspopup="dialog" aria-expanded="false" aria-controls="editor-scheme-popover" data-i18n-aria-label="editorScheme.title"><Palette size={14} /></Button>
         <Button id="history-open" variant="outline" size="sm" title="Change history"><History size={14} /><span data-i18n="history.title">Change history</span></Button>
         <Button id="save-btn" variant="outline" size="sm" title="Save (Ctrl+S)"><Save size={14} /><span data-i18n="editor.save">Save</span></Button>
         <Button id="compile-btn" variant="primary" size="sm" title="Compile LaTeX"><Play size={14} /><span data-i18n="editor.compile">Compile</span></Button>
       </div>
       <div id="workspace-view">
         <section id="source-view" className="workspace-pane" role="tabpanel" aria-labelledby="source-view-btn"><textarea id="editor" /></section>
-        <div id="split-divider" className="hidden" role="separator" aria-orientation="vertical" aria-label="Resize source and preview" tabIndex={0} />
+        <div id="split-divider" className="hidden" role="separator" aria-orientation="vertical" aria-label="Resize source and preview" tabIndex={0}>
+          <div className="split-sync" role="group" aria-label="Synchronize source and PDF">
+            <button id="sync-pdf-to-code" type="button" title="Show cursor position in PDF" aria-label="Show cursor position in PDF" data-i18n-aria-label="sync.toPdf"><ArrowRight size={11} strokeWidth={2.5} /></button>
+            <button id="sync-code-to-pdf" type="button" title="Go to PDF position in source" aria-label="Go to PDF position in source" data-i18n-aria-label="sync.toCode"><ArrowLeft size={11} strokeWidth={2.5} /></button>
+          </div>
+          <span className="split-grip" aria-hidden="true" />
+        </div>
         <section id="preview-panel" className="workspace-pane hidden" role="tabpanel" aria-labelledby="preview-view-btn">
           <div id="pdf-preview" aria-label="Rendered PDF pages" />
           <div id="preview-placeholder">Compile to render the paper</div>
         </section>
       </div>
       <EditorSettingsPopover />
+      <EditorSchemePopover />
     </main>
   );
 }
@@ -106,6 +126,36 @@ const EDITOR_FONT_OPTIONS = [
   ['"Lucida Sans Unicode", "Lucida Grande", sans-serif', 'Lucida Sans (proportional)'],
   ['Georgia, "Times New Roman", serif', 'Georgia (proportional)'],
 ];
+
+// Keys match the [data-editor-scheme] blocks in editor-schemes.css; each swatch
+// carries its own data-editor-scheme so it renders with that scheme's colors.
+const EDITOR_SCHEMES = [
+  ['white', 'White'],
+  ['light-grey', 'Light grey'],
+  ['sepia', 'Sepia'],
+  ['green', 'Eye-care green'],
+  ['solarized-light', 'Solarized light'],
+  ['dark-grey', 'Dark grey'],
+  ['midnight', 'Midnight'],
+  ['solarized-dark', 'Solarized dark'],
+];
+
+function EditorSchemePopover() {
+  return (
+    <section id="editor-scheme-popover" className="hidden" role="dialog" aria-labelledby="editor-scheme-title">
+      <header><h3 id="editor-scheme-title" data-i18n="editorScheme.title">Editor background</h3><button id="editor-scheme-close" type="button" aria-label="Close" data-i18n-aria-label="common.close"><X size={14} /></button></header>
+      <p className="editor-scheme-help" data-i18n="editorScheme.help">Applies only to the source editor, independent of the light/dark theme.</p>
+      <div className="editor-scheme-grid" role="radiogroup" aria-labelledby="editor-scheme-title">
+        {EDITOR_SCHEMES.map(([key, label]) => (
+          <button key={key} type="button" role="radio" aria-checked="false" className="editor-scheme-swatch" data-editor-scheme={key} data-scheme-option={key}>
+            <span className="editor-scheme-sample" aria-hidden="true"><span className="sample-tag">\section</span><span className="sample-bracket">{'{'}</span>Aa<span className="sample-bracket">{'}'}</span> <span className="sample-math">$x$</span></span>
+            <span className="editor-scheme-name" data-i18n={`editorScheme.${key}`}>{label}</span>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
 
 function EditorSettingsPopover() {
   return (
