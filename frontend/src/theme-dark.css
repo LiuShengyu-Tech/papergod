@@ -78,11 +78,11 @@
 :root[data-theme="dark"] .file-context { color: var(--dk-faint); }
 :root[data-theme="dark"] #current-file { color: #cbd5e1; }
 :root[data-theme="dark"] #workspace-view-switch { background: var(--bg-input); }
-:root[data-theme="dark"] #editor-toolbar #workspace-view-switch .view-tab { color: var(--text-dim); }
-:root[data-theme="dark"] #editor-toolbar #workspace-view-switch .view-tab:hover:not(:disabled) { color: var(--text); background: var(--dk-hover); }
-:root[data-theme="dark"] #editor-toolbar #workspace-view-switch .view-tab.active { color: var(--dk-strong); background: #3a4659; box-shadow: none; }
-:root[data-theme="dark"] #editor-toolbar > button { color: var(--text); background: var(--dk-raised); }
-:root[data-theme="dark"] #editor-toolbar > button:hover { color: var(--dk-strong); background: var(--dk-hover); border-color: #475569; }
+:root[data-theme="dark"] #workspace-view-switch .view-tab { color: var(--text-dim); }
+:root[data-theme="dark"] #workspace-view-switch .view-tab:hover:not(:disabled) { color: var(--text); background: var(--dk-hover); }
+:root[data-theme="dark"] #workspace-view-switch .view-tab.active { color: var(--dk-strong); background: #3a4659; box-shadow: none; }
+:root[data-theme="dark"] #editor-toolbar .editor-toolbar-main > button { color: var(--text); background: var(--dk-raised); }
+:root[data-theme="dark"] #editor-toolbar .editor-toolbar-main > button:hover { color: var(--dk-strong); background: var(--dk-hover); border-color: #475569; }
 :root[data-theme="dark"] #compile-split #compile-btn, :root[data-theme="dark"] #compile-split #compile-menu-btn { color: #fff; background: var(--primary); border-color: var(--primary); }
 :root[data-theme="dark"] #compile-split #compile-btn:hover, :root[data-theme="dark"] #compile-split #compile-menu-btn:hover { background: #2563eb; border-color: #2563eb; }
 :root[data-theme="dark"] #compile-menu { background: var(--dk-raised); border-color: var(--border); box-shadow: 0 12px 32px rgba(0, 0, 0, .45); }
@@ -241,3 +241,17 @@
 :root[data-theme="dark"] #outline-depth-menu button { color: #cbd5e1; }
 :root[data-theme="dark"] #outline-depth-menu button:hover, :root[data-theme="dark"] #outline-depth-menu button:focus-visible { background: var(--dk-hover); }
 :root[data-theme="dark"] #outline-depth-menu button[aria-checked="true"], :root[data-theme="dark"] .outline-depth-check { color: #93c5fd; }
+
+/* PDF toolbar zoom controls */
+:root[data-theme="dark"] #editor-toolbar .pdf-zoom > button, :root[data-theme="dark"] #editor-toolbar #pdf-zoom-btn { color: #cbd5e1; }
+:root[data-theme="dark"] #editor-toolbar .pdf-zoom > button:hover, :root[data-theme="dark"] #editor-toolbar #pdf-zoom-btn:hover, :root[data-theme="dark"] #editor-toolbar #pdf-zoom-btn[aria-expanded="true"] { color: var(--dk-strong); background: var(--dk-hover); }
+:root[data-theme="dark"] #editor-toolbar .pdf-zoom > button[aria-pressed="true"] { color: #bfdbfe; background: var(--dk-tint-blue); border-color: #1e40af; }
+:root[data-theme="dark"] #pdf-zoom-menu { background: var(--dk-raised); border-color: var(--border); box-shadow: 0 12px 28px rgba(0, 0, 0, .45); }
+:root[data-theme="dark"] #pdf-zoom-menu hr { border-top-color: var(--border); }
+:root[data-theme="dark"] #editor-toolbar #pdf-zoom-menu button { color: #cbd5e1; }
+:root[data-theme="dark"] #editor-toolbar #pdf-zoom-menu button:hover, :root[data-theme="dark"] #editor-toolbar #pdf-zoom-menu button:focus-visible { background: var(--dk-hover); }
+:root[data-theme="dark"] #editor-toolbar #pdf-zoom-menu button[aria-checked="true"] { color: #93c5fd; }
+
+/* Sidebar fold / resize */
+:root[data-theme="dark"] #sidebar-collapse, :root[data-theme="dark"] #sidebar-expand { color: var(--text-dim); }
+:root[data-theme="dark"] #sidebar-collapse:hover, :root[data-theme="dark"] #sidebar-expand:hover { color: var(--dk-strong); background: var(--dk-hover); }

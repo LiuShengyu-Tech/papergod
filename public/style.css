@@ -308,20 +308,20 @@ body {
   background: var(--bg-dark);
 }
 
-#editor-toolbar #workspace-view-switch .view-tab {
+#workspace-view-switch .view-tab {
   padding: 3px 10px;
   border: 0;
   background: transparent;
   color: var(--text-dim);
 }
 
-#editor-toolbar #workspace-view-switch .view-tab:hover:not(:disabled) {
+#workspace-view-switch .view-tab:hover:not(:disabled) {
   border: 0;
   background: var(--bg-input);
   color: var(--text);
 }
 
-#editor-toolbar #workspace-view-switch .view-tab.active {
+#workspace-view-switch .view-tab.active {
   background: var(--accent);
   color: var(--bg-dark);
 }

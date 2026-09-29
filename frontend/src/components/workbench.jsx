@@ -1,7 +1,7 @@
 import {
   AlertTriangle, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, BarChart3, BookMarked, BookOpen, BookOpenText, Bot, Braces, ChevronDown, Columns2, FileCode, FileText, FolderKanban, FolderOpen,
-  Bug, Download, GitPullRequest, History, Library, ListTree, Moon, Network, Palette, PanelRightClose, PanelRightOpen, Play, PlayCircle, RefreshCw, Rocket, RotateCcw, Save, ScanText,
-  Settings, Sparkles, SquarePen, SquareTerminal, Sun, Type, Users, X,
+  Bug, Download, GitPullRequest, History, Library, ListTree, Moon, MoveHorizontal, MoveVertical, Network, Palette, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, Play, PlayCircle, RefreshCw, Rocket, RotateCcw, Save, ScanText,
+  Settings, Sparkles, SquarePen, SquareTerminal, Sun, Type, Users, X, ZoomIn, ZoomOut,
 } from 'lucide-react';
 import { Button } from './ui/button.jsx';
 import packageData from '../../../package.json';
@@ -17,6 +17,11 @@ function ProductHeader() {
         <Button id="peer-review-open" variant="ghost" size="sm"><Users size={14} /><span data-i18n="header.peerReview">Peer review</span></Button>
       </nav>
       <span id="status" role="status" aria-live="polite" />
+      <div id="workspace-view-switch" role="tablist" aria-label="Document view">
+        <button id="source-view-btn" className="view-tab active" type="button" role="tab" aria-selected="true" aria-controls="source-view" title="LaTeX source editor"><SquarePen size={13} /><span data-i18n="editor.source">Editor</span></button>
+        <button id="preview-view-btn" className="view-tab" type="button" role="tab" aria-selected="false" aria-controls="preview-panel" disabled title="Compiled PDF"><BookOpenText size={13} /><span data-i18n="editor.preview">PDF</span></button>
+        <button id="split-view-btn" className="view-tab" type="button" role="tab" aria-selected="false" aria-controls="source-view preview-panel" title="Editor and PDF side by side"><Columns2 size={13} /><span data-i18n="editor.split">Split</span></button>
+      </div>
       <button id="theme-toggle" type="button" title="Switch between light and dark theme" aria-label="Switch between light and dark theme" data-i18n-aria-label="theme.toggle"><Sun className="theme-icon-light" size={15} /><Moon className="theme-icon-dark" size={15} /></button>
       <label className="language-control"><span data-i18n="language.label">Language</span><select id="language-select" aria-label="Language"><option value="en">English</option><option value="zh-CN">简体中文</option></select></label>
     </header>
@@ -37,7 +42,11 @@ function EntryFilePicker() {
 function Navigator() {
   return (
     <aside id="sidebar">
-      <div id="navigator-tabs" role="tablist" aria-label="Paper navigation"><button id="navigator-outline-tab" className="active" type="button" role="tab" aria-selected="true" data-i18n="nav.outline">Outline</button><button id="navigator-tools-tab" type="button" role="tab" aria-selected="false" data-i18n="nav.tools">Tools</button></div>
+      <button id="sidebar-expand" type="button" title="Show sidebar" aria-label="Show sidebar" aria-controls="sidebar" data-i18n-aria-label="nav.expand"><PanelLeftOpen size={15} /><span data-i18n="nav.outline">Outline</span></button>
+      <div className="sidebar-top">
+        <div id="navigator-tabs" role="tablist" aria-label="Paper navigation"><button id="navigator-outline-tab" className="active" type="button" role="tab" aria-selected="true" data-i18n="nav.outline">Outline</button><button id="navigator-tools-tab" type="button" role="tab" aria-selected="false" data-i18n="nav.tools">Tools</button></div>
+        <button id="sidebar-collapse" type="button" title="Fold sidebar" aria-label="Fold sidebar" aria-controls="sidebar" aria-expanded="true" data-i18n-aria-label="nav.fold"><PanelLeftClose size={15} /></button>
+      </div>
       <section id="navigator-outline-panel" className="navigator-panel" role="tabpanel">
         <div className="sidebar-heading">
           <h3 data-i18n="nav.paperOutline">Paper outline</h3>
@@ -86,6 +95,8 @@ function Navigator() {
         <span className="version-status-copy"><span data-i18n="version.product">Papergod</span><strong id="current-version" data-current-version={packageData.version}>v{packageData.version}</strong></span>
         <span id="version-update-badge" className="version-update-badge hidden" data-i18n="version.available">Update</span>
       </button>
+      {/* Drag to resize, double-click to reset, arrow keys when focused. */}
+      <div id="sidebar-resizer" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" tabIndex={0} data-i18n-aria-label="nav.resize" />
     </aside>
   );
 }
@@ -94,24 +105,44 @@ function EditorWorkspace() {
   return (
     <main id="editor-panel">
       <div id="editor-toolbar">
+        {/* In split view this section is as wide as the editor pane, so its
+            buttons end at the editor's right edge (see .editor-toolbar-main). */}
+        <div className="editor-toolbar-main">
         <div className="file-context"><Braces size={14} /><span id="current-file">main.tex</span></div>
-        <div id="workspace-view-switch" role="tablist" aria-label="Document view">
-          <button id="source-view-btn" className="view-tab active" type="button" role="tab" aria-selected="true" aria-controls="source-view" title="LaTeX source editor"><SquarePen size={13} /><span data-i18n="editor.source">Editor</span></button>
-          <button id="preview-view-btn" className="view-tab" type="button" role="tab" aria-selected="false" aria-controls="preview-panel" disabled title="Compiled PDF"><BookOpenText size={13} /><span data-i18n="editor.preview">PDF</span></button>
-          <button id="split-view-btn" className="view-tab" type="button" role="tab" aria-selected="false" aria-controls="source-view preview-panel" title="Editor and PDF side by side"><Columns2 size={13} /><span data-i18n="editor.split">Split</span></button>
-        </div>
         <Button id="editor-settings-btn" variant="outline" size="sm" title="Editor font settings" aria-haspopup="dialog" aria-expanded="false" aria-controls="editor-settings-popover" data-i18n-aria-label="editorSettings.title"><Type size={14} /></Button>
         <Button id="editor-scheme-btn" variant="outline" size="sm" title="Editor background" aria-haspopup="dialog" aria-expanded="false" aria-controls="editor-scheme-popover" data-i18n-aria-label="editorScheme.title"><Palette size={14} /></Button>
         <Button id="history-open" variant="outline" size="sm" title="Change history"><History size={14} /><span data-i18n="history.title">Change history</span></Button>
-        <Button id="save-btn" variant="outline" size="sm" title="Save (Ctrl+S)"><Save size={14} /><span data-i18n="editor.save">Save</span></Button>
-        <div id="compile-split">
-          <Button id="compile-btn" variant="primary" size="sm" title="Compile LaTeX"><Play size={14} /><span data-i18n="editor.compile">Compile</span></Button>
-          <button id="compile-menu-btn" type="button" title="More compile options" aria-label="More compile options" aria-haspopup="menu" aria-expanded="false" aria-controls="compile-menu" data-i18n-aria-label="compileMenu.more"><ChevronDown size={14} /></button>
-          <div id="compile-menu" className="hidden" role="menu" aria-labelledby="compile-menu-btn">
-            <button id="compile-clean" type="button" role="menuitem">
-              <RotateCcw size={14} />
-              <span><strong data-i18n="compileMenu.clean">Recompile from scratch</strong><small data-i18n="compileMenu.cleanHelp">Deletes cached build files (.aux, .bbl, .toc, …) and runs LaTeX, BibTeX and LaTeX again.</small></span>
-            </button>
+        <Button id="save-btn" variant="outline" size="sm" title="Save"><Save size={14} /><span data-i18n="editor.save">Save</span></Button>
+        </div>
+        {/* Starts at the PDF pane's left edge in split view: Compile, then zoom. */}
+        <div className="pdf-toolbar">
+          <div id="compile-split">
+            <Button id="compile-btn" variant="primary" size="sm" title="Save and compile (Ctrl+S)"><Play size={14} /><span data-i18n="editor.compile">Compile</span></Button>
+            <button id="compile-menu-btn" type="button" title="More compile options" aria-label="More compile options" aria-haspopup="menu" aria-expanded="false" aria-controls="compile-menu" data-i18n-aria-label="compileMenu.more"><ChevronDown size={14} /></button>
+            <div id="compile-menu" className="hidden" role="menu" aria-labelledby="compile-menu-btn">
+              <button id="compile-clean" type="button" role="menuitem">
+                <RotateCcw size={14} />
+                <span><strong data-i18n="compileMenu.clean">Recompile from scratch</strong><small data-i18n="compileMenu.cleanHelp">Deletes cached build files (.aux, .bbl, .toc, …) and runs LaTeX, BibTeX and LaTeX again.</small></span>
+              </button>
+            </div>
+          </div>
+          <div className="pdf-zoom" role="toolbar" aria-label="PDF zoom">
+            <button id="pdf-zoom-out" type="button" title="Zoom out" aria-label="Zoom out" data-i18n-aria-label="pdfZoom.out"><ZoomOut size={15} /></button>
+            <div id="pdf-zoom-picker">
+              <button id="pdf-zoom-btn" type="button" title="Zoom" aria-haspopup="menu" aria-expanded="false" aria-controls="pdf-zoom-menu"><span id="pdf-zoom-label">100%</span><ChevronDown size={12} /></button>
+              <div id="pdf-zoom-menu" className="hidden" role="menu" aria-labelledby="pdf-zoom-btn">
+                <button type="button" role="menuitemradio" aria-checked="false" data-pdf-zoom="width"><MoveHorizontal size={13} /><span data-i18n="pdfZoom.fitWidth">Fit to width</span></button>
+                <button type="button" role="menuitemradio" aria-checked="false" data-pdf-zoom="height"><MoveVertical size={13} /><span data-i18n="pdfZoom.fitHeight">Fit to height</span></button>
+                <hr />
+                {[50, 75, 100, 125, 150, 200, 300, 400].map((value) => (
+                  <button key={value} type="button" role="menuitemradio" aria-checked="false" data-pdf-zoom={value / 100}><span /><span>{value}%</span></button>
+                ))}
+              </div>
+            </div>
+            <button id="pdf-zoom-in" type="button" title="Zoom in" aria-label="Zoom in" data-i18n-aria-label="pdfZoom.in"><ZoomIn size={15} /></button>
+            <span className="pdf-toolbar-sep" aria-hidden="true" />
+            <button id="pdf-fit-width" type="button" aria-pressed="false" title="Fit to width" aria-label="Fit to width" data-i18n-aria-label="pdfZoom.fitWidth"><MoveHorizontal size={15} /></button>
+            <button id="pdf-fit-height" type="button" aria-pressed="false" title="Fit to height" aria-label="Fit to height" data-i18n-aria-label="pdfZoom.fitHeight"><MoveVertical size={15} /></button>
           </div>
         </div>
       </div>
@@ -119,8 +150,8 @@ function EditorWorkspace() {
         <section id="source-view" className="workspace-pane" role="tabpanel" aria-labelledby="source-view-btn"><textarea id="editor" /><SearchPanel /></section>
         <div id="split-divider" className="hidden" role="separator" aria-orientation="vertical" aria-label="Resize source and preview" tabIndex={0}>
           <div className="split-sync" role="group" aria-label="Synchronize source and PDF">
-            <button id="sync-pdf-to-code" type="button" title="Show cursor position in PDF" aria-label="Show cursor position in PDF" data-i18n-aria-label="sync.toPdf"><ArrowRight size={11} strokeWidth={2.5} /></button>
-            <button id="sync-code-to-pdf" type="button" title="Go to PDF position in source" aria-label="Go to PDF position in source" data-i18n-aria-label="sync.toCode"><ArrowLeft size={11} strokeWidth={2.5} /></button>
+            <button id="sync-pdf-to-code" type="button" title="Show cursor position in PDF" aria-label="Show cursor position in PDF" data-i18n-aria-label="sync.toPdf"><ArrowRight size={15} strokeWidth={2.5} /></button>
+            <button id="sync-code-to-pdf" type="button" title="Go to PDF position in source" aria-label="Go to PDF position in source" data-i18n-aria-label="sync.toCode"><ArrowLeft size={15} strokeWidth={2.5} /></button>
           </div>
           <span className="split-grip" aria-hidden="true" />
         </div>
