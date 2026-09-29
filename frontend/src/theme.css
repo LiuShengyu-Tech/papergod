@@ -122,11 +122,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .file-context { display: flex; align-items: center; gap: 7px; flex: 1; color: #a1a1aa; }
 #current-file { flex: initial; color: #52525b; font-size: 12px; }
 #workspace-view-switch { padding: 3px; background: #f4f4f5; border: 0; border-radius: 7px; }
-#editor-toolbar #workspace-view-switch .view-tab { min-height: 27px; padding: 4px 10px; border-radius: 5px; color: #71717a; }
-#editor-toolbar #workspace-view-switch .view-tab:hover:not(:disabled) { color: #3f3f46; background: #e9e9ec; }
-#editor-toolbar #workspace-view-switch .view-tab.active { color: #27272a; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .08); }
-#editor-toolbar > button { padding: 6px 9px; border-radius: 7px; background: #fff; color: #3f3f46; }
-#editor-toolbar > button:hover { color: #18181b; background: #f4f4f5; border-color: #d4d4d8; }
+#workspace-view-switch .view-tab { min-height: 27px; padding: 4px 10px; border-radius: 5px; color: #71717a; }
+#workspace-view-switch .view-tab:hover:not(:disabled) { color: #3f3f46; background: #e9e9ec; }
+#workspace-view-switch .view-tab.active { color: #27272a; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .08); }
+#editor-toolbar .editor-toolbar-main > button { padding: 6px 9px; border-radius: 7px; background: #fff; color: #3f3f46; }
+#editor-toolbar .editor-toolbar-main > button:hover { color: #18181b; background: #f4f4f5; border-color: #d4d4d8; }
 #compile-split #compile-btn, #compile-split #compile-menu-btn { color: #fff; background: var(--primary); border-color: var(--primary); }
 #compile-split #compile-btn:hover, #compile-split #compile-menu-btn:hover, #compile-split #compile-menu-btn[aria-expanded="true"] { color: #fff; background: #1d4ed8; border-color: #1d4ed8; }
 
@@ -248,15 +248,19 @@ input::placeholder, textarea::placeholder { color: #a1a1aa; }
 }
 
 /* Split view: source on the left, PDF on the right, with a draggable divider. */
-#editor-toolbar #workspace-view-switch .view-tab { display: inline-flex; align-items: center; gap: 5px; }
+#workspace-view-switch .view-tab { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; cursor: pointer; }
+#workspace-view-switch .view-tab:disabled { opacity: .4; cursor: not-allowed; }
 #workspace-view.split #source-view { flex: 0 0 var(--split-source, 50%); }
 #workspace-view.split #preview-panel { flex: 1 1 0; }
-#split-divider { flex: 0 0 14px; position: relative; z-index: 2; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; cursor: col-resize; background: #f1f3f6; border-left: 1px solid var(--border); border-right: 1px solid var(--border); touch-action: none; transition: background .15s; }
+/* Split bar width; the PDF toolbar offset uses it too. min-width: 0 keeps the
+   wider sync buttons from widening the bar: they overhang it on both sides. */
+:root { --split-bar-width: 16px; }
+#split-divider { flex: 0 0 var(--split-bar-width); min-width: 0; position: relative; z-index: 8; /* above CodeMirror's scrollbars (z-index 6) */ display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; cursor: col-resize; background: #f1f3f6; border-left: 1px solid var(--border); border-right: 1px solid var(--border); touch-action: none; transition: background .15s; }
 #split-divider:hover, #split-divider:focus-visible { background: #e4e9f0; outline: none; }
 #workspace-view.resizing #split-divider { background: #dbeafe; }
 .split-grip { width: 4px; height: 26px; border-left: 1px solid #a1a1aa; border-right: 1px solid #a1a1aa; opacity: .8; pointer-events: none; }
 .split-sync { display: flex; flex-direction: column; gap: 4px; }
-.split-sync button { display: grid; place-items: center; width: 14px; height: 24px; padding: 0; color: var(--primary); background: #fff; border: 1px solid #cbd5e1; border-radius: 3px; cursor: pointer; }
+.split-sync button { display: grid; place-items: center; width: 24px; height: 32px; box-shadow: 0 1px 3px rgba(0, 0, 0, .12); padding: 0; color: var(--primary); background: #fff; border: 1px solid #cbd5e1; border-radius: 3px; cursor: pointer; }
 .split-sync button:hover { color: #fff; background: var(--primary); border-color: var(--primary); }
 #workspace-view.resizing { cursor: col-resize; user-select: none; }
 #workspace-view.resizing .workspace-pane { pointer-events: none; }
@@ -400,7 +404,7 @@ input::placeholder, textarea::placeholder { color: #a1a1aa; }
 #compile-split #compile-menu-btn { display: inline-flex; align-items: center; padding: 6px 5px; border-left: 1px solid rgba(255, 255, 255, .35); border-radius: 0 7px 7px 0; }
 #compile-split.busy #compile-btn svg { animation: compile-spin 1s linear infinite; }
 @keyframes compile-spin { to { transform: rotate(360deg); } }
-#compile-menu { position: absolute; top: calc(100% + 6px); right: 0; z-index: 45; width: 300px; padding: 5px; background: #fff; border: 1px solid #e4e4e7; border-radius: 10px; box-shadow: 0 12px 32px rgba(0, 0, 0, .14); }
+#compile-menu { position: absolute; top: calc(100% + 6px); left: 0; z-index: 45; width: 300px; padding: 5px; background: #fff; border: 1px solid #e4e4e7; border-radius: 10px; box-shadow: 0 12px 32px rgba(0, 0, 0, .14); }
 #compile-menu.hidden { display: none; }
 #editor-toolbar #compile-menu button { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 9px; align-items: start; width: 100%; padding: 9px 10px; color: #27272a; background: transparent; border: 0; border-radius: 7px; text-align: left; font-size: 12px; transition: none; }
 #editor-toolbar #compile-menu button:hover, #editor-toolbar #compile-menu button:focus-visible { color: #18181b; background: #f4f4f5; outline: none; }
@@ -431,3 +435,72 @@ input::placeholder, textarea::placeholder { color: #a1a1aa; }
 #outline-depth-menu button[aria-checked="true"] { color: #1d4ed8; font-weight: 600; }
 .outline-depth-check { visibility: hidden; color: #2563eb; }
 #outline-depth-menu button[aria-checked="true"] .outline-depth-check { visibility: visible; }
+
+/* Header view switch (Editor / PDF / Split), left of the theme toggle. */
+#header #workspace-view-switch { flex: none; }
+
+/* Editor toolbar: the controls section spans the editor pane only. In split
+   view its width is the editor pane's share (--split-source, set on
+   #editor-panel), so the buttons end at the editor's right border. */
+#editor-toolbar { gap: 0; padding: 0; }
+.editor-toolbar-main { display: flex; flex: 1 1 auto; align-items: center; gap: 8px; min-width: 0; padding: 7px 12px; container-type: inline-size; container-name: editor-toolbar; }
+#editor-panel.split-layout .editor-toolbar-main { flex: 0 0 var(--split-source, 50%); }
+.editor-toolbar-main .file-context { min-width: 0; overflow: hidden; }
+.editor-toolbar-main #current-file { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* When the editor pane is narrow, keep every control inside it: labels
+   collapse to icons (tooltips keep the names), Compile's label goes last. */
+@container editor-toolbar (max-width: 520px) {
+  #history-open span, #save-btn span { display: none; }
+}
+/* Very narrow editor: the file name is also in the header's entry picker.
+   (A container query styles descendants only, so spacing is set per child.) */
+@container editor-toolbar (max-width: 280px) {
+  .editor-toolbar-main .file-context { display: none; }
+  #editor-settings-btn { margin-left: auto; }
+  .editor-toolbar-main > button { padding-left: 6px !important; padding-right: 6px !important; }
+}
+#editor-panel.split-layout #editor-settings-popover,
+#editor-panel.split-layout #editor-scheme-popover { right: calc(100% - var(--split-source, 50%) + 12px); }
+
+/* PDF section of the toolbar: Compile at the PDF pane's left edge, then zoom.
+   Editor view: Compile only, at the right end. Split: starts at the editor's
+   right edge, offset by the split bar plus the editor side's 12px inset.
+   PDF view: the editor section is hidden and this spans the full width. */
+.pdf-toolbar { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; padding: 7px 12px 7px 0; }
+.pdf-zoom { display: none; align-items: center; gap: 2px; margin: 0 auto; }
+#editor-panel.split-layout .pdf-toolbar { flex: 1 1 0; min-width: max-content; padding-left: calc(var(--split-bar-width) + 12px); }
+#editor-panel.pdf-layout .editor-toolbar-main { display: none; }
+#editor-panel.pdf-layout .pdf-toolbar { flex: 1 1 auto; padding-left: 12px; }
+#editor-panel.split-layout .pdf-zoom, #editor-panel.pdf-layout .pdf-zoom { display: flex; }
+#editor-toolbar .pdf-zoom > button, #editor-toolbar #pdf-zoom-btn { display: inline-flex; align-items: center; justify-content: center; gap: 3px; min-width: 28px; height: 28px; padding: 0 6px; color: #52525b; background: transparent; border: 1px solid transparent; border-radius: 6px; font-size: 11px; font-variant-numeric: tabular-nums; cursor: pointer; }
+#editor-toolbar .pdf-zoom > button:hover, #editor-toolbar #pdf-zoom-btn:hover, #editor-toolbar #pdf-zoom-btn[aria-expanded="true"] { color: #18181b; background: #f4f4f5; border-color: transparent; }
+#editor-toolbar .pdf-zoom > button[aria-pressed="true"] { color: #1d4ed8; background: #eff6ff; border-color: #bfdbfe; }
+#editor-toolbar #pdf-zoom-btn { min-width: 64px; font-weight: 600; }
+.pdf-toolbar-sep { width: 1px; height: 18px; margin: 0 4px; background: var(--border); }
+#pdf-zoom-picker { position: relative; }
+#pdf-zoom-menu { position: absolute; top: calc(100% + 6px); left: 50%; z-index: 45; width: 170px; padding: 5px; background: #fff; border: 1px solid #e4e4e7; border-radius: 9px; box-shadow: 0 12px 28px rgba(0, 0, 0, .14); transform: translateX(-50%); }
+#pdf-zoom-menu.hidden { display: none; }
+#pdf-zoom-menu hr { margin: 4px 2px; border: 0; border-top: 1px solid #eeeeef; }
+#editor-toolbar #pdf-zoom-menu button { display: grid; grid-template-columns: 16px 1fr; gap: 7px; align-items: center; width: 100%; padding: 6px 8px; color: #3f3f46; background: transparent; border: 0; border-radius: 6px; text-align: left; font-size: 12px; transition: none; }
+#editor-toolbar #pdf-zoom-menu button:hover, #editor-toolbar #pdf-zoom-menu button:focus-visible { background: #f4f4f5; outline: none; }
+#editor-toolbar #pdf-zoom-menu button[aria-checked="true"] { color: #1d4ed8; font-weight: 600; }
+
+/* Resizable, foldable sidebar. Width is --sidebar-w on #app (the grid column
+   and the header's brand area both use it); folded it is a 40px rail. */
+#sidebar { position: relative; }
+.sidebar-top { display: flex; flex: none; align-items: flex-start; gap: 2px; }
+.sidebar-top #navigator-tabs { flex: 1; min-width: 0; margin-right: 0; }
+#sidebar-collapse, #sidebar-expand { display: inline-flex; align-items: center; justify-content: center; color: #71717a; background: transparent; border: 1px solid transparent; border-radius: 6px; cursor: pointer; }
+#sidebar-collapse { flex: none; width: 28px; height: 34px; }
+#sidebar-collapse:hover, #sidebar-expand:hover { color: #18181b; background: #eeeeef; }
+#sidebar-expand { display: none; flex-direction: column; gap: 10px; width: 100%; padding: 12px 0; font-size: 11px; font-weight: 600; }
+#sidebar-expand span { writing-mode: vertical-rl; transform: rotate(180deg); }
+#app.sidebar-collapsed #sidebar { padding: 8px 0; }
+#app.sidebar-collapsed #sidebar > :not(#sidebar-expand) { display: none; }
+#app.sidebar-collapsed #sidebar-expand { display: flex; }
+#sidebar-resizer { position: absolute; top: 0; right: 0; bottom: 0; z-index: 8; width: 6px; cursor: col-resize; touch-action: none; }
+#sidebar-resizer::after { content: ""; position: absolute; top: 0; right: 0; bottom: 0; width: 1px; transition: background .15s, width .15s; }
+#sidebar-resizer:hover::after, #sidebar-resizer:focus-visible::after, #app.sidebar-resizing #sidebar-resizer::after { width: 3px; background: #93c5fd; }
+#sidebar-resizer:focus-visible { outline: none; }
+#app.sidebar-resizing { cursor: col-resize; user-select: none; }
+#app.sidebar-resizing iframe, #app.sidebar-resizing .workspace-pane { pointer-events: none; }

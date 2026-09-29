@@ -9,11 +9,12 @@ import { initializeWorkspace } from './server/workspace.js';
 import { startServer } from './server/index.js';
 import { AGENT_PROVIDERS } from './server/agent-adapters.js';
 import { createWorkspaceRegistry } from './server/workspace-registry.js';
+import { toHostPath, toServerPath } from './server/host-paths.js';
 
 const PACKAGE_FILE = fileURLToPath(new URL('../package.json', import.meta.url));
 const BUILT_IN_DEMO_WORKSPACE = resolve(dirname(PACKAGE_FILE), 'example');
 export function parseCliArgs(argv, cwd = process.cwd()) {
-  const options = { workspaceRoot: null, port: 3000, provider: 'mock', demo: false, resume: false, help: false, version: false };
+  const options = { workspaceRoot: null, port: 3000, host: process.env.PAPERGOD_HOST || '127.0.0.1', provider: 'mock', demo: false, resume: false, help: false, version: false };
   const positional = [];
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -22,6 +23,8 @@ export function parseCliArgs(argv, cwd = process.cwd()) {
     else if (argument === '--version' || argument === '-v') options.version = true;
     else if (argument === '--port' || argument === '-p') options.port = Number(argv[++index]);
     else if (argument.startsWith('--port=')) options.port = Number(argument.slice('--port='.length));
+    else if (argument === '--host') options.host = argv[++index];
+    else if (argument.startsWith('--host=')) options.host = argument.slice('--host='.length);
     else if (argument === '--agent') options.provider = argv[++index];
     else if (argument.startsWith('--agent=')) options.provider = argument.slice('--agent='.length);
     else if (argument === '--workspace' || argument === '-w') options.workspaceRoot = argv[++index];
@@ -41,9 +44,13 @@ export function parseCliArgs(argv, cwd = process.cwd()) {
   if (options.resume && options.demo) {
     throw new Error('--resume cannot be combined with --demo');
   }
-  options.workspaceRoot = resolve(cwd, options.workspaceRoot || positional[0] || '.');
+  // toServerPath maps host paths (e.g. C:\Users\...) to the container mount; a no-op outside containers.
+  options.workspaceRoot = resolve(cwd, toServerPath(options.workspaceRoot || positional[0] || '.'));
   if (!Number.isInteger(options.port) || options.port < 0 || options.port > 65535) {
     throw new Error('Port must be an integer between 0 and 65535');
+  }
+  if (typeof options.host !== 'string' || !options.host.trim()) {
+    throw new Error('Host must be a non-empty address, e.g. 127.0.0.1');
   }
   if (!AGENT_PROVIDERS.includes(options.provider)) {
     throw new Error(`Agent must be one of: ${AGENT_PROVIDERS.join(', ')}`);
@@ -60,6 +67,9 @@ Usage:
 Options:
   -w, --workspace <path>  Paper workspace (default: current directory)
   -p, --port <number>     Local HTTP port (default: 3000; 0 selects a free port)
+      --host <address>    Address to listen on (default: 127.0.0.1, or $PAPERGOD_HOST).
+                          Papergod has no login; only use 0.0.0.0 inside a container
+                          whose port is published to 127.0.0.1 on the host.
       --agent <provider>  mock, codex, claude-code, opencode, or pi (default: mock)
       --demo              Seed built-in prompts, libraries, vocabulary, and demo paper
       --resume            Reopen the last selected paper (built-in demo on first run)
@@ -100,7 +110,8 @@ export async function run(argv = process.argv.slice(2)) {
   const address = server.address();
   const url = `http://127.0.0.1:${address.port}`;
   process.stdout.write(`Papergod running at ${url}\n`);
-  process.stdout.write(`Workspace: ${options.workspaceRoot}\n`);
+  if (options.host !== '127.0.0.1') process.stdout.write(`Listening on ${options.host}:${address.port}\n`);
+  process.stdout.write(`Workspace: ${toHostPath(options.workspaceRoot)}\n`);
   process.stdout.write(`Agent: ${options.provider}${initialization.createdSample ? ' (sample main.tex created)' : ''}\n`);
 
   const shutdown = () => {

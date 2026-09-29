@@ -1,0 +1,21 @@
+# Rebuilt inside the image
+node_modules
+public/react
+
+# Local state and tooling
+.git
+.claude
+.papergod
+**/.papergod
+.env
+.wt-*
+
+# LaTeX build output
+*.aux
+*.log
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+*.bbl
+*.blg
+*.pdf

@@ -9,6 +9,8 @@ let currentFile = 'main.tex';
 // The file whose content is actually in the editor; null until a load succeeds,
 // so a failed load can never be saved back as an empty file.
 let loadedFile = null;
+// CodeMirror change generation at the last save/load; see isEditorDirty().
+let savedGeneration = null;
 // { entryFile, saved, files } from /api/entry.
 let entryState = { entryFile: null, saved: false, files: [] };
 let suggestions = [];
@@ -130,6 +132,8 @@ function setWorkspaceView(view, { user = false } = {}) {
   const showSource = split || view === 'source';
   const showPreview = split || view === 'preview';
   document.getElementById('workspace-view').classList.toggle('split', split);
+  document.getElementById('editor-panel').classList.toggle('split-layout', split);
+  document.getElementById('editor-panel').classList.toggle('pdf-layout', view === 'preview');
   document.getElementById('split-divider').classList.toggle('hidden', !split);
   document.getElementById('source-view').classList.toggle('hidden', !showSource);
   document.getElementById('preview-panel').classList.toggle('hidden', !showPreview);
@@ -164,18 +168,23 @@ function initPdfAutoFit() {
     clearTimeout(timer);
     timer = setTimeout(() => {
       const width = container.clientWidth;
-      if (!currentPdfUrl || !width || Math.abs(width - pdfRenderedWidth) < 24) return;
-      const scrollRatio = container.scrollHeight ? container.scrollTop / container.scrollHeight : 0;
-      showCompiledPdf(currentPdfUrl, { switchView: false }).then(() => {
-        container.scrollTop = scrollRatio * container.scrollHeight;
-      });
+      const height = container.clientHeight;
+      if (!currentPdfUrl || !width || pdfZoom.mode === 'custom') return;
+      const changed = pdfZoom.mode === 'height'
+        ? Math.abs(height - pdfRenderedHeight) >= 24
+        : Math.abs(width - pdfRenderedWidth) >= 24;
+      if (changed) {
+        applyInstantPdfZoom();
+        scheduleSharpenPdf();
+      }
     }, 220);
   }).observe(container);
 }
 
 function applySplitRatio(ratio) {
   const clamped = Math.min(0.8, Math.max(0.2, ratio));
-  document.getElementById('workspace-view').style.setProperty('--split-source', `${(clamped * 100).toFixed(2)}%`);
+  // On #editor-panel so both the panes and the toolbar above them can use it.
+  document.getElementById('editor-panel').style.setProperty('--split-source', `${(clamped * 100).toFixed(2)}%`);
   return clamped;
 }
 
@@ -352,6 +361,80 @@ function initThemeToggle() {
   } catch { /* matchMedia unavailable */ }
 }
 
+// --- Sidebar (left column): drag to resize, fold to a rail ----------------------
+const SIDEBAR_WIDTH_KEY = 'papergod.sidebarWidth';
+const SIDEBAR_COLLAPSED_KEY = 'papergod.sidebarCollapsed';
+const SIDEBAR_MIN = 180;
+const SIDEBAR_MAX = 520;
+const SIDEBAR_RAIL = 40;
+
+function sidebarWidthPreference() {
+  const width = Number(readPreference(SIDEBAR_WIDTH_KEY));
+  return Number.isFinite(width) && width >= SIDEBAR_MIN && width <= SIDEBAR_MAX ? width : null;
+}
+
+// null width = the stylesheet's responsive default.
+function applySidebarLayout() {
+  const app = document.getElementById('app');
+  const collapsed = readPreference(SIDEBAR_COLLAPSED_KEY) === '1';
+  const width = collapsed ? SIDEBAR_RAIL : sidebarWidthPreference();
+  if (width) app.style.setProperty('--sidebar-w', `${width}px`);
+  else app.style.removeProperty('--sidebar-w');
+  app.classList.toggle('sidebar-collapsed', collapsed);
+  document.getElementById('sidebar-collapse').setAttribute('aria-expanded', String(!collapsed));
+  if (editor) requestAnimationFrame(() => editor.refresh());
+}
+
+function setSidebarCollapsed(collapsed) {
+  storePreference(SIDEBAR_COLLAPSED_KEY, collapsed ? '1' : null);
+  applySidebarLayout();
+  (collapsed ? document.getElementById('sidebar-expand') : document.getElementById('sidebar-collapse')).focus();
+}
+
+function initSidebarLayout() {
+  const app = document.getElementById('app');
+  const sidebar = document.getElementById('sidebar');
+  const resizer = document.getElementById('sidebar-resizer');
+  applySidebarLayout();
+  document.getElementById('sidebar-collapse').addEventListener('click', () => setSidebarCollapsed(true));
+  document.getElementById('sidebar-expand').addEventListener('click', () => setSidebarCollapsed(false));
+  const setWidth = (width) => {
+    const clamped = Math.round(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, width)));
+    app.style.setProperty('--sidebar-w', `${clamped}px`);
+    return clamped;
+  };
+  resizer.addEventListener('pointerdown', (event) => {
+    event.preventDefault();
+    resizer.setPointerCapture(event.pointerId);
+    app.classList.add('sidebar-resizing');
+    const left = sidebar.getBoundingClientRect().left;
+    let width = sidebar.getBoundingClientRect().width;
+    const move = (moveEvent) => { width = setWidth(moveEvent.clientX - left); };
+    const up = () => {
+      resizer.removeEventListener('pointermove', move);
+      resizer.removeEventListener('pointerup', up);
+      resizer.removeEventListener('pointercancel', up);
+      app.classList.remove('sidebar-resizing');
+      storePreference(SIDEBAR_WIDTH_KEY, String(width));
+      editor?.refresh();
+    };
+    resizer.addEventListener('pointermove', move);
+    resizer.addEventListener('pointerup', up);
+    resizer.addEventListener('pointercancel', up);
+  });
+  resizer.addEventListener('dblclick', () => {
+    storePreference(SIDEBAR_WIDTH_KEY, null);
+    applySidebarLayout();
+  });
+  resizer.addEventListener('keydown', (event) => {
+    const step = event.key === 'ArrowLeft' ? -16 : event.key === 'ArrowRight' ? 16 : 0;
+    if (!step) return;
+    event.preventDefault();
+    storePreference(SIDEBAR_WIDTH_KEY, String(setWidth(sidebar.getBoundingClientRect().width + step)));
+    editor?.refresh();
+  });
+}
+
 function setAssistantCollapsed(collapsed, { persist = true } = {}) {
   document.getElementById('app').classList.toggle('assistant-collapsed', collapsed);
   document.getElementById('assistant-collapse').setAttribute('aria-expanded', String(!collapsed));
@@ -446,11 +529,66 @@ function initEditorSettings() {
   popover.addEventListener('keydown', (event) => { if (event.key === 'Escape') { open(false); trigger.focus(); } });
 }
 
+// Render one page into parent: canvas plus the text layer used for clicks,
+// search and PDF<->source mapping. Sized for the zoom of the visible pane
+// (container), even when parent is the off-screen stage used by sharpenPdf().
+async function renderPdfPage(pdf, pageNumber, container, parent) {
+  const page = await pdf.getPage(pageNumber);
+  const baseViewport = page.getViewport({ scale: 1 });
+  const viewport = page.getViewport({ scale: pdfPageScale(baseViewport, container) });
+  const outputScale = Math.min(window.devicePixelRatio || 1, 2);
+  const pageElement = document.createElement('div');
+  pageElement.className = 'pdf-page';
+  pageElement.style.width = `${Math.floor(viewport.width)}px`;
+  pageElement.style.height = `${Math.floor(viewport.height)}px`;
+  pageElement.style.setProperty('--scale-factor', viewport.scale);
+  pageElement.setAttribute('role', 'document');
+  pageElement.setAttribute('aria-label', 'PDF page ' + pageNumber + ' of ' + pdf.numPages);
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.floor(viewport.width * outputScale);
+  canvas.height = Math.floor(viewport.height * outputScale);
+  canvas.style.width = Math.floor(viewport.width) + 'px';
+  canvas.style.height = Math.floor(viewport.height) + 'px';
+  pageElement.appendChild(canvas);
+  const textLayer = document.createElement('div');
+  textLayer.className = 'textLayer pdf-text-layer';
+  textLayer.style.width = `${Math.floor(viewport.width)}px`;
+  textLayer.style.height = `${Math.floor(viewport.height)}px`;
+  pageElement.appendChild(textLayer);
+  parent.appendChild(pageElement);
+  await page.render({
+    canvasContext: canvas.getContext('2d', { alpha: false }),
+    viewport,
+    transform: outputScale === 1 ? null : [outputScale, 0, 0, outputScale, 0, 0],
+  }).promise;
+  const textContent = await page.getTextContent();
+  await new pdfjsLib.TextLayer({ textContentSource: textContent, container: textLayer, viewport }).render();
+  const renderedSpans = [...textLayer.querySelectorAll('span')];
+  const textItems = textContent.items.filter((item) => item.str?.trim());
+  let itemCursor = 0;
+  renderedSpans.forEach((span) => {
+    const searchEnd = Math.min(textItems.length, itemCursor + 12);
+    let matchedItem = -1;
+    for (let candidate = itemCursor; candidate < searchEnd; candidate += 1) {
+      if (textItems[candidate].str === span.textContent) { matchedItem = candidate; break; }
+    }
+    if (matchedItem !== -1) {
+      span.dataset.pdfHasEol = String(Boolean(textItems[matchedItem].hasEOL));
+      itemCursor = matchedItem + 1;
+    }
+  });
+  textLayer.addEventListener('click', handlePdfTextClick);
+  textLayer.addEventListener('pointermove', handlePdfTextHover);
+  textLayer.addEventListener('pointerleave', clearPdfHoverHighlight);
+  return { baseViewport, viewport };
+}
+
 async function showCompiledPdf(url, { switchView = true } = {}) {
   const renderGeneration = ++pdfRenderGeneration;
   const container = document.getElementById('pdf-preview');
   const placeholder = document.getElementById('preview-placeholder');
   if (pdfLoadingTask) await pdfLoadingTask.destroy().catch(() => {});
+  pdfDocument = null;
   currentPdfUrl = url;
   document.getElementById('pdf-scope-menu').classList.add('hidden');
   document.getElementById('pdf-edit-menu').classList.add('hidden');
@@ -471,57 +609,13 @@ async function showCompiledPdf(url, { switchView = true } = {}) {
     const pdfUrl = url + (url.includes('?') ? '&' : '?') + 't=' + Date.now();
     pdfLoadingTask = pdfjsLib.getDocument({ url: pdfUrl, isEvalSupported: false });
     const pdf = await pdfLoadingTask.promise;
+    pdfDocument = pdf;
     pdfRenderedWidth = container.clientWidth;
+    pdfRenderedHeight = container.clientHeight;
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
       if (renderGeneration !== pdfRenderGeneration) return;
-      const page = await pdf.getPage(pageNumber);
-      const baseViewport = page.getViewport({ scale: 1 });
-      const availableWidth = Math.max(320, container.clientWidth - 32);
-      const viewport = page.getViewport({ scale: availableWidth / baseViewport.width });
-      const outputScale = Math.min(window.devicePixelRatio || 1, 2);
-      const pageElement = document.createElement('div');
-      pageElement.className = 'pdf-page';
-      pageElement.style.width = `${Math.floor(viewport.width)}px`;
-      pageElement.style.height = `${Math.floor(viewport.height)}px`;
-      pageElement.style.setProperty('--scale-factor', viewport.scale);
-      pageElement.setAttribute('role', 'document');
-      pageElement.setAttribute('aria-label', 'PDF page ' + pageNumber + ' of ' + pdf.numPages);
-      const canvas = document.createElement('canvas');
-      canvas.width = Math.floor(viewport.width * outputScale);
-      canvas.height = Math.floor(viewport.height * outputScale);
-      canvas.style.width = Math.floor(viewport.width) + 'px';
-      canvas.style.height = Math.floor(viewport.height) + 'px';
-      pageElement.appendChild(canvas);
-      const textLayer = document.createElement('div');
-      textLayer.className = 'textLayer pdf-text-layer';
-      textLayer.style.width = `${Math.floor(viewport.width)}px`;
-      textLayer.style.height = `${Math.floor(viewport.height)}px`;
-      pageElement.appendChild(textLayer);
-      container.appendChild(pageElement);
-      await page.render({
-        canvasContext: canvas.getContext('2d', { alpha: false }),
-        viewport,
-        transform: outputScale === 1 ? null : [outputScale, 0, 0, outputScale, 0, 0],
-      }).promise;
-      const textContent = await page.getTextContent();
-      await new pdfjsLib.TextLayer({ textContentSource: textContent, container: textLayer, viewport }).render();
-      const renderedSpans = [...textLayer.querySelectorAll('span')];
-      const textItems = textContent.items.filter((item) => item.str?.trim());
-      let itemCursor = 0;
-      renderedSpans.forEach((span) => {
-        const searchEnd = Math.min(textItems.length, itemCursor + 12);
-        let matchedItem = -1;
-        for (let candidate = itemCursor; candidate < searchEnd; candidate += 1) {
-          if (textItems[candidate].str === span.textContent) { matchedItem = candidate; break; }
-        }
-        if (matchedItem !== -1) {
-          span.dataset.pdfHasEol = String(Boolean(textItems[matchedItem].hasEOL));
-          itemCursor = matchedItem + 1;
-        }
-      });
-      textLayer.addEventListener('click', handlePdfTextClick);
-      textLayer.addEventListener('pointermove', handlePdfTextHover);
-      textLayer.addEventListener('pointerleave', clearPdfHoverHighlight);
+      const { baseViewport, viewport } = await renderPdfPage(pdf, pageNumber, container, container);
+      if (pageNumber === 1) recordPdfRenderScale(baseViewport, viewport);
       if (renderGeneration === pdfRenderGeneration) {
         // Keep already-rendered pages interactive while later pages continue rendering.
         pdfTextIndex = buildPdfTextIndex();
@@ -3575,6 +3669,7 @@ async function saveResponseLetter(event, revisionId) {
 }
 
 async function verifyRevisionWorkflow(revisionId) {
+  if (isEditorDirty() && !await saveFile()) return;
   showStatus('Compiling and checking unresolved opinions...', '');
   try {
     const res = await fetch('/api/revisions/' + encodeURIComponent(revisionId) + '/verify', { method: 'POST' });
@@ -3658,6 +3753,10 @@ async function loadFileTree() {
 }
 
 async function loadFile(name) {
+  if (name !== loadedFile && isEditorDirty() && !await saveFile({ sync: false })) {
+    showStatus(t('save.beforeSwitchFailed'), 'error');
+    return;
+  }
   try {
     const res = await fetch('/api/files/' + encodeURIComponent(name));
     if (!res.ok) throw new Error('Load failed');
@@ -3685,12 +3784,20 @@ async function loadFile(name) {
   }
 }
 
+// True when the editor holds edits that are not on disk yet.
+function isEditorDirty() {
+  return Boolean(loadedFile) && savedGeneration !== null && !editor.isClean(savedGeneration);
+}
+
 async function saveFile({ sync = true } = {}) {
   if (!loadedFile || loadedFile !== currentFile) {
     showStatus(t('entry.saveBlocked'), 'error');
     return false;
   }
   try {
+    // Snapshot the generation with the content, so edits typed while the
+    // request is in flight still count as unsaved afterwards.
+    const generation = editor.changeGeneration();
     const content = editor.getValue();
     const res = await fetch('/api/files/' + encodeURIComponent(currentFile), {
       method: 'PUT',
@@ -3698,6 +3805,7 @@ async function saveFile({ sync = true } = {}) {
       body: JSON.stringify({ content }),
     });
     if (!res.ok) throw new Error('Save failed');
+    savedGeneration = generation;
     if (sync) await syncStructure({ silent: true });
     showStatus('Saved', 'success');
     return true;
@@ -4177,6 +4285,202 @@ async function saveContext() {
   }
 }
 
+// --- PDF zoom -----------------------------------------------------------------
+// mode 'width' / 'height' fit the pane; 'custom' uses scale, where 1 = 100%
+// (actual size: 1 PDF point = 1/72 in, rendered at 96 CSS px per inch).
+const PDF_ZOOM_KEY = 'papergod.pdfZoom';
+const PDF_CSS_UNITS = 96 / 72;
+const PDF_ZOOM_STEPS = [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4];
+let pdfZoom = loadPdfZoom();
+// Shown before the first page renders; fit modes are updated once it has.
+let pdfEffectiveZoom = pdfZoom.mode === 'custom' ? pdfZoom.scale : 1;
+let pdfRenderedHeight = 0;
+// Zoom changes are shown instantly by CSS-scaling the pages already on screen
+// (applyInstantPdfZoom), then re-drawn sharply off screen and swapped in
+// (sharpenPdf), reusing the loaded document instead of fetching it again.
+let pdfDocument = null;
+let pdfRenderedZoom = 1;   // zoom the on-screen canvases were drawn at
+let pdfPageBase = null;    // page 1 size at scale 1, to compute fit zooms
+let pdfSharpenTimer = null;
+const PDF_SHARPEN_DELAY_MS = 250;
+
+function loadPdfZoom() {
+  try {
+    const saved = JSON.parse(readPreference(PDF_ZOOM_KEY) || 'null');
+    if (saved?.mode === 'width' || saved?.mode === 'height') return { mode: saved.mode, scale: 1 };
+    const scale = Number(saved?.scale);
+    if (saved?.mode === 'custom' && scale >= 0.1 && scale <= 8) return { mode: 'custom', scale };
+  } catch { /* fall through to the default */ }
+  return { mode: 'width', scale: 1 };
+}
+
+// Scale for one page at the current zoom; #pdf-preview pads 16px/side and
+// 14px top + 28px bottom, and each page has a 14px bottom margin.
+function pdfPageScale(baseViewport, container) {
+  if (pdfZoom.mode === 'custom') return pdfZoom.scale * PDF_CSS_UNITS;
+  if (pdfZoom.mode === 'height') return Math.max(120, container.clientHeight - 42) / baseViewport.height;
+  return Math.max(320, container.clientWidth - 32) / baseViewport.width;
+}
+
+function recordPdfRenderScale(baseViewport, viewport) {
+  pdfPageBase = { width: baseViewport.width, height: baseViewport.height };
+  pdfRenderedZoom = viewport.scale / PDF_CSS_UNITS;
+  pdfEffectiveZoom = pdfRenderedZoom;
+  renderPdfZoomControls();
+}
+
+function targetPdfZoom() {
+  if (pdfZoom.mode === 'custom') return pdfZoom.scale;
+  if (!pdfPageBase) return pdfEffectiveZoom;
+  return pdfPageScale(pdfPageBase, document.getElementById('pdf-preview')) / PDF_CSS_UNITS;
+}
+
+// Keep the point at the centre of the view in place while pages change size.
+function withPdfViewCentre(update) {
+  const container = document.getElementById('pdf-preview');
+  const x = (container.scrollLeft + container.clientWidth / 2) / Math.max(1, container.scrollWidth);
+  const y = (container.scrollTop + container.clientHeight / 2) / Math.max(1, container.scrollHeight);
+  update();
+  container.scrollLeft = x * container.scrollWidth - container.clientWidth / 2;
+  container.scrollTop = y * container.scrollHeight - container.clientHeight / 2;
+}
+
+// Scale the current page canvases with CSS zoom: immediate, slightly soft
+// until sharpenPdf() swaps in pages drawn at the new size. Highlights sit
+// inside the pages, so they scale with them.
+function applyInstantPdfZoom() {
+  const target = targetPdfZoom();
+  pdfEffectiveZoom = target;
+  renderPdfZoomControls();
+  const pages = document.querySelectorAll('#pdf-preview .pdf-page');
+  if (!pages.length || !pdfRenderedZoom) return;
+  const ratio = target / pdfRenderedZoom;
+  withPdfViewCentre(() => {
+    pages.forEach((page) => { page.style.zoom = Math.abs(ratio - 1) < 0.001 ? '' : String(ratio); });
+  });
+}
+
+function scheduleSharpenPdf() {
+  clearTimeout(pdfSharpenTimer);
+  pdfSharpenTimer = setTimeout(sharpenPdf, PDF_SHARPEN_DELAY_MS);
+}
+
+// Re-draw every page at the current zoom into an off-screen stage (laid out
+// but invisible, so text layers measure as in the real view), then swap them
+// in at once. A newer zoom, resize or compile aborts it via the generation.
+async function sharpenPdf() {
+  const pdf = pdfDocument;
+  if (!pdf) {
+    rerenderPdfKeepingPosition();
+    return;
+  }
+  const generation = ++pdfRenderGeneration;
+  const container = document.getElementById('pdf-preview');
+  const stage = document.createElement('div');
+  stage.setAttribute('aria-hidden', 'true');
+  stage.style.cssText = `position: fixed; left: -100000px; top: 0; width: ${container.clientWidth}px; visibility: hidden; pointer-events: none;`;
+  document.body.appendChild(stage);
+  try {
+    let first = null;
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      if (generation !== pdfRenderGeneration) return;
+      const rendered = await renderPdfPage(pdf, pageNumber, container, stage);
+      if (pageNumber === 1) first = rendered;
+    }
+    if (generation !== pdfRenderGeneration || !first) return;
+    withPdfViewCentre(() => container.replaceChildren(...stage.children));
+    document.getElementById('preview-placeholder').classList.add('hidden');
+    pdfRenderedWidth = container.clientWidth;
+    pdfRenderedHeight = container.clientHeight;
+    recordPdfRenderScale(first.baseViewport, first.viewport);
+    pdfTextIndex = buildPdfTextIndex();
+    rebuildPdfSentenceMappings();
+  } catch (error) {
+    if (generation === pdfRenderGeneration) rerenderPdfKeepingPosition();
+  } finally {
+    stage.remove();
+  }
+}
+
+function renderPdfZoomControls() {
+  document.getElementById('pdf-zoom-label').textContent = `${Math.round(pdfEffectiveZoom * 100)}%`;
+  document.getElementById('pdf-fit-width').setAttribute('aria-pressed', String(pdfZoom.mode === 'width'));
+  document.getElementById('pdf-fit-height').setAttribute('aria-pressed', String(pdfZoom.mode === 'height'));
+  document.querySelectorAll('[data-pdf-zoom]').forEach((item) => {
+    const value = item.dataset.pdfZoom;
+    const checked = value === pdfZoom.mode || (pdfZoom.mode === 'custom' && Math.abs(Number(value) - pdfZoom.scale) < 0.001);
+    item.setAttribute('aria-checked', String(checked));
+  });
+}
+
+// Re-render the current PDF (e.g. after a zoom or pane-size change), keeping
+// the reader at the same relative position.
+function rerenderPdfKeepingPosition() {
+  const container = document.getElementById('pdf-preview');
+  if (!currentPdfUrl) return;
+  const scrollRatio = container.scrollHeight ? container.scrollTop / container.scrollHeight : 0;
+  showCompiledPdf(currentPdfUrl, { switchView: false }).then(() => {
+    container.scrollTop = scrollRatio * container.scrollHeight;
+  });
+}
+
+function setPdfZoom(next) {
+  pdfZoom = next;
+  storePreference(PDF_ZOOM_KEY, JSON.stringify(pdfZoom));
+  applyInstantPdfZoom();
+  // Rapid clicks or wheel ticks sharpen once, after zooming pauses.
+  scheduleSharpenPdf();
+}
+
+function stepPdfZoom(direction) {
+  const current = pdfZoom.mode === 'custom' ? pdfZoom.scale : pdfEffectiveZoom;
+  const next = direction > 0
+    ? PDF_ZOOM_STEPS.find((step) => step > current + 0.001)
+    : [...PDF_ZOOM_STEPS].reverse().find((step) => step < current - 0.001);
+  if (next) setPdfZoom({ mode: 'custom', scale: next });
+}
+
+function initPdfZoom() {
+  const menu = document.getElementById('pdf-zoom-menu');
+  const button = document.getElementById('pdf-zoom-btn');
+  const open = (show) => {
+    menu.classList.toggle('hidden', !show);
+    button.setAttribute('aria-expanded', String(show));
+    if (show) menu.querySelector('[aria-checked="true"]')?.focus();
+  };
+  renderPdfZoomControls();
+  document.getElementById('pdf-zoom-in').addEventListener('click', () => stepPdfZoom(1));
+  document.getElementById('pdf-zoom-out').addEventListener('click', () => stepPdfZoom(-1));
+  document.getElementById('pdf-fit-width').addEventListener('click', () => setPdfZoom({ mode: 'width', scale: 1 }));
+  document.getElementById('pdf-fit-height').addEventListener('click', () => setPdfZoom({ mode: 'height', scale: 1 }));
+  button.addEventListener('click', () => open(menu.classList.contains('hidden')));
+  menu.querySelectorAll('[data-pdf-zoom]').forEach((item) => item.addEventListener('click', () => {
+    const value = item.dataset.pdfZoom;
+    setPdfZoom(value === 'width' || value === 'height' ? { mode: value, scale: 1 } : { mode: 'custom', scale: Number(value) });
+    open(false);
+  }));
+  document.addEventListener('pointerdown', (event) => {
+    if (!menu.classList.contains('hidden') && !event.target.closest('#pdf-zoom-picker')) open(false);
+  });
+  menu.addEventListener('keydown', (event) => {
+    const items = [...menu.querySelectorAll('[data-pdf-zoom]')];
+    const index = items.indexOf(document.activeElement);
+    if (event.key === 'Escape') { open(false); button.focus(); }
+    else if (event.key === 'ArrowDown') { event.preventDefault(); items[(index + 1) % items.length].focus(); }
+    else if (event.key === 'ArrowUp') { event.preventDefault(); items[(index - 1 + items.length) % items.length].focus(); }
+  });
+  // Ctrl/Cmd + wheel over the PDF zooms the PDF instead of the whole page.
+  let lastWheel = 0;
+  document.getElementById('preview-panel').addEventListener('wheel', (event) => {
+    if (!event.ctrlKey && !event.metaKey) return;
+    event.preventDefault();
+    const now = Date.now();
+    if (now - lastWheel < 120) return;
+    lastWheel = now;
+    stepPdfZoom(event.deltaY < 0 ? 1 : -1);
+  }, { passive: false });
+}
+
 // --- Find & replace (Ctrl/Cmd+F), Overleaf-style bar under the editor -------
 
 const searchState = {
@@ -4240,9 +4544,14 @@ function searchOverlay(regex) {
   };
 }
 
-function refreshSearch({ keepPosition = false, reveal = true } = {}) {
+// select: move the editor selection to the chosen match. Refreshes caused by
+// the user's own typing pass select: false so the cursor stays where they type.
+function refreshSearch({ keepPosition = false, reveal = true, select = true } = {}) {
   const input = document.getElementById('search-query');
   const regex = buildSearchRegex();
+  // The current-match mark moves with edits, so it is the best anchor to keep.
+  const marked = searchState.currentMark?.find();
+  if (keepPosition && marked) searchState.anchor = editor.indexFromPos(marked.from);
   clearSearchDecorations();
   searchState.matches = [];
   searchState.regex = regex instanceof RegExp ? regex : null;
@@ -4265,10 +4574,10 @@ function refreshSearch({ keepPosition = false, reveal = true } = {}) {
   const anchor = keepPosition && searchState.current >= 0
     ? searchState.matches.findIndex((item) => item.start >= (searchState.anchor ?? 0))
     : searchState.matches.findIndex((item) => item.end > editor.indexFromPos(editor.getCursor('from')));
-  selectSearchMatch(searchState.matches.length ? (anchor >= 0 ? anchor : 0) : -1, { reveal });
+  selectSearchMatch(searchState.matches.length ? (anchor >= 0 ? anchor : 0) : -1, { reveal, select });
 }
 
-function selectSearchMatch(index, { reveal = true } = {}) {
+function selectSearchMatch(index, { reveal = true, select = true } = {}) {
   searchState.currentMark?.clear();
   searchState.currentMark = null;
   searchState.current = index;
@@ -4284,14 +4593,27 @@ function selectSearchMatch(index, { reveal = true } = {}) {
   const from = editor.posFromIndex(match.start);
   const to = editor.posFromIndex(match.end);
   searchState.currentMark = editor.markText(from, to, { className: 'cm-search-current' });
-  editor.setSelection(from, to, { scroll: false });
+  if (select) editor.setSelection(from, to, { scroll: false });
   if (reveal) editor.scrollIntoView({ from, to }, 80);
 }
 
 function stepSearch(direction) {
-  if (!searchState.matches.length) return;
-  const total = searchState.matches.length;
-  selectSearchMatch((searchState.current + direction + total) % total);
+  const matches = searchState.matches;
+  if (!matches.length) return;
+  const total = matches.length;
+  const current = matches[searchState.current];
+  const from = editor.indexFromPos(editor.getCursor('from'));
+  const to = editor.indexFromPos(editor.getCursor('to'));
+  if (current && current.start === from && current.end === to) {
+    selectSearchMatch((searchState.current + direction + total) % total);
+    return;
+  }
+  // The user clicked or typed elsewhere: continue from the cursor, not the old match.
+  let index = direction > 0
+    ? matches.findIndex((match) => match.start >= to)
+    : matches.findLastIndex((match) => match.end <= from);
+  if (index < 0) index = direction > 0 ? 0 : total - 1;
+  selectSearchMatch(index);
 }
 
 function replacementFor(matchText) {
@@ -4346,9 +4668,13 @@ function closeSearch({ focusEditor = true } = {}) {
   clearSearchDecorations();
   searchState.matches = [];
   searchState.current = -1;
+  // Keep the view where the user left it: refreshing the resized editor and
+  // focusing its hidden input would otherwise scroll to the cursor.
+  const { left, top } = editor.getScrollInfo();
   document.getElementById('search-panel').classList.add('hidden');
   editor.refresh();
   if (focusEditor) editor.focus();
+  editor.scrollTo(left, top);
 }
 
 function initSearchPanel() {
@@ -4388,7 +4714,7 @@ function initSearchPanel() {
   editor.on('changes', (_instance, changes) => {
     if (!searchState.open || changes.every((change) => change.origin === '+replace' || change.origin === '*replace')) return;
     clearTimeout(searchState.refreshTimer);
-    searchState.refreshTimer = setTimeout(() => refreshSearch({ keepPosition: true, reveal: false }), 150);
+    searchState.refreshTimer = setTimeout(() => refreshSearch({ keepPosition: true, reveal: false, select: false }), 150);
   });
   editor.on('swapDoc', () => closeSearch({ focusEditor: false }));
 }
@@ -4620,10 +4946,8 @@ function initEntryPicker() {
   });
 }
 
-let compileInFlight = false;
 
 function setCompileBusy(busy) {
-  compileInFlight = busy;
   document.getElementById('compile-split').classList.toggle('busy', busy);
   document.getElementById('compile-clean').disabled = busy;
 }
@@ -4649,8 +4973,45 @@ function initCompileMenu() {
   });
 }
 
-async function compileFile({ silent = false, clean = false } = {}) {
-  if (clean && compileInFlight) return false;
+// Compiles never overlap: two pdflatex runs on the same files corrupt each
+// other's output. A request made while one runs is merged into a single
+// follow-up compile, which saves and compiles the latest source.
+let compileRunning = false;
+let compileQueued = null; // { options, promise, resolve }
+
+function compileFile(options = {}) {
+  if (!compileRunning) return startCompile(options);
+  if (!compileQueued) {
+    let resolve;
+    const promise = new Promise((done) => { resolve = done; });
+    compileQueued = { options: { silent: true, clean: false }, promise, resolve };
+  }
+  compileQueued.options = {
+    silent: compileQueued.options.silent && Boolean(options.silent),
+    clean: compileQueued.options.clean || Boolean(options.clean),
+  };
+  if (!options.silent) showStatus(t('compile.queued'), '');
+  return compileQueued.promise;
+}
+
+async function startCompile(options) {
+  compileRunning = true;
+  let result = false;
+  try {
+    result = await runCompile(options);
+  } finally {
+    compileRunning = false;
+    if (compileQueued) {
+      const next = compileQueued;
+      compileQueued = null;
+      startCompile(next.options).then(next.resolve);
+    }
+  }
+  return result;
+}
+
+// Always saves first, so the compiled PDF matches what is in the editor.
+async function runCompile({ silent = false, clean = false } = {}) {
   setCompileBusy(true);
   if (!await saveFile()) {
     setCompileBusy(false);
@@ -5888,8 +6249,9 @@ function init() {
   });
 
   editor.setOption('extraKeys', {
-    'Ctrl-S': (cm) => { saveFile(); return false; },
-    'Cmd-S': (cm) => { saveFile(); return false; },
+    // Save and compile (compileFile always saves first).
+    'Ctrl-S': () => { compileFile(); },
+    'Cmd-S': () => { compileFile(); },
     'Ctrl-F': () => openSearch(),
     'Cmd-F': () => openSearch(),
     'Ctrl-H': () => openSearch({ replace: true }),
@@ -5899,6 +6261,24 @@ function init() {
     'Esc': () => (searchState.open ? closeSearch() : CodeMirror.Pass),
   });
   initSearchPanel();
+  // Content set from the server (file load, applied or rolled-back revisions)
+  // matches the file on disk, so it starts a clean state.
+  editor.on('changes', (_instance, changes) => {
+    if (changes.some((change) => change.origin === 'setValue')) savedGeneration = editor.changeGeneration(true);
+  });
+  // Ctrl/Cmd+S outside the editor also saves and compiles, instead of the
+  // browser's "Save page" dialog. Inside the editor its keymap handles it.
+  document.addEventListener('keydown', (event) => {
+    if (!(event.ctrlKey || event.metaKey) || event.altKey || event.key.toLowerCase() !== 's') return;
+    event.preventDefault();
+    if (event.target.closest?.('.CodeMirror')) return;
+    if (loadedFile) compileFile();
+  });
+  window.addEventListener('beforeunload', (event) => {
+    if (!isEditorDirty()) return;
+    event.preventDefault();
+    event.returnValue = '';
+  });
   editor.on('change', (_instance, change) => {
     if (change.origin !== 'setValue') schedulePromptContextPreview();
   });
@@ -5956,7 +6336,7 @@ function init() {
   document.getElementById('tool-workspaces').addEventListener('click', openWorkspaceManager);
   document.getElementById('tool-references').addEventListener('click', openReferences);
   document.getElementById('tool-terminal').addEventListener('click', openWorkspaceTerminal);
-  document.getElementById('tool-compile').addEventListener('click', compileFile);
+  document.getElementById('tool-compile').addEventListener('click', () => compileFile());
   document.getElementById('tool-change-history').addEventListener('click', openChangeHistory);
   document.getElementById('history-open').addEventListener('click', openChangeHistory);
   document.getElementById('tool-libraries').addEventListener('click', () => document.getElementById('library-open').click());
@@ -6414,6 +6794,8 @@ function init() {
 
   initEntryPicker();
   initOutlineDepthPicker();
+  initSidebarLayout();
+  initPdfZoom();
   initCompileErrorPanel();
   loadEngineStatus().then(openEntryFile);
   loadVersionInfo();

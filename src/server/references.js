@@ -2,6 +2,7 @@ import { createHash } from 'crypto';
 import { spawn } from 'child_process';
 import { mkdir, readFile, readdir, realpath, rename, stat, writeFile } from 'fs/promises';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'path';
+import { hostPathProblem, toServerPath } from './host-paths.js';
 
 const STATE_VERSION = 1;
 const STATE_DIRECTORY = '.papergod';
@@ -210,8 +211,9 @@ export async function saveReferenceState(workspaceRoot, state) {
   return stored;
 }
 
-async function canonicalFolder(folder) {
-  if (!isAbsolute(folder || '')) throw Object.assign(new Error('Use an absolute literature folder path.'), { status: 400, code: 'INVALID_REFERENCE_FOLDER' });
+async function canonicalFolder(input) {
+  const folder = toServerPath(input || '');
+  if (!isAbsolute(folder)) throw Object.assign(new Error(hostPathProblem(folder) || 'Use an absolute literature folder path.'), { status: 400, code: 'INVALID_REFERENCE_FOLDER' });
   const canonical = await realpath(resolve(folder));
   if (!(await stat(canonical)).isDirectory()) throw Object.assign(new Error('The literature path is not a folder.'), { status: 400, code: 'INVALID_REFERENCE_FOLDER' });
   return canonical;
