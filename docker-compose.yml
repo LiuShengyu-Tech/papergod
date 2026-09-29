@@ -1,0 +1,44 @@
+# Run Papergod with TeX Live in Docker:
+#
+#   docker compose up --build -d
+#   open http://127.0.0.1:3000
+#
+# Your user folder (HOST_DIR, default %USERPROFILE% / $HOME) is mounted once,
+# so any paper inside it can be opened from Tools > Workspaces by typing or
+# browsing its normal path (e.g. C:\Users\me\Documents\paper). The app
+# reopens the last paper you selected on every start.
+#
+# Papergod has no login and includes a shell terminal, so the port is
+# published on the host's loopback interface only. Do not change that to
+# 0.0.0.0 or a LAN address.
+name: papergod
+
+services:
+  papergod:
+    build:
+      context: .
+      args:
+        # Empty uses the Dockerfile's default selection; e.g. texlive-full (~5 GB).
+        TEXLIVE_PACKAGES: ${TEXLIVE_PACKAGES:-}
+    image: papergod:local
+    init: true
+    restart: unless-stopped
+    # Match the owner of your files on Linux (`id -u` / `id -g`) so files
+    # Papergod writes stay editable on the host. Docker Desktop ignores this.
+    user: "${PAPERGOD_UID:-1000}:${PAPERGOD_GID:-1000}"
+    ports:
+      - "127.0.0.1:${PAPERGOD_PORT:-3000}:3000"
+    environment:
+      # The host path of the /host mount, used to translate paths both ways.
+      PAPERGOD_HOST_DIR: ${HOST_DIR:-${USERPROFILE:-${HOME}}}
+      # Optional paper to open on start (a host path); default: the last one used.
+      PAPERGOD_WORKSPACE: ${PAPERGOD_WORKSPACE:-}
+    volumes:
+      # Papergod settings and workspace registry.
+      - papergod-data:/data
+      # The folder tree your papers live in. Papergod can read and write
+      # everything below it; narrow it with HOST_DIR in .env if you prefer.
+      - ${HOST_DIR:-${USERPROFILE:-${HOME}}}:/host
+
+volumes:
+  papergod-data:

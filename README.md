@@ -48,6 +48,30 @@ npm run papergod
 
 The CLI initializes `main.tex` when the workspace contains no TeX files and stores Papergod metadata in `.papergod/project.json`. Agent choices are `mock`, `codex`, `claude-code`, `opencode`, and `pi`. External providers require an installed and authenticated CLI; Papergod invokes them non-interactively with structured output, timeouts, output limits, and analysis-only permissions.
 
+### Run with Docker
+
+The Docker setup bundles Papergod with TeX Live (pdfLaTeX, XeLaTeX, LuaLaTeX, BibTeX, Biber, latexmk), so no local Node.js or LaTeX installation is needed.
+
+```bash
+docker compose up --build -d
+```
+
+Then open http://127.0.0.1:3000. No configuration is needed; `.env.example` lists the optional settings.
+
+Start the image with `docker compose`, not Docker Desktop's **Run** button or a bare `docker run -p 3000:3000`. Those mount none of your folders, and they publish the port on every network interface.
+
+- **Papers**: your user folder (`%USERPROFILE%` on Windows, `$HOME` elsewhere) is mounted once. Open any paper inside it from **Tools → Workspaces** by typing, pasting or browsing its normal path, e.g. `C:\Users\me\Documents\paper`. Papergod translates host paths to container paths and back, so you always see your own paths.
+  - To limit what the container can access, set `HOST_DIR` in `.env` to a narrower folder.
+  - The app reopens the last selected paper on every start. `PAPERGOD_WORKSPACE` in `.env` forces a specific one.
+- **Settings**: the workspace registry lives in the `papergod-data` volume. Per-paper data stays in each paper's `.papergod/` folder.
+- **TeX packages**: the default image installs a common TeX Live selection. For full coverage (about 5 GB), set `TEXLIVE_PACKAGES=texlive-full` in `.env` and rebuild.
+- **Linux file ownership**: set `PAPERGOD_UID`/`PAPERGOD_GID` to your `id -u`/`id -g`.
+- **Security**: Papergod has no login and includes a shell terminal. The compose file publishes the port on `127.0.0.1` only; keep it that way. Outside Docker, the server still binds to `127.0.0.1` by default (`--host` / `PAPERGOD_HOST` change this).
+- **Limitations**:
+  - External Agent CLIs (Codex, Claude Code, OpenCode, Pi) are not installed in the image, so the Agent defaults to `mock`.
+  - Zotero Desktop's local API only accepts connections from its own machine, so Zotero import is unavailable from the container. Local `.bib`/PDF reference folders inside `HOST_DIR` still work.
+  - The OS folder picker falls back to the in-browser folder navigator.
+
 ### Multiple paper workspaces
 
 Open **Tools → Workspaces** to register an existing local folder and switch papers without restarting the server. A folder may be a normal directory or a repository created with `git clone`; Papergod does not take over Git credentials or change the repository workflow, so commit and push with Git as usual. The browser reloads after a successful switch to discard stale PDF and editor state.

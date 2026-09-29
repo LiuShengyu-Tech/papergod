@@ -2,6 +2,7 @@ import { createHash } from 'crypto';
 import { homedir } from 'os';
 import { basename, dirname, isAbsolute, join, resolve } from 'path';
 import { mkdir, readFile, realpath, rename, stat, writeFile } from 'fs/promises';
+import { hostPathProblem, toServerPath } from './host-paths.js';
 
 export const DEFAULT_WORKSPACE_REGISTRY_FILE = join(homedir(), '.papergod', 'workspaces.json');
 
@@ -9,12 +10,14 @@ function workspaceId(path) {
   return `workspace_${createHash('sha256').update(path).digest('hex').slice(0, 16)}`;
 }
 
-async function canonicalDirectory(path) {
-  if (typeof path !== 'string' || !path.trim() || path.includes('\0')) {
+async function canonicalDirectory(input) {
+  if (typeof input !== 'string' || !input.trim() || input.includes('\0')) {
     throw Object.assign(new Error('Workspace path is required.'), { status: 400, code: 'INVALID_WORKSPACE_PATH' });
   }
-  if (!isAbsolute(path.trim())) {
-    throw Object.assign(new Error('Use an absolute folder path.'), { status: 400, code: 'INVALID_WORKSPACE_PATH' });
+  // In a container, host paths under the mounted HOST_DIR become /host/... paths.
+  const path = toServerPath(input.trim());
+  if (!isAbsolute(path)) {
+    throw Object.assign(new Error(hostPathProblem(path) || 'Use an absolute folder path.'), { status: 400, code: 'INVALID_WORKSPACE_PATH' });
   }
   const target = resolve(path.trim());
   let info;
@@ -85,7 +88,7 @@ export function createWorkspaceRegistry({ file = DEFAULT_WORKSPACE_REGISTRY_FILE
   async function activate(idOrPath) {
     const registry = await readRegistry(file);
     let entry = registry.workspaces.find((item) => item.id === idOrPath);
-    if (!entry && typeof idOrPath === 'string' && isAbsolute(idOrPath)) {
+    if (!entry && typeof idOrPath === 'string' && isAbsolute(toServerPath(idOrPath))) {
       const canonical = await canonicalDirectory(idOrPath);
       entry = registry.workspaces.find((item) => item.path === canonical);
     }

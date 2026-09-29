@@ -1,6 +1,7 @@
 import { homedir } from 'os';
 import { isAbsolute, relative, resolve, sep } from 'path';
 import { readdir, realpath, stat } from 'fs/promises';
+import { hostMountInfo, toServerPath } from './host-paths.js';
 
 function isWithin(root, candidate) {
   if (root === candidate) return true;
@@ -17,9 +18,15 @@ async function isGitRepository(path) {
   catch { return false; }
 }
 
-export async function browseWorkspaceDirectories(requestedPath = '', { root = homedir() } = {}) {
+// In a container the browser is rooted at the mounted host folder (/host)
+// rather than the container's home, so users can reach their own files.
+function defaultBrowseRoot() {
+  return hostMountInfo()?.mount || homedir();
+}
+
+export async function browseWorkspaceDirectories(requestedPath = '', { root = defaultBrowseRoot() } = {}) {
   const browseRoot = await canonical(resolve(root));
-  const requested = typeof requestedPath === 'string' ? requestedPath.trim() : '';
+  const requested = typeof requestedPath === 'string' ? toServerPath(requestedPath.trim()) : '';
   const lexical = requested ? resolve(browseRoot, requested) : browseRoot;
   const candidate = await canonical(lexical);
   if (!isWithin(browseRoot, candidate)) {

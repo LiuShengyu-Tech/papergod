@@ -35,6 +35,13 @@ import {
   updateRevisionResponseLetter, verifyAppliedRevision,
 } from './revise-workflow.js';
 import { initializeWorkspace, listTexFiles, resolveEntryFile, saveEntryFile } from './workspace.js';
+import { toHostPath } from './host-paths.js';
+
+// Registry entries hold server paths; show host paths (e.g. C:\Users\...) in
+// the UI when running in a container. A no-op outside containers.
+function displayWorkspace(entry) {
+  return entry ? { ...entry, path: toHostPath(entry.path) } : entry;
+}
 import { createWorkspaceRegistry } from './workspace-registry.js';
 import { browseWorkspaceDirectories } from './workspace-browser.js';
 import { createWorkspaceTerminalManager } from './workspace-terminal.js';
@@ -331,7 +338,7 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
     try {
       await workspaceRegistry.add(workspaceRoot, { activate: true });
       await hydrateAgentCommands(null, { loadProvider: true });
-      res.json({ provider, workspace: workspaceRoot });
+      res.json({ provider, workspace: toHostPath(workspaceRoot) });
     } catch (error) {
       res.status(error.status || 500).json({ error: publicErrorMessage(error), code: error.code });
     }
@@ -341,12 +348,24 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
     await resourceResponse(res, async () => {
       await workspaceRegistry.add(workspaceRoot, { activate: true });
       const workspaces = await workspaceRegistry.list(workspaceRoot);
-      return { activePath: workspaceRoot, workspaces: workspaces.filter((item) => item.available || item.active) };
+      return {
+        activePath: toHostPath(workspaceRoot),
+        workspaces: workspaces.filter((item) => item.available || item.active).map(displayWorkspace),
+      };
     });
   });
 
   app.get('/api/workspaces/browse', async (req, res) => {
-    await resourceResponse(res, async () => await browseWorkspaceDirectories(req.query.path || ''));
+    await resourceResponse(res, async () => {
+      const listing = await browseWorkspaceDirectories(req.query.path || '');
+      return {
+        ...listing,
+        rootPath: toHostPath(listing.rootPath),
+        currentPath: toHostPath(listing.currentPath),
+        parentPath: listing.parentPath && toHostPath(listing.parentPath),
+        entries: listing.entries.map((entry) => ({ ...entry, path: toHostPath(entry.path) })),
+      };
+    });
   });
 
   app.post('/api/workspaces', async (req, res) => {
@@ -354,14 +373,14 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
       await workspaceRegistry.add(workspaceRoot, { activate: true });
       const registered = await workspaceRegistry.add(req.body?.path);
       const { entry, initialization } = await switchWorkspace(registered.id);
-      return { workspace: entry, createdSample: initialization.createdSample };
+      return { workspace: displayWorkspace(entry), createdSample: initialization.createdSample };
     }, 201);
   });
 
   app.post('/api/workspaces/:id/activate', async (req, res) => {
     await resourceResponse(res, async () => {
       const { entry, initialization } = await switchWorkspace(req.params.id);
-      return { workspace: entry, createdSample: initialization.createdSample };
+      return { workspace: displayWorkspace(entry), createdSample: initialization.createdSample };
     });
   });
 
@@ -1424,10 +1443,12 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
   return app;
 }
 
-export async function startServer({ workspaceRoot = DEFAULT_WORKSPACE, port = 3000, provider = 'mock', workspaceRegistryFile } = {}) {
+export async function startServer({ workspaceRoot = DEFAULT_WORKSPACE, port = 3000, host = '127.0.0.1', provider = 'mock', workspaceRegistryFile } = {}) {
   const app = createApp(workspaceRoot, { provider, workspaceRegistryFile });
   return await new Promise((resolveServer, reject) => {
-    const server = app.listen(port, '127.0.0.1', () => resolveServer(server));
+    // Loopback by default: there is no login, so anything that can reach the
+    // port can edit files and run the terminal.
+    const server = app.listen(port, host, () => resolveServer(server));
     server.once('close', () => app.locals.cleanup?.());
     server.once('error', reject);
   });
@@ -1437,9 +1458,9 @@ const isMainModule = process.argv[1] && resolve(process.argv[1]) === fileURLToPa
 
 if (isMainModule) {
   const port = parseInt(process.env.PORT || '3000', 10);
-  const host = '127.0.0.1';
+  const host = process.env.PAPERGOD_HOST || '127.0.0.1';
   const workspace = process.env.WORKSPACE || DEFAULT_WORKSPACE;
-  const server = await startServer({ workspaceRoot: workspace, port });
+  const server = await startServer({ workspaceRoot: workspace, port, host });
   console.log(`Papergod running at http://${host}:${server.address().port}`);
 
   function shutdown() {
