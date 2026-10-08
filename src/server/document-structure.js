@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'crypto';
-import { readFile } from 'fs/promises';
+import { readFile, realpath } from 'fs/promises';
+import { dirname, relative, resolve, sep } from 'path';
 import { sanitizePath } from './security.js';
 import { loadProject, updateProject } from './project-store.js';
 import { findStructureNode, parseLatexDocument } from './latex-structure.js';
@@ -105,6 +106,43 @@ export async function syncDocumentStructure(workspaceRoot, file) {
     return structuredClone(document);
   });
   return result;
+}
+
+// Keep every node's offsets local to its source file; never flatten editable sources.
+export async function syncPaperOutline(workspaceRoot, entryFile) {
+  const root = await realpath(workspaceRoot);
+  const visited = new Set();
+  const sections = [];
+  let entryDocument;
+  async function visit(file) {
+    const path = resolveTexFile(workspaceRoot, file);
+    let canonical;
+    try { canonical = await realpath(path); } catch (cause) {
+      if (cause.code === 'ENOENT') return;
+      throw cause;
+    }
+    if (!canonical.startsWith(root + sep) || visited.has(canonical)) return;
+    visited.add(canonical);
+    const document = await syncDocumentStructure(workspaceRoot, file);
+    if (!entryDocument) entryDocument = document;
+    const source = await readFile(path, 'utf8');
+    const events = document.sections.map(section => ({ offset: section.sourceRange.start, section }));
+    // Remove comments without changing source offsets.
+    const uncommented = source.replace(/(?<!\\)%[^\r\n]*/g, match => ' '.repeat(match.length));
+    for (const match of uncommented.matchAll(/\\(?:input|include)\s*\{([^{}]+)\}/g)) events.push({ offset: match.index, include: match[1].trim() });
+    events.sort((a, b) => a.offset - b.offset);
+    for (const event of events) {
+      if (event.section) sections.push({ ...event.section, file });
+      else {
+        const name = /\.tex$/i.test(event.include) ? event.include : `${event.include}.tex`;
+        // TeX resolves input paths from the entry file's directory.
+        const included = relative(workspaceRoot, resolve(workspaceRoot, dirname(entryFile), name)).split(sep).join('/');
+        if (sanitizePath(included, workspaceRoot)) await visit(included);
+      }
+    }
+  }
+  await visit(entryFile);
+  return { file: entryFile, title: entryDocument?.title || entryFile, sections };
 }
 
 export async function getDocumentStructure(workspaceRoot, documentId) {

@@ -125,7 +125,7 @@ function discoverKnownWindowsPath(provider) {
   return found;
 }
 
-function commandSpec(provider, overrides = {}) {
+export function commandSpec(provider, overrides = {}) {
   const override = overrides[provider];
   const defaultCommand = provider === 'claude-code' ? 'claude' : provider;
   if (!override) {
@@ -349,7 +349,7 @@ function protocolObjects(output) {
   return objects;
 }
 
-export function classifyAgentCliFailure({ provider = '', stdout = '', stderr = '', output = '', exitCode, signal } = {}) {
+export function classifyAgentCliFailure({ provider = '', stdout = '', stderr = '', output = '', exitCode, signal, protocolOnly = false } = {}) {
   const combined = [stdout, stderr, output].filter(Boolean).join('\n');
   for (const event of protocolObjects(combined)) {
     const response = event.response && typeof event.response === 'object' ? event.response : event;
@@ -370,7 +370,7 @@ export function classifyAgentCliFailure({ provider = '', stdout = '', stderr = '
       return error;
     }
   }
-  return classifyAgentDiagnostic(combined, { provider });
+  return protocolOnly ? null : classifyAgentDiagnostic(combined, { provider });
 }
 
 async function runProviderProcess(provider, command, args, options) {
@@ -721,13 +721,15 @@ function validateProviderLifecycle(provider, output) {
 }
 
 function parseProviderOutput(provider, parser, output, stderr = '') {
-  const failure = classifyAgentCliFailure({ provider, output, stderr });
+  // Successful CLIs may log unrelated MCP/plugin startup failures. Only an
+  // explicit protocol failure can override a valid structured response.
+  const failure = classifyAgentCliFailure({ provider, output, stderr, protocolOnly: true });
   if (failure) throw failure;
   validateProviderLifecycle(provider, output);
   try {
     return parser(output);
   } catch (error) {
-    const normalized = normalizeAgentError(error, { provider });
+    const normalized = classifyAgentCliFailure({ provider, output, stderr }) || normalizeAgentError(error, { provider });
     normalized.diagnostic = redactAgentDiagnostic([stderr, output].filter(Boolean).join('\n'));
     throw normalized;
   }
@@ -805,7 +807,7 @@ async function runCodex(request, options) {
     const outputFile = join(temporary, 'last-message.json');
     await writeFile(schemaFile, JSON.stringify(SUGGESTION_OUTPUT_SCHEMA), 'utf-8');
     const spec = commandSpec('codex', options.commands);
-    const effectiveEffort = options.liveTest ? 'low' : options.reasoningEffort || spec.reasoningEffort;
+    const effectiveEffort = options.reasoningEffort || spec.reasoningEffort;
     const args = [...spec.prefixArgs, 'exec', ...modelArgs(spec), ...reasoningArgs('codex', effectiveEffort), '--sandbox', 'read-only', '--skip-git-repo-check', '--ephemeral', '--color', 'never', '--output-schema', schemaFile, '--output-last-message', outputFile, '-'];
     const result = await runProviderProcess('codex', spec.command, args, { cwd: options.workspaceRoot, input: buildSuggestionPayload('codex', request, options), timeoutMs: options.timeoutMs, signal: options.signal, onOutput: options.onOutput });
     return await readCodexOutput(outputFile, result, parseAgentJson, request.manifest);
@@ -1162,7 +1164,7 @@ export async function runWritingAgent(provider, request, options = {}) {
   if (typeof request?.prompt !== 'string' || typeof request?.content !== 'string') throw new Error('prompt and content must be strings');
   if (request.content.length + request.prompt.length > MAX_INPUT_CHARS) throw new Error('Agent input exceeds 500,000 characters');
   const configuredEffort = commandSpec(provider, options.commands || {}).reasoningEffort;
-  const reasoningEffort = options.reasoningEffort || operationEffort('suggest', configuredEffort);
+  const reasoningEffort = options.reasoningEffort || (provider === 'codex' ? configuredEffort : operationEffort('suggest', configuredEffort));
   const runtime = { ...options, commands: options.commands || {}, timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS, reasoningEffort, readFromWorkspace: Boolean(request.workspace && options.workspaceRoot) };
   const response = await runWithRetry(provider, 'suggest', () => provider === 'codex' ? runCodex(request, runtime)
     : provider === 'claude-code' ? runClaude(request, runtime)
@@ -1186,7 +1188,7 @@ export async function runAcademicReviewAgent(provider, request, options = {}) {
   const promptSize = JSON.stringify({ reviewer: request.reviewer, rubric: request.rubric }).length;
   if (request.content.length + promptSize > MAX_INPUT_CHARS) throw new Error('Agent input exceeds 500,000 characters');
   const configuredEffort = commandSpec(provider, options.commands || {}).reasoningEffort;
-  const reasoningEffort = options.reasoningEffort || operationEffort('review', configuredEffort);
+  const reasoningEffort = options.reasoningEffort || (provider === 'codex' ? configuredEffort : operationEffort('review', configuredEffort));
   const runtime = { ...options, commands: options.commands || {}, timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS, reasoningEffort, readFromWorkspace: Boolean(request.workspace && options.workspaceRoot) };
   const response = await runWithRetry(provider, 'review', () => provider === 'codex' ? runCodexReview(request, runtime)
     : provider === 'claude-code' ? runClaudeReview(request, runtime)
@@ -1208,7 +1210,7 @@ export async function runPaperGenerationAgent(provider, request, options = {}) {
   const inputSize = request.instruction.length + String(request.projectContext || '').length + String(request.outlineContext || '').length + String(request.resourceContext || '').length;
   if (inputSize > MAX_INPUT_CHARS) throw new Error('Agent input exceeds 500,000 characters');
   const configuredEffort = commandSpec(provider, options.commands || {}).reasoningEffort;
-  const reasoningEffort = options.reasoningEffort || operationEffort('generation', configuredEffort);
+  const reasoningEffort = options.reasoningEffort || (provider === 'codex' ? configuredEffort : operationEffort('generation', configuredEffort));
   const runtime = { ...options, commands: options.commands || {}, timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS, reasoningEffort };
   const response = await runWithRetry(provider, 'generation', () => provider === 'codex' ? runCodexPaperGeneration(request, runtime)
     : provider === 'claude-code' ? runClaudePaperGeneration(request, runtime)
@@ -1226,7 +1228,7 @@ export async function runReviewOrchestrationAgent(provider, request, options = {
   if (typeof request?.feedback !== 'string' || typeof request?.content !== 'string') throw new Error('feedback and content must be strings');
   if (request.feedback.length + request.content.length + String(request.outlineContext || '').length > MAX_INPUT_CHARS) throw new Error('Agent input exceeds 500,000 characters');
   const configuredEffort = commandSpec(provider, options.commands || {}).reasoningEffort;
-  const reasoningEffort = options.reasoningEffort || operationEffort('orchestration', configuredEffort);
+  const reasoningEffort = options.reasoningEffort || (provider === 'codex' ? configuredEffort : operationEffort('orchestration', configuredEffort));
   const runtime = { ...options, commands: options.commands || {}, timeoutMs: options.timeoutMs || DEFAULT_TIMEOUT_MS, reasoningEffort, readFromWorkspace: Boolean(request.workspace && options.workspaceRoot) };
   const response = await runWithRetry(provider, 'orchestration', () => provider === 'codex' ? runCodexReviewOrchestration(request, runtime)
     : provider === 'claude-code' ? runClaudeReviewOrchestration(request, runtime)

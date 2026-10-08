@@ -24,19 +24,20 @@ export function createWorkspaceTerminalManager({ env = process.env, platform = p
     for (const response of session.listeners) response.write(body);
   }
 
-  function start(workspace) {
-    const existingId = workspaceSessions.get(workspace);
+  function start(workspace, customLaunch = null) {
+    const sessionKey = customLaunch ? `${workspace}\0${customLaunch.key}` : workspace;
+    const existingId = workspaceSessions.get(sessionKey);
     const existing = existingId && sessions.get(existingId);
     if (existing?.status === 'running') return publicSession(existing);
     if (existing) sessions.delete(existing.id);
-    const launch = shellLaunch(env, platform);
+    const launch = customLaunch || shellLaunch(env, platform);
     const pty = spawnPty(launch.command, launch.args, {
       name: 'xterm-256color', cols: 100, rows: 30, cwd: workspace,
       env: { ...env, TERM: 'xterm-256color', COLORTERM: 'truecolor', TERM_PROGRAM: 'papergod' },
     });
-    const session = { id: `terminal_${randomUUID()}`, workspace, pty, status: 'running', exitCode: null, startedAt: new Date().toISOString(), history: '', listeners: new Set() };
+    const session = { id: `terminal_${randomUUID()}`, workspace, sessionKey, pty, status: 'running', exitCode: null, startedAt: new Date().toISOString(), history: '', listeners: new Set() };
     sessions.set(session.id, session);
-    workspaceSessions.set(workspace, session.id);
+    workspaceSessions.set(sessionKey, session.id);
     pty.onData((data) => {
       session.history = `${session.history}${data}`.slice(-MAX_HISTORY);
       broadcast(session, 'output', { data });
@@ -84,7 +85,7 @@ export function createWorkspaceTerminalManager({ env = process.env, platform = p
     const session = requireSession(id);
     if (session.status === 'running') session.pty.kill();
     sessions.delete(id);
-    if (workspaceSessions.get(session.workspace) === id) workspaceSessions.delete(session.workspace);
+    if (workspaceSessions.get(session.sessionKey) === id) workspaceSessions.delete(session.sessionKey);
     for (const response of session.listeners) response.end();
     session.listeners.clear();
   }

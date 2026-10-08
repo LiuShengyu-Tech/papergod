@@ -1,23 +1,37 @@
 import { execFile } from 'child_process';
-import { readFile, rm } from 'fs/promises';
-import { resolve as pathResolve, dirname, basename } from 'path';
+import { readFile, rm, access, readdir } from 'fs/promises';
+import { resolve as pathResolve, dirname, basename, join } from 'path';
 
 const ENGINE_ORDER = ['tectonic', 'pdflatex', 'xelatex', 'lualatex'];
 const COMPILE_TIMEOUT_MS = 30000;
 const FIND_COMMAND = process.platform === 'win32' ? 'where' : 'which';
 
+export async function resolveLatexTool(command) {
+  try {
+    const output = await new Promise((res, rej) => execFile(FIND_COMMAND, [command], { timeout: 5000, shell: false, windowsHide: true }, (err, stdout) => err ? rej(err) : res(stdout)));
+    return output.trim().split(/\r?\n/)[0];
+  } catch {}
+  if (process.platform !== 'win32') return null;
+  const directories = [];
+  for (const base of [process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, 'Programs'), process.env.ProgramFiles, process.env['ProgramFiles(x86)']].filter(Boolean)) {
+    directories.push(join(base, 'MiKTeX', 'miktex', 'bin', 'x64'), join(base, 'MiKTeX', 'miktex', 'bin'));
+  }
+  for (const base of [process.env.APPDATA, process.env.LOCALAPPDATA].filter(Boolean)) directories.push(join(base, 'TinyTeX', 'bin', 'windows'));
+  const texlive = `${process.env.SystemDrive || 'C:'}/texlive`;
+  try {
+    for (const entry of (await readdir(texlive)).sort().reverse()) directories.push(join(texlive, entry, 'bin', 'windows'));
+  } catch {}
+  for (const directory of directories) {
+    const executable = join(directory, `${command}.exe`);
+    try { await access(executable); return executable; } catch {}
+  }
+  return null;
+}
+
 export async function detectEngines() {
   const available = [];
   for (const engine of ENGINE_ORDER) {
-    try {
-      await new Promise((res, rej) => {
-        execFile(FIND_COMMAND, [engine], { timeout: 5000, shell: false }, (err) => {
-          if (err) rej(err);
-          else res();
-        });
-      });
-      available.push(engine);
-    } catch {}
+    if (await resolveLatexTool(engine)) available.push(engine);
   }
   return available;
 }
@@ -35,12 +49,14 @@ function toolEnv() {
   return { ...process.env, openin_any: 'p', openout_any: 'p', shell_escape: 'f' };
 }
 
-function runTool(command, args, cwd) {
+async function runTool(command, args, cwd) {
+  const executable = await resolveLatexTool(command) || command;
   return new Promise((done) => {
-    execFile(command, args, {
+    execFile(executable, args, {
       cwd,
       timeout: COMPILE_TIMEOUT_MS,
       shell: false,
+      windowsHide: true,
       env: toolEnv(),
       maxBuffer: 10 * 1024 * 1024,
       killSignal: 'SIGKILL',

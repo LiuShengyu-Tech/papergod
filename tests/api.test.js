@@ -14,8 +14,9 @@ import { classifyAgentDiagnostic, redactAgentDiagnostic } from '../src/server/ag
 import { agentHealthStatus, inspectCliCapabilities, markAgentUnavailable, resetAgentHealthForTests, versionAtLeast } from '../src/server/agent-runtime.js';
 import { alignSuggestionsToManifest, loadPromptManifest, materializePromptManifest } from '../src/server/prompt-manifest.js';
 import { parseLatexDocument } from '../src/server/latex-structure.js';
-import { syncDocumentStructure } from '../src/server/document-structure.js';
+import { syncDocumentStructure, syncPaperOutline } from '../src/server/document-structure.js';
 import { buildOrderedSentenceMappings, sentenceMappingAt } from '../public/pdf-sentence-mapping.js';
+import { maskLatexNonTextArguments, readableSentenceTokens } from '../public/latex-readable.js';
 import { buildLibraryContext, composeMockParagraph, extractLibraryCandidates, mergedVocabulary, renderSentencePattern, searchLibraries } from '../src/server/library-engine.js';
 import { applySuggestionsAsRevision, restoreRevisionVersion, splitAtomicOpinions } from '../src/server/revision-engine.js';
 import { getHistoricalRevisionSource, getRecentChangeHistory } from '../src/server/change-history.js';
@@ -31,6 +32,70 @@ const PROJECT_ROOT = resolve(__dirname, '..');
 const SAMPLE_TEX = resolve(PROJECT_ROOT, 'example', 'main.tex');
 
 let server, baseUrl, tmpWorkspace;
+
+test('Native Codex terminal launches the configured executable and restores CLI defaults', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'papergod-native-cli-'));
+  let localServer;
+  try {
+    await initializeWorkspace(root);
+    await updateProject(root, project => {
+      project.project.agentProfiles ||= {};
+      project.project.agentProfiles.codex = { command: process.execPath, args: ['custom-cli.js'], model: 'old-model', reasoningEffort: 'high' };
+    });
+    let launch;
+    const app = createApp(root, { terminalManager: { start: (workspace, spec) => { launch = { workspace, spec }; return { id: 'native-session' }; }, closeAll() {} } });
+    localServer = app.listen(0, '127.0.0.1');
+    await new Promise(resolve => localServer.once('listening', resolve));
+    const response = await fetch(`http://127.0.0.1:${localServer.address().port}/api/agents/codex/terminal`, { method: 'POST' });
+    assert.equal(response.status, 201);
+    assert.equal(launch.workspace, root);
+    assert.equal(launch.spec.command, process.execPath);
+    assert.deepEqual(launch.spec.args, ['custom-cli.js']);
+    const profile = (await loadProject(root)).project.agentProfiles.codex;
+    assert.equal(profile.model, '');
+    assert.equal(profile.reasoningEffort, '');
+  } finally {
+    if (localServer) await new Promise(resolve => localServer.close(resolve));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('Sentence reader hides color parameters while preserving visible words and source offsets', () => {
+  for (const raw of [
+    '{\\color{cyan}However, existing approaches emphasize optimization.}',
+    '\\textcolor{cyan}{However, \\textbf{existing approaches} emphasize optimization.}',
+    '\\textcolor[rgb]{0,1,1}{However, existing approaches emphasize optimization.}',
+    '\\fcolorbox{black}{cyan}{However, existing approaches emphasize optimization.}',
+  ]) {
+    const readable = readableSentenceTokens(raw);
+    assert.equal(readable.text, 'However, existing approaches emphasize optimization.');
+    assert.equal(maskLatexNonTextArguments(raw).length, raw.length);
+    for (const token of readable.tokens) assert.equal(raw.slice(token.rawStart, token.rawEnd), token.text);
+  }
+  assert.equal(readableSentenceTokens('The cyan region remains visible.').text, 'The cyan region remains visible.');
+  const parsed = parseLatexDocument('\\section{Intro}\n\\textcolor{cyan}{However, existing approaches emphasize optimization.}');
+  assert.ok(!parsed.sections[0].children[0].summary.includes('cyan'));
+});
+
+test('paper outline follows included files with local source ranges and optional titles', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'papergod-outline-'));
+  try {
+    await mkdir(join(root, 'sections'));
+    await writeFile(join(root, 'paper.tex'), '\\documentclass{cas-sc}\n\\begin{document}\n\\title[mode=title]{Actual paper}\n\\begin{abstract}Summary\\end{abstract}\n% \\input{ignored}\n\\input{sections/intro}\n\\section{Conclusion}\nDone.\n\\end{document}');
+    const chapter = '\\section[Short]{Introduction}\nFirst paragraph.\n\\input{paper}';
+    await writeFile(join(root, 'sections/intro.tex'), chapter);
+    const outline = await syncPaperOutline(root, 'paper.tex');
+    assert.equal(outline.title, 'Actual paper');
+    assert.deepEqual(outline.sections.map(item => item.title), ['Abstract', 'Introduction', 'Conclusion']);
+    const intro = outline.sections[1];
+    assert.equal(intro.file, 'sections/intro.tex');
+    assert.equal(chapter.slice(intro.sourceRange.start, intro.sourceRange.contentStart), '\\section[Short]{Introduction}');
+    const again = await syncPaperOutline(root, 'paper.tex');
+    assert.equal(again.sections[1].id, intro.id);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 async function api(path, opts = {}) {
   const url = baseUrl + path;
@@ -464,6 +529,23 @@ test('LaTeX structure parser maps sections, paragraphs, sentences, and exact ran
       }
     }
   }
+});
+
+test('Paragraph boundaries support CRLF, mixed newlines and explicit par without shifting ranges', () => {
+  const source = '\\section{Introduction}\r\nFirst paragraph. Another sentence.\r\n \t\r\nSecond paragraph.\n\nThird paragraph.\\par Fourth paragraph.\r\n\r\n\\begin{figure}\r\n\\caption{Not body prose.}\r\n\\end{figure}\r\n\r\nFinal paragraph.';
+  const paragraphs = parseLatexDocument(source).sections[0].children;
+  assert.deepEqual(paragraphs.map(item => item.text), [
+    'First paragraph. Another sentence.', 'Second paragraph.', 'Third paragraph.', 'Fourth paragraph.', 'Final paragraph.',
+  ]);
+  for (const paragraph of paragraphs) {
+    assert.equal(source.slice(paragraph.sourceRange.start, paragraph.sourceRange.end), paragraph.text);
+    for (const sentence of paragraph.children) assert.equal(source.slice(sentence.sourceRange.start, sentence.sourceRange.end), sentence.text);
+  }
+});
+
+test('Commented par commands do not create paragraph boundaries', () => {
+  const source = '\\section{Intro}\r\nFirst line % \\par ignored\r\ncontinues here.\r\n\r\nSecond paragraph.';
+  assert.equal(parseLatexDocument(source).sections[0].children.length, 2);
 });
 
 test('LaTeX structure parser preserves stable IDs and metadata after local edits', () => {
@@ -1381,6 +1463,18 @@ else process.stdout.write(JSON.stringify({ type: 'text', part: { text: response 
   assert.ok(providers.every((provider) => provider.available));
 });
 
+test('Codex accepts a valid result despite unrelated MCP transport warnings', async () => {
+  const fakeCli = join(tmpWorkspace, 'fake-mcp-warning-codex.mjs');
+  const response = { summary: 'Clarify network timeout behavior.', usedResourceIds: [], unresolvedTasks: [], suggestions: [{ category: 'style', description: 'Improve clarity.', originalText: 'very important', suggestedText: 'important', reason: 'Remove the intensifier.' }] };
+  await writeFile(fakeCli, `import {writeFileSync} from 'fs';
+const index = process.argv.indexOf('--output-last-message');
+process.stderr.write('WARN MCP startup timeout: transport connection failed localhost:5100/sse');
+writeFileSync(process.argv[index + 1], ${JSON.stringify(JSON.stringify(response))});`, 'utf8');
+  const result = await runWritingAgent('codex', { prompt: 'Edit.', content: 'This is very important.' }, { workspaceRoot: tmpWorkspace, commands: { codex: { command: process.execPath, args: [fakeCli] } } });
+  assert.equal(result.summary, response.summary);
+  assert.equal(result.suggestions[0].suggestedText, 'important');
+});
+
 test('Codex adapter surfaces content-filtered structured output without applying partial JSON', async () => {
   const fakeCli = join(tmpWorkspace, 'fake-filtered-codex.mjs');
   await writeFile(fakeCli, `
@@ -1807,7 +1901,7 @@ import { writeFileSync } from 'fs';
 const args = process.argv.slice(2);
 if (args.includes('--version')) { process.stdout.write('fake-codex 1.0\\n'); process.exit(0); }
 if (args.includes('login') && args.includes('status')) { process.stdout.write('Logged in\\n'); process.exit(0); }
-if (!args.includes('model_reasoning_effort="low"')) { process.stderr.write('Live test did not use low reasoning effort'); process.exit(2); }
+if (args.some(arg => arg.startsWith('model_reasoning_effort='))) { process.stderr.write('Live test must inherit CLI reasoning defaults'); process.exit(2); }
 const outputIndex = args.indexOf('--output-last-message');
 writeFileSync(args[outputIndex + 1], JSON.stringify({ summary: 'Live structured response.', usedResourceIds: [], suggestions: [{ category: 'style', description: 'Remove an intensifier', originalText: 'very important', suggestedText: 'important', reason: 'Academic precision' }] }));
 `, 'utf-8');

@@ -101,6 +101,7 @@
         <div><h2 id="sentence-reader-title" data-i18n="reader.title">Sentence reader</h2><p id="sentence-reader-position">Sentence 1 of 1</p></div>
         <button id="sentence-reader-close" type="button" aria-label="Close sentence reader" data-i18n-aria-label="reader.close">×</button>
       </header>
+      <div class="sentence-reader-layout">
       <div class="sentence-reader-body">
         <p class="sentence-reader-help" data-i18n="reader.help">Focus on one sentence at a time. Select a word to comment on that word; leave all words unselected to comment on the whole sentence.</p>
         <article id="sentence-reader-text" tabindex="0" aria-live="polite"></article>
@@ -113,6 +114,13 @@
           <button id="sentence-reader-submit" class="primary" type="button" data-i18n="reader.queue">Add to revision queue</button>
         </div>
       </div>
+      <aside class="sentence-reader-overview" aria-labelledby="sentence-reader-chart-title">
+        <h3 id="sentence-reader-chart-title" data-i18n="reader.paragraph">Current paragraph</h3>
+        <p id="sentence-reader-paragraph-count" aria-live="polite"></p>
+        <p class="sentence-reader-chart-unit" data-i18n="reader.wordCount">Length in words</p>
+        <ol id="sentence-reader-bars"></ol>
+      </aside>
+      </div>
     </section>
   </div>
 
@@ -124,7 +132,11 @@
         <form id="agent-config-form">
           <label for="agent-config-provider" data-i18n="agentConfig.provider">Provider</label>
           <select id="agent-config-provider"></select>
-          <p id="agent-config-note" aria-live="polite"></p>
+          <button id="agent-config-native" type="button">Open Codex CLI / 打开 Codex CLI</button>
+          <p id="agent-config-native-help">Configure the model and reasoning in the CLI. Saved CLI defaults will be used for subsequent requests. / 在 CLI 中配置模型与强度，后续请求使用 CLI 保存的默认配置。</p>
+          <div id="agent-connection-flow" aria-live="polite"></div>
+          <button id="agent-config-refresh" type="button">Check installation / login again</button>
+          <details class="agent-connection-details"><summary>Connection details / 连接详情</summary><p id="agent-config-note" aria-live="polite"></p></details>
           <div class="agent-config-actions">
             <button id="agent-config-login" type="button" class="hidden">Sign in</button>
             <button id="agent-config-probe" type="button" data-i18n="agentConfig.check">Test subscription</button>

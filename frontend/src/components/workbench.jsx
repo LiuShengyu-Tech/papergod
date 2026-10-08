@@ -132,6 +132,18 @@ function EditorWorkspace() {
       </div>
       <EditorSettingsPopover />
       <EditorSchemePopover />
+      <footer id="engine-status-bar" data-state="checking" aria-label="LaTeX compiler">
+        <span id="engine-status-text" role="status" aria-live="polite" data-i18n="engine.checking">Checking LaTeX compiler…</span>
+        <button id="engine-recheck" type="button" data-i18n="engine.recheck">Check again</button>
+        <details id="engine-setup">
+          <summary data-i18n="engine.setup">Compiler setup</summary>
+          <div className="engine-setup-content">
+            <p data-i18n="engine.help">Install MiKTeX, TeX Live, or Tectonic and add its executable folder to PATH. Then restart your terminal and Papergod, refresh this page, and check again. Writing and saving remain available without a compiler.</p>
+            <a href="https://miktex.org/download" target="_blank" rel="noreferrer">MiKTeX ↗</a>{' · '}
+            <a href="https://tectonic-typesetting.github.io/book/latest/installation/" target="_blank" rel="noreferrer">Tectonic ↗</a>
+          </div>
+        </details>
+      </footer>
     </main>
   );
 }

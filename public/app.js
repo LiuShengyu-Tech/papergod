@@ -1,6 +1,8 @@
 import * as pdfjsLib from '/vendor/pdfjs-dist/build/pdf.mjs';
 import { getLocale, setLocale, t, translateDom } from '/i18n.js';
 import { buildOrderedSentenceMappings, sentenceMappingAt } from '/pdf-sentence-mapping.js';
+import { maskLatexNonTextArguments, readableSentenceTokens } from '/latex-readable.js';
+import { connectionSteps } from '/agent-connection.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs-dist/build/pdf.worker.mjs';
 
@@ -13,6 +15,7 @@ let loadedFile = null;
 let entryState = { entryFile: null, saved: false, files: [] };
 let suggestions = [];
 let currentDocument = null;
+let paperOutline = null;
 let selectedNode = null;
 let libraryData = null;
 let extractedCandidates = [];
@@ -552,7 +555,7 @@ function canonicalPdfText(value) {
 }
 
 function sourceMatchText(value) {
-  let result = String(value || '').replace(/~/g, ' ').replace(/\\([%&_#$])/g, '$1');
+  let result = maskLatexNonTextArguments(value).replace(/~/g, ' ').replace(/\\([%&_#$])/g, '$1');
   result = result
     .replace(/\\href\*?\{[^{}]*\}\{([^{}]*)\}/g, '$1')
     .replace(/\\(?:cite\w*|ref|eqref|pageref|autoref|label)\*?(?:\[[^\]]*\])*\{[^{}]*\}/g, ' ');
@@ -800,6 +803,8 @@ function positionPdfMenu(menu, point) {
 function openPdfScopeMenu(event) {
   document.getElementById('pdf-edit-menu').classList.add('hidden');
   const menu = document.getElementById('pdf-scope-menu');
+  // Nearby PDF lines are not a reliably identified source paragraph.
+  menu.querySelector('[data-pdf-scope="paragraph"]').disabled = !pdfAnnotationTarget?.paragraph;
   document.getElementById('pdf-sentence-reader-open').classList.toggle('hidden', !pdfAnnotationTarget?.sentence);
   document.getElementById('pdf-locate-source').classList.toggle('hidden', !pdfAnnotationTarget?.node?.sourceRange);
   pdfMenuPoint = { x: event.clientX, y: event.clientY };
@@ -831,8 +836,9 @@ function openPdfEditMenu() {
 
 function currentPdfSentenceCandidates() {
   if (!currentDocument) return [];
-  const paragraphs = currentDocument.sections.flatMap((section) => section.children || []);
-  return paragraphs.flatMap((paragraph) => (paragraph.children || []).map((sentence) => ({ sentence, paragraph })));
+  const sections = paperOutline?.sections || currentDocument.sections;
+  return sections.flatMap((section) => (section.children || []).flatMap((paragraph) =>
+    (paragraph.children || []).map((sentence) => ({ sentence, paragraph, file: section.file || currentDocument.file }))));
 }
 
 function compiledSentenceSnapshot() {
@@ -1040,7 +1046,7 @@ function handlePdfTextHover(event) {
   });
 }
 
-function handlePdfTextClick(event) {
+async function handlePdfTextClick(event) {
   if (!currentDocument) return showStatus('Document structure is still loading', 'error');
   document.getElementById('pdf-edit-menu').classList.add('hidden');
   const span = event.target.closest('.pdf-text-layer span');
@@ -1081,6 +1087,12 @@ function handlePdfTextClick(event) {
     openPdfScopeMenu(event);
     return;
   }
+  if (mapping.file && mapping.file !== currentFile) {
+    if (!await saveFile({ sync: false })) return;
+    if (!await loadFile(mapping.file, { preservePreview: true })) return;
+    // Re-resolve against refreshed source nodes before attaching an annotation.
+    return handlePdfTextClick(event);
+  }
   const wordRange = pdfWordRange(index, clickedIndex);
   const word = index.text.slice(wordRange.start, wordRange.end);
   const sentenceRange = { start: mapping.start, end: mapping.end };
@@ -1099,6 +1111,7 @@ function handlePdfTextClick(event) {
 
 function choosePdfAnnotationScope(scope) {
   if (!pdfAnnotationTarget) return;
+  if (scope === 'paragraph' && !pdfAnnotationTarget.paragraph) return;
   const target = pdfAnnotationTarget.fallback
     ? { node: pdfAnnotationTarget.node, quote: pdfAnnotationTarget.fallbackQuotes[scope] }
     : pdfAnnotationTarget.generic
@@ -1135,50 +1148,29 @@ function locatePdfSentenceInSource() {
   selectStructureNode(node.id, { forceSource: true });
 }
 
-function readableSentenceTokens(raw) {
-  const characters = [];
-  const offsets = [];
-  for (let cursor = 0; cursor < raw.length;) {
-    if (raw[cursor] === '\\') {
-      const command = raw.slice(cursor).match(/^\\[a-zA-Z@]+\*?(?:\[[^\]]*\])?/);
-      if (command) { cursor += command[0].length; continue; }
-    }
-    if (raw[cursor] === '$') {
-      const end = raw.indexOf('$', cursor + 1);
-      const label = ' equation ';
-      for (const character of label) { characters.push(character); offsets.push(undefined); }
-      cursor = end === -1 ? cursor + 1 : end + 1;
-      continue;
-    }
-    if ('{}'.includes(raw[cursor])) { cursor += 1; continue; }
-    characters.push(raw[cursor]); offsets.push(cursor); cursor += 1;
-  }
-  const displayCharacters = [];
-  const normalizedOffsets = [];
-  let pendingSpace = false;
-  for (let index = 0; index < characters.length; index += 1) {
-    if (/\s/.test(characters[index])) { pendingSpace = displayCharacters.length > 0; continue; }
-    if (pendingSpace) { displayCharacters.push(' '); normalizedOffsets.push(offsets[index]); }
-    displayCharacters.push(characters[index]); normalizedOffsets.push(offsets[index]);
-    pendingSpace = false;
-  }
-  const text = displayCharacters.join('');
-  const tokens = [];
-  const matcher = /[\p{L}\p{N}'’-]+/gu;
-  let match;
-  while ((match = matcher.exec(text))) {
-    const rawStart = normalizedOffsets[match.index];
-    const rawEndOffset = normalizedOffsets[match.index + match[0].length - 1];
-    if (rawStart === undefined || rawEndOffset === undefined) continue;
-    tokens.push({ text: match[0], displayStart: match.index, displayEnd: match.index + match[0].length, rawStart, rawEnd: rawEndOffset + 1 });
-  }
-  return { text, tokens };
-}
 
 function allReadableSentences() {
   if (!currentDocument) return [];
   return currentDocument.sections.flatMap((section) => (section.children || []).flatMap((paragraph) =>
     (paragraph.children || []).map((sentence) => ({ section, paragraph, sentence }))));
+}
+
+function renderSentenceReaderOverview() {
+  const item = sentenceReaderItems[sentenceReaderIndex];
+  if (!item) return;
+  const sentences = sentenceReaderItems.filter(candidate => candidate.paragraph === item.paragraph);
+  const counts = sentences.map(candidate => readableSentenceTokens(candidate.sentence.text).tokens.length);
+  const maximum = Math.max(1, ...counts);
+  const current = sentences.indexOf(item);
+  document.getElementById('sentence-reader-paragraph-count').textContent = t('reader.paragraphCount', { current: current + 1, total: sentences.length });
+  const chart = document.getElementById('sentence-reader-bars');
+  chart.innerHTML = sentences.map((candidate, index) => {
+    const label = t('reader.barLabel', { sentence: index + 1, words: counts[index] });
+    return '<li class="sentence-reader-bar-row"' + (index === current ? ' aria-current="true"' : '') + ' aria-label="' + escapeHtml(label) + '" title="' + escapeHtml(label) + '">' +
+      '<span>' + (index + 1) + '</span><span class="sentence-reader-bar-track" aria-hidden="true"><span class="sentence-reader-bar-fill" style="width:' + (counts[index] / maximum * 100) + '%"></span></span><span class="sentence-reader-bar-value">' + counts[index] + '</span></li>';
+  }).join('');
+  const active = chart.querySelector('[aria-current="true"]');
+  if (active) chart.scrollTop = Math.max(0, active.offsetTop - chart.offsetTop - chart.clientHeight / 2 + active.offsetHeight / 2);
 }
 
 function renderSentenceReader() {
@@ -1191,8 +1183,10 @@ function renderSentenceReader() {
   container.innerHTML = readable.tokens.map((token, index) => {
     const before = escapeHtml(readable.text.slice(cursor, token.displayStart));
     cursor = token.displayEnd;
-    return before + '<button type="button" class="sentence-reader-word" data-reader-word="' + index + '">' + escapeHtml(token.text) + '</button>';
+    return before + '<button type="button" class="sentence-reader-word' + (token.citation ? ' sentence-reader-citation' : '') + '" data-reader-word="' + index + '">' + escapeHtml(token.text) + '</button>';
   }).join('') + escapeHtml(readable.text.slice(cursor));
+  container.scrollTop = 0;
+  renderSentenceReaderOverview();
   container.querySelectorAll('[data-reader-word]').forEach((button) => button.addEventListener('click', () => {
     const index = Number(button.dataset.readerWord);
     sentenceReaderWord = sentenceReaderWord?.index === index ? null : { index, ...readable.tokens[index] };
@@ -1988,6 +1982,7 @@ function setAgentActivityStage(stage, message) {
 function refreshSentenceReaderLocale() {
   const item = sentenceReaderItems[sentenceReaderIndex];
   if (!item) return;
+  renderSentenceReaderOverview();
   document.getElementById('sentence-reader-position').textContent = t('reader.position', { section: item.section.title, current: sentenceReaderIndex + 1, total: sentenceReaderItems.length });
   document.getElementById('sentence-reader-selection').textContent = sentenceReaderWord ? t('reader.scopeWord', { word: sentenceReaderWord.text }) : t('reader.scopeSentence');
 }
@@ -2057,29 +2052,39 @@ async function undoLastAiRevision() {
   finally { button.disabled = false; }
 }
 
+let engineStatus = { state: 'checking', engines: [] };
+
+function renderEngineStatus() {
+  const { state, engines } = engineStatus;
+  const message = t(state === 'ready' ? 'engine.ready' : state === 'missing' ? 'engine.missing' : state === 'error' ? 'engine.checkFailed' : 'engine.checking', { engine: engines[0] });
+  document.getElementById('engine-status-bar').dataset.state = state;
+  const label = document.getElementById('engine-status-text');
+  label.removeAttribute('data-i18n');
+  label.textContent = message;
+  document.getElementById('engine-recheck').disabled = state === 'checking';
+  for (const id of ['compile-btn', 'compile-menu-btn', 'tool-compile']) {
+    const button = document.getElementById(id);
+    button.disabled = state !== 'ready';
+    button.setAttribute('aria-disabled', String(state !== 'ready'));
+    button.title = message;
+  }
+}
+
 async function loadEngineStatus() {
-  const compileBtn = document.getElementById('compile-btn');
-  // The split button's menu follows the main button's enabled state.
-  new MutationObserver(() => { document.getElementById('compile-menu-btn').disabled = compileBtn.disabled; })
-    .observe(compileBtn, { attributes: true, attributeFilter: ['disabled'] });
+  engineStatus = { state: 'checking', engines: [] };
+  renderEngineStatus();
   try {
     const res = await fetch('/api/engines');
+    if (!res.ok) throw new Error('Engine check failed');
     const data = await res.json();
-    if (data.engines && data.engines.length > 0) {
-      latexEngineAvailable = true;
-      compileBtn.disabled = false;
-      compileBtn.removeAttribute('aria-disabled');
-    } else {
-      latexEngineAvailable = false;
-      compileBtn.disabled = true;
-      compileBtn.setAttribute('aria-disabled', 'true');
-      showStatus(t('engine.missing'), 'error');
-    }
+    if (!Array.isArray(data.engines)) throw new Error('Invalid engine response');
+    engineStatus = { state: data.engines.length ? 'ready' : 'missing', engines: data.engines };
+    latexEngineAvailable = data.engines.length > 0;
   } catch {
+    engineStatus = { state: 'error', engines: [] };
     latexEngineAvailable = false;
-    compileBtn.disabled = true;
-    compileBtn.setAttribute('aria-disabled', 'true');
-    showStatus(t('engine.checkFailed'), 'error');
+  } finally {
+    renderEngineStatus();
   }
 }
 
@@ -2145,9 +2150,15 @@ function disposeTerminalView() {
   document.getElementById('terminal-screen').replaceChildren();
 }
 
+let agentTerminalOpen = false;
 function closeTerminalOverlay() {
   document.getElementById('terminal-overlay').classList.add('hidden');
   disposeTerminalView();
+  if (agentTerminalOpen) {
+    agentTerminalOpen = false;
+    document.getElementById('agent-config-overlay').classList.remove('hidden');
+    void loadAgentConfiguration();
+  }
 }
 
 async function postTerminal(path, body = {}) {
@@ -2157,7 +2168,7 @@ async function postTerminal(path, body = {}) {
   return data;
 }
 
-async function openWorkspaceTerminal(initialCommand = '') {
+async function openWorkspaceTerminal(initialCommand = '', endpoint = '/api/terminal') {
   const overlay = document.getElementById('terminal-overlay');
   const status = document.getElementById('terminal-status');
   overlay.classList.remove('hidden');
@@ -2165,7 +2176,7 @@ async function openWorkspaceTerminal(initialCommand = '') {
   document.getElementById('terminal-workspace').textContent = document.getElementById('active-workspace-name').title || document.getElementById('active-workspace-name').textContent;
   disposeTerminalView();
   try {
-    const { session } = await postTerminal('/api/terminal');
+    const { session } = await postTerminal(endpoint);
     terminalSessionId = session.id;
     const terminalApi = await globalThis.loadPapergodTerminal?.();
     if (!terminalApi) throw new Error('Terminal renderer is unavailable.');
@@ -2412,6 +2423,37 @@ function selectedAgentProfile() {
   return agentProviders.find((item) => item.id === id) || null;
 }
 
+let agentProbeProgress = null;
+function renderAgentConnectionFlow() {
+  const profile = selectedAgentProfile();
+  const host = document.getElementById('agent-connection-flow');
+  if (!profile || !host) return;
+  const zh = getLocale().startsWith('zh');
+  const say = (en, cn) => zh ? cn : en;
+  const progress = agentProbeProgress?.id === profile.id ? agentProbeProgress : null;
+  const states = connectionSteps(profile, currentProvider, Boolean(progress));
+  const labels = [say('Find CLI', '检测 CLI'), say('Check sign-in', '确认登录'), say('Test connection', '测试连接'), say('Use in this workspace', '用于当前工作区')];
+  const details = [
+    profile.available ? profile.version || say('Installed', '已安装') : say('Install the CLI, or set its path in Advanced settings. Then check again.', '安装 CLI，或在高级设置中填写已有程序路径，然后重新检测。'),
+    profile.id === 'mock' ? say('No account needed', '无需账号') : profile.authenticated ? say('Signed in on this computer', '已在本机登录') : say('Sign in through the CLI. Return here and check again after login.', '通过 CLI 登录，完成后回到这里重新检测。'),
+    progress ? say(`Waiting for the Agent response · ${Math.floor((Date.now() - progress.startedAt) / 1000)}s`, `正在等待 Agent 回复 · ${Math.floor((Date.now() - progress.startedAt) / 1000)} 秒`)
+      : profile.id === 'mock' ? say('Local demo; no external call', '本地演示，不调用外部服务')
+      : profile.liveCheck?.ok ? say('A real request succeeded', '实际请求已成功') : profile.liveCheck?.ok === false ? profile.liveCheck.error || say('Request failed. Check the details below and retry.', '请求失败，请查看下方详情后重试。') : say('Not tested yet. Sends a small test request using your CLI account.', '尚未测试。将使用 CLI 账号发送一次简短测试请求。'),
+    profile.id === currentProvider ? say('Currently selected for this workspace', '当前工作区正在使用') : say('Choose “Use” when you are ready.', '确认后点击“使用”完成切换。'),
+  ];
+  const statuses = { done: say('Complete', '已完成'), pending: say('Pending', '待完成'), running: say('In progress', '进行中'), failed: say('Failed', '失败') };
+  host.innerHTML = '<ol class="agent-connection-steps">' + labels.map((label, index) => `<li class="${states[index]}"><span class="connection-step-number" aria-label="${escapeHtml(statuses[states[index]])}">${states[index] === 'done' ? '✓' : index + 1}</span><div><strong>${label} <small>${statuses[states[index]]}</small></strong><span>${escapeHtml(details[index])}</span></div></li>`).join('') + '</ol>';
+  const refresh = document.getElementById('agent-config-refresh');
+  refresh.textContent = say('Check installation / login again', '重新检测安装与登录');
+  const busy = Boolean(agentProbeProgress);
+  refresh.disabled = busy;
+  document.getElementById('agent-config-provider').disabled = busy;
+  document.querySelectorAll('#agent-provider-list button, .agent-advanced-grid input, .agent-advanced-grid textarea, .agent-advanced-grid select').forEach(element => { element.disabled = busy; });
+  document.getElementById('agent-config-save').disabled = busy;
+  document.getElementById('agent-config-login').disabled = busy;
+  document.getElementById('agent-config-native').disabled = busy;
+}
+
 function setAgentConfigNote(message, state = 'neutral') {
   const note = document.getElementById('agent-config-note');
   note.textContent = message;
@@ -2421,6 +2463,11 @@ function setAgentConfigNote(message, state = 'neutral') {
 function fillAgentConfigForm() {
   const profile = selectedAgentProfile();
   if (!profile) return;
+  document.getElementById('agent-config-native').classList.toggle('hidden', profile.id !== 'codex');
+  document.getElementById('agent-config-native-help').classList.toggle('hidden', profile.id !== 'codex');
+  document.getElementById('agent-config-native').textContent = getLocale().startsWith('zh') ? '打开 CLI 配置模型与强度' : 'Configure model and reasoning in CLI';
+  document.getElementById('agent-config-native-help').textContent = getLocale().startsWith('zh') ? '打开真实 Codex 界面，并取消此工作区的模型与强度覆盖。后续请求跟随 CLI 保存的默认配置；临时会话设置不会同步。' : 'Open Codex and clear this workspace’s model and reasoning overrides. Requests follow saved CLI defaults; temporary session settings are not synchronized.';
+  document.querySelector('#agent-config-reasoning option[value=""]').textContent = profile.id === 'codex' ? (getLocale().startsWith('zh') ? '跟随 CLI 默认配置' : 'Use CLI default') : 'Automatic by task';
   document.getElementById('agent-config-command').value = profile.command || '';
   document.getElementById('agent-config-model').value = profile.model || '';
   document.getElementById('agent-config-reasoning').value = profile.reasoningEffort || '';
@@ -2438,11 +2485,12 @@ function fillAgentConfigForm() {
     ? t('agent.mockNote')
     : `${profile.available ? t('agent.cliDetected') : t('agent.cliMissing')} ${profile.authStatus || t('agent.authUnchecked')}${liveNote}${activeModel}${capabilityNote}${freshnessNote}${healthNote}${warningNote}${profile.id === currentProvider ? ' ' + t('agent.currentUse') : ' ' + t('agent.saveActivate')}`;
   setAgentConfigNote(note, profile.liveCheck?.ok === false ? 'error' : profile.id === 'mock' || profile.available && profile.authenticated && profile.liveCheck?.ok ? 'success' : profile.available ? 'warning' : 'error');
+  renderAgentConnectionFlow();
   const loginButton = document.getElementById('agent-config-login');
   const canLoginHere = profile.id === 'codex' && profile.available && (!profile.authenticated || profile.liveCheck?.code === 'AGENT_AUTH_REQUIRED');
   loginButton.classList.toggle('hidden', !canLoginHere);
   loginButton.textContent = 'Sign in to Codex';
-  document.getElementById('agent-config-probe').textContent = profile.id === 'mock' ? t('agent.checkMock') : t('agent.checkSetup', { name: profile.label });
+  document.getElementById('agent-config-probe').textContent = agentProbeProgress ? t('agent.checking') : getLocale().startsWith('zh') ? '测试连接' : 'Test connection';
   document.getElementById('agent-config-save').textContent = profile.id === currentProvider ? 'Use this Agent' : t('agent.use', { name: profile.label });
 }
 
@@ -2495,7 +2543,7 @@ function renderAgentConfiguration() {
     const liveFailed = item.liveCheck?.ok === false;
     const livePassed = item.liveCheck?.ok === true;
     const state = liveFailed ? 'attention' : item.available && item.authenticated ? 'available' : item.available ? 'attention' : '';
-    const stateText = liveFailed ? 'LIVE TEST FAILED' : livePassed ? 'LIVE TEST PASSED' : item.available && item.authenticated ? t('agent.ready') : item.available ? t('agent.signin') : t('agent.notInstalled');
+    const stateText = liveFailed ? 'LIVE TEST FAILED' : livePassed ? 'LIVE TEST PASSED' : item.id === 'mock' ? t('agent.ready') : item.available && item.authenticated ? (getLocale().startsWith('zh') ? '尚未测试' : 'NOT TESTED') : item.available ? t('agent.signin') : t('agent.notInstalled');
     const providerKind = item.id === 'mock' ? 'Built-in local test Agent' : 'Local subscription CLI';
     return '<button type="button" class="agent-provider-card ' + (item.id === selected ? 'selected ' : '') + (item.id === currentProvider ? 'active' : '')
       + '" data-provider="' + escapeHtml(item.id) + '" aria-pressed="' + String(item.id === selected) + '"><span class="provider-card-head"><strong>'
@@ -2504,7 +2552,7 @@ function renderAgentConfiguration() {
       + (item.version ? ' · ' + escapeHtml(item.version) : '')
       + (item.authStatus ? '<br>' + escapeHtml(item.authStatus) : '')
       + (item.liveCheck ? '<br>Live test: ' + escapeHtml(item.liveCheck.ok ? `passed${item.liveCheck.latencyMs ? ` · ${item.liveCheck.latencyMs} ms` : ''}` : `failed${item.liveCheck.code ? ` · ${item.liveCheck.code}` : ''}${item.liveCheck.error ? ` · ${item.liveCheck.error}` : ''}`) + (item.liveCheck.checkedAt ? '<br>' + escapeHtml(new Date(item.liveCheck.checkedAt).toLocaleString()) : '') : '') + '</span>'
-      + (item.id === currentProvider ? '<span class="provider-use">' + escapeHtml(t('agent.currently')) + '</span>' : item.available ? '<span class="provider-action">' + escapeHtml(t('agent.clickUse')) + '</span>' : '') + '</button>';
+      + (item.id === currentProvider ? '<span class="provider-use">' + escapeHtml(t('agent.currently')) + '</span>' : '<span class="provider-action">' + (getLocale().startsWith('zh') ? '查看连接步骤' : 'View connection steps') + '</span>') + '</button>';
   }).join('');
   select.innerHTML = agentProviders.map((item) => '<option value="' + escapeHtml(item.id) + '">' + escapeHtml(item.label) + '</option>').join('');
   select.value = agentProviders.some((item) => item.id === selected) ? selected : agentProviders[0]?.id || '';
@@ -2585,16 +2633,20 @@ async function waitForAgentProbe(testId) {
     const test = data.test;
     if (['complete', 'failed', 'cancelled'].includes(test.status)) return test;
     setAgentConfigNote(`Live subscription test ${test.status}…`, 'neutral');
+    renderAgentConnectionFlow();
     await new Promise((resolve) => setTimeout(resolve, 500));
   }
   throw new Error('Live subscription test timed out');
 }
 
 async function probeAgentConfiguration() {
+  if (agentProbeProgress) return;
   const profile = selectedAgentProfile();
   if (!profile) return;
   const button = document.getElementById('agent-config-probe');
   const startedAt = Date.now();
+  agentProbeProgress = { id: profile.id, startedAt };
+  renderAgentConnectionFlow();
   button.disabled = true;
   button.textContent = t('agent.checking');
   setAgentConfigNote(t('agent.checkingCommand', { name: profile.label }), 'neutral');
@@ -2624,12 +2676,16 @@ async function probeAgentConfiguration() {
     setAgentConfigNote(message, 'success');
     showStatus(`${profile.label} subscription works`, 'success');
   } catch (error) {
+    const latest = agentProviders.find(item => item.id === profile.id) || profile;
+    latest.liveCheck = { ...latest.liveCheck, ok: false, error: error.message, checkedAt: new Date().toISOString() };
+    document.querySelector('.agent-connection-details').open = true;
     setAgentConfigNote(error.message, 'error');
     showStatus(error.message, 'error');
   } finally {
+    agentProbeProgress = null;
+    renderAgentConnectionFlow();
     button.disabled = false;
-    const selected = selectedAgentProfile();
-    button.textContent = selected?.id === 'mock' ? t('agent.checkMock') : t('agent.checkSetup', { name: selected?.label || 'Agent' });
+    button.textContent = getLocale().startsWith('zh') ? '重新测试连接' : 'Test connection again';
   }
 }
 
@@ -3657,14 +3713,14 @@ async function loadFileTree() {
   }
 }
 
-async function loadFile(name) {
+async function loadFile(name, { preservePreview = false } = {}) {
   try {
     const res = await fetch('/api/files/' + encodeURIComponent(name));
     if (!res.ok) throw new Error('Load failed');
     const data = await res.json();
     currentFile = name;
     loadedFile = name;
-    resetCompiledPreview();
+    if (!preservePreview) resetCompiledPreview();
     editor.setValue(data.content);
     suggestions = [];
     lastLibraryUsage = null;
@@ -3678,10 +3734,12 @@ async function loadFile(name) {
     });
     await syncStructure({ silent: true });
     await loadModificationIntents();
-    if (latexEngineAvailable) await compileFile({ silent: true });
+    if (latexEngineAvailable && !preservePreview) await compileFile({ silent: true });
+    return true;
   } catch (e) {
     showStatus('Failed to load ' + name, 'error');
     if (!loadedFile) renderOutline();
+    return false;
   }
 }
 
@@ -3956,21 +4014,27 @@ function renderOutline() {
     });
     return;
   }
-  const numbers = outlineSectionNumbers(currentDocument.sections);
+  const outline = paperOutline || currentDocument;
+  const numbers = outlineSectionNumbers(outline.sections);
   const depth = outlineDepth();
   const sectionHtml = (section) => {
     const number = numbers.get(section.id);
     return '<button type="button" class="outline-node outline-heading-node level-' + Math.min(section.level || 1, 6) + (number ? ' numbered' : '')
-      + '" data-node-id="' + escapeHtml(section.id) + '" title="Jump to ' + escapeHtml((number ? number + ' ' : '') + section.title) + ' in PDF">'
+      + '" data-source-file="' + escapeHtml(section.file || currentFile) + '" data-node-id="' + escapeHtml(section.id) + '" title="Jump to ' + escapeHtml((number ? number + ' ' : '') + section.title) + ' in PDF">'
       + (number ? '<span class="outline-number">' + escapeHtml(number) + '</span>' : '')
       + '<span class="outline-title">' + escapeHtml(section.title) + '</span></button>';
   };
   container.innerHTML = '<button type="button" class="outline-document" data-node-id="' + escapeHtml(currentDocument.id)
-    + '" title="Jump to document title in PDF">' + escapeHtml(currentDocument.title || currentDocument.file) + '</button>'
-    + currentDocument.sections.filter((section) => (section.level || 1) <= depth).map(sectionHtml).join('');
+    + '" data-source-file="' + escapeHtml(outline.file) + '" title="Jump to document title in PDF">' + escapeHtml(outline.title || outline.file) + '</button>'
+    + outline.sections.filter((section) => (section.level || 1) <= depth).map(sectionHtml).join('');
   container.querySelectorAll('[data-node-id]').forEach(element => {
-    element.addEventListener('click', () => {
-      selectStructureNode(element.dataset.nodeId, { forcePreview: true });
+    element.addEventListener('click', async () => {
+      if (element.dataset.sourceFile !== currentFile) {
+        if (!await saveFile({ sync: false })) return;
+        await loadFile(element.dataset.sourceFile);
+        if (currentFile !== element.dataset.sourceFile) return;
+      }
+      selectStructureNode(element.classList.contains('outline-document') ? currentDocument.id : element.dataset.nodeId, { forcePreview: true });
     });
   });
   updateOutlineSelection();
@@ -4119,11 +4183,12 @@ async function syncStructure({ silent = false } = {}) {
   try {
     const res = await fetch('/api/documents/sync', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ file: currentFile }),
+      body: JSON.stringify({ file: currentFile, entryFile: entryState.entryFile }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Structure sync failed');
     currentDocument = data.document;
+    paperOutline = data.outline || null;
     rebuildPdfSentenceMappings();
     renderOutline();
     const nextId = selectedId && (selectedId === currentDocument.id || findNode(currentDocument.sections, selectedId))
@@ -5923,6 +5988,8 @@ function init() {
   document.getElementById('ai-invoke').addEventListener('click', invokeAgent);
   document.getElementById('language-select').value = getLocale();
   document.getElementById('language-select').addEventListener('change', event => setLocale(event.target.value));
+  document.getElementById('engine-recheck').addEventListener('click', loadEngineStatus);
+  document.addEventListener('papergod:locale-changed', renderEngineStatus);
   document.addEventListener('papergod:locale-changed', () => {
     if (document.getElementById('theme-toggle').hasAttribute('aria-pressed')) applyTheme(document.documentElement.dataset.theme);
     renderModificationIntents();
@@ -6009,22 +6076,25 @@ function init() {
     } catch (error) { button.disabled = false; setWorkspaceManagerNote(error.message, 'error'); }
   });
   document.getElementById('workspace-browse').addEventListener('click', async event => {
-    event.currentTarget.disabled = true;
+    const button = event.currentTarget;
+    button.disabled = true;
     setWorkspaceManagerNote();
     try {
       const res = await fetch('/api/workspaces/pick-folder', { method: 'POST' });
       const data = await res.json();
       if (!res.ok) {
+        if (data.code === 'PICKER_CANCELLED') return;
         if (data.code !== 'PICKER_UNAVAILABLE') throw new Error(data.error || 'Folder selection failed');
         setWorkspaceManagerNote(t('workspace.pickerFallback'));
         const initialPath = document.getElementById('workspace-path').value.trim() || workspaceManagerData?.activePath || '';
         try { await browseWorkspaceFolder(initialPath); } catch { await browseWorkspaceFolder(''); }
         return;
       }
+      document.getElementById('workspace-browser').classList.add('hidden');
       document.getElementById('workspace-path').value = data.path || '';
       document.getElementById('workspace-path').focus();
     } catch (error) { setWorkspaceManagerNote(error.message || t('workspace.pickerFallback'), 'error'); }
-    finally { event.currentTarget.disabled = false; }
+    finally { button.disabled = false; }
   });
   document.getElementById('workspace-browser-list').addEventListener('click', event => {
     const entry = event.target.closest('[data-folder-path]');
@@ -6245,13 +6315,22 @@ function init() {
     if (!card) return;
     const id = card.dataset.provider;
     selectAgentProvider(id);
-    const profile = agentProviders.find((item) => item.id === id);
-    if (profile?.available && id !== currentProvider) activateAgentProvider(id);
   });
   document.getElementById('agent-config-provider').addEventListener('change', event => selectAgentProvider(event.target.value));
   document.getElementById('agent-config-form').addEventListener('submit', saveAgentConfiguration);
   document.getElementById('agent-config-login').addEventListener('click', openAgentLoginTerminal);
+  document.getElementById('agent-config-native').addEventListener('click', async () => {
+    agentTerminalOpen = true;
+    document.getElementById('agent-config-overlay').classList.add('hidden');
+    await openWorkspaceTerminal('', '/api/agents/codex/terminal');
+  });
   document.getElementById('agent-config-probe').addEventListener('click', probeAgentConfiguration);
+  document.getElementById('agent-config-refresh').addEventListener('click', async event => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.textContent = t('agent.checking');
+    try { await loadAgentConfiguration(); } finally { renderAgentConnectionFlow(); }
+  });
   const modelInput = document.getElementById('agent-config-model');
   const modelDropdown = document.getElementById('agent-model-dropdown');
   const openAgentModelDropdown = () => {

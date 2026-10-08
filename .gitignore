@@ -1,4 +1,7 @@
 node_modules/
+# Local validation previews and temporary agent response.
+/tmp/
+/exec
 .papergod/
 .hive/
 .dsh-vision-toolkit/

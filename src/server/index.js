@@ -14,11 +14,11 @@ import {
   listRevisions, createRevision, updateRevision, deleteRevision,
   createAgentRun, updateAgentRun, listAgentRuns,
 } from './project-resources.js';
-import { AGENT_PROVIDERS, buildSuggestionPayload, detectAgentProviders, runWritingAgent } from './agent-adapters.js';
+import { AGENT_PROVIDERS, commandSpec, buildSuggestionPayload, detectAgentProviders, runWritingAgent } from './agent-adapters.js';
 import { alignSuggestionsToManifest, loadPromptManifest, materializePromptManifest } from './prompt-manifest.js';
 import { agentFailureAudit, redactAgentDiagnostic } from './agent-errors.js';
 import {
-  syncDocumentStructure, getDocumentStructure, updateDocumentMetadata,
+  syncDocumentStructure, syncPaperOutline, getDocumentStructure, updateDocumentMetadata,
   updateNodeMetadata, getNodeSourceContext,
 } from './document-structure.js';
 import { buildLibraryContext, composeMockParagraph, extractLibraryCandidates, renderSentencePattern, searchLibraries } from './library-engine.js';
@@ -369,7 +369,10 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
     if (typeof options.folderPicker === 'function') {
       return resourceResponse(res, async () => ({ path: await options.folderPicker(workspaceRoot) }));
     }
-    const candidates = process.platform === 'darwin'
+    const candidates = process.platform === 'win32'
+      ? [[join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+        ['-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', join(PROJECT_ROOT, 'src', 'server', 'windows-folder-picker.ps1'), '-InitialDirectory', workspaceRoot], false]]
+      : process.platform === 'darwin'
       ? [['osascript', ['-e', 'POSIX path of (choose folder with prompt "Choose a Papergod workspace")']]]
       : [
         ['zenity', ['--file-selection', '--directory', '--title=Choose a Papergod workspace']],
@@ -412,6 +415,21 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
 
   app.post('/api/terminal', async (_req, res) => {
     await resourceResponse(res, async () => ({ session: terminalManager.start(workspaceRoot) }), 201);
+  });
+
+  app.post('/api/agents/codex/terminal', async (_req, res) => {
+    await resourceResponse(res, async () => {
+      await hydrateAgentCommands();
+      const spec = commandSpec('codex', agentCommands);
+      const session = terminalManager.start(workspaceRoot, { key: 'codex', command: spec.command, args: spec.prefixArgs });
+      // Native CLI configuration becomes authoritative for this workspace.
+      await updateProject(workspaceRoot, project => {
+        project.project.agentProfiles ||= {};
+        project.project.agentProfiles.codex = { ...(project.project.agentProfiles.codex || {}), command: spec.command, args: spec.prefixArgs, model: '', reasoningEffort: '' };
+      });
+      await hydrateAgentCommands();
+      return { session };
+    }, 201);
   });
 
   app.get('/api/terminal/:id/events', (req, res) => {
@@ -864,7 +882,11 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
   app.post('/api/documents/sync', async (req, res) => {
     const { file } = req.body || {};
     if (typeof file !== 'string' || !file) return res.status(400).json({ error: 'file is required' });
-    await resourceResponse(res, async () => ({ document: await syncDocumentStructure(workspaceRoot, file) }));
+    await resourceResponse(res, async () => {
+      const outline = typeof req.body.entryFile === 'string' && req.body.entryFile
+        ? await syncPaperOutline(workspaceRoot, req.body.entryFile) : null;
+      return { document: await syncDocumentStructure(workspaceRoot, file), outline };
+    });
   });
 
   app.get('/api/documents/:id/structure', async (req, res) => {

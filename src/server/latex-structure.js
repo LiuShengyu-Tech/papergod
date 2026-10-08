@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'crypto';
+import { maskLatexNonTextArguments } from '../../public/latex-readable.js';
 
 const SECTION_LEVELS = { section: 1, subsection: 2, subsubsection: 3 };
 
@@ -47,7 +48,7 @@ function closingBrace(source, openIndex) {
 }
 
 function findCommandValue(source, command, from = 0, to = source.length) {
-  const regex = new RegExp(`\\\\${command}\\*?\\s*\\{`, 'g');
+  const regex = new RegExp(`\\\\${command}\\*?\\s*(?:\\[[^\\]]*\\]\\s*)?\\{`, 'g');
   regex.lastIndex = from;
   let match;
   while ((match = regex.exec(source)) && match.index < to) {
@@ -73,7 +74,7 @@ function findAppendix(source, from, to) {
 }
 
 function findHeadings(source, from, to) {
-  const regex = /\\(section|subsection|subsubsection)(\*?)\s*\{/g;
+  const regex = /\\(section|subsection|subsubsection)(\*?)\s*(?:\[[^\]]*\]\s*)?\{/g;
   regex.lastIndex = from;
   const appendixAt = findAppendix(source, from, to);
   const headings = [];
@@ -101,7 +102,7 @@ function trimRange(source, start, end) {
 }
 
 function plainText(raw) {
-  return raw
+  return maskLatexNonTextArguments(raw)
     .replace(/(?<!\\)%.*$/gm, ' ')
     .replace(/\\(?:cite|ref|label|footnote|emph|textbf|textit)\*?(?:\[[^\]]*\])?\{([^{}]*)\}/g, '$1')
     .replace(/\\[a-zA-Z@]+\*?(?:\[[^\]]*\])?/g, ' ')
@@ -213,11 +214,13 @@ function isProseChunk(raw) {
 
 function paragraphRanges(source, start, end) {
   const ranges = [];
-  const separator = /\n[ \t]*\n+/g;
+  // Preserve original offsets: normalizing CRLF to LF would shift source edits.
+  const separator = /\r?\n[ \t]*(?:\r?\n)+|\\par(?![a-zA-Z@])/g;
   separator.lastIndex = start;
   let cursor = start;
   let match;
   while ((match = separator.exec(source)) && match.index < end) {
+    if (match[0].startsWith('\\') && (isCommented(source, match.index) || isEscaped(source, match.index))) continue;
     const range = trimRange(source, cursor, match.index);
     if (range.end > range.start && isProseChunk(source.slice(range.start, range.end))) ranges.push(range);
     cursor = match.index + match[0].length;
@@ -291,7 +294,7 @@ export function parseLatexDocument(source, previousDocument = {}) {
   const endDocument = source.search(/\\end\s*\{document\}/);
   const bodyStart = beginDocument === -1 ? 0 : beginDocument + source.slice(beginDocument).match(/^\\begin\s*\{document\}/)[0].length;
   const bodyEnd = endDocument === -1 ? source.length : endDocument;
-  const title = findCommandValue(source, 'title', 0, bodyStart)?.value.trim() || previousDocument.title || '';
+  const title = findCommandValue(source, 'title', 0, bodyEnd)?.value.trim() || previousDocument.title || '';
   const headings = findHeadings(source, bodyStart, bodyEnd);
   const descriptors = [];
 
