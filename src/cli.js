@@ -41,6 +41,8 @@ export function parseCliArgs(argv, cwd = process.cwd()) {
   if (options.resume && options.demo) {
     throw new Error('--resume cannot be combined with --demo');
   }
+  // Launching the app normally reopens the user's selection, regardless of cwd.
+  if (!options.workspaceRoot && positional.length === 0 && !options.demo) options.resume = true;
   options.workspaceRoot = resolve(cwd, options.workspaceRoot || positional[0] || '.');
   if (!Number.isInteger(options.port) || options.port < 0 || options.port > 65535) {
     throw new Error('Port must be an integer between 0 and 65535');
@@ -58,7 +60,7 @@ Usage:
   papergod [workspace] [options]
 
 Options:
-  -w, --workspace <path>  Paper workspace (default: current directory)
+  -w, --workspace <path>  Open a specific paper (default: last selected workspace)
   -p, --port <number>     Local HTTP port (default: 3000; 0 selects a free port)
       --agent <provider>  mock, codex, claude-code, opencode, or pi (default: mock)
       --demo              Seed built-in prompts, libraries, vocabulary, and demo paper
@@ -73,7 +75,7 @@ export async function resolveStartupWorkspace(options, {
   fallbackWorkspace = BUILT_IN_DEMO_WORKSPACE,
 } = {}) {
   if (!options.resume) return options;
-  const active = await registry.getActive();
+  const active = await registry.getActive({ strict: true });
   return {
     ...options,
     workspaceRoot: active?.path || fallbackWorkspace,
@@ -97,6 +99,7 @@ export async function run(argv = process.argv.slice(2)) {
 
   const initialization = await initializeWorkspace(options.workspaceRoot, { demo: options.demo });
   const server = await startServer(options);
+  await createWorkspaceRegistry().add(options.workspaceRoot, { activate: true });
   const address = server.address();
   const url = `http://127.0.0.1:${address.port}`;
   process.stdout.write(`Papergod running at ${url}\n`);

@@ -1,4 +1,5 @@
 import express from 'express';
+import { translationRouter } from './translation.js';
 import { resolve, join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile, stat } from 'fs/promises';
@@ -55,6 +56,8 @@ import {
 } from './orchestration-engine.js';
 import { analyzeStructure, ANALYSIS_FORMULAS } from './paragraph-analysis.js';
 import { getAppVersionInfo } from './app-version.js';
+import { getMcpRequests, submitMcpRevision } from './mcp-workflow.js';
+import { listProjectDirectory } from './project-tree.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = resolve(__dirname, '../..');
@@ -114,6 +117,7 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
   app.locals.orchestrations = orchestrationManager;
   app.use(express.json({ limit: '10mb' }));
   app.use(securityHeaders);
+  app.use('/api/translation', translationRouter(options.translation));
   app.use('/vendor/codemirror', express.static(join(PROJECT_ROOT, 'node_modules', 'codemirror'), { dotfiles: 'deny' }));
   app.use('/vendor/pdfjs-dist', express.static(join(PROJECT_ROOT, 'node_modules', 'pdfjs-dist'), { dotfiles: 'deny' }));
   app.use(express.static(join(PROJECT_ROOT, 'public')));
@@ -329,7 +333,7 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
 
   app.get('/api/config', async (_req, res) => {
     try {
-      await workspaceRegistry.add(workspaceRoot, { activate: true });
+      await workspaceRegistry.add(workspaceRoot);
       await hydrateAgentCommands(null, { loadProvider: true });
       res.json({ provider, workspace: workspaceRoot });
     } catch (error) {
@@ -339,7 +343,7 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
 
   app.get('/api/workspaces', async (_req, res) => {
     await resourceResponse(res, async () => {
-      await workspaceRegistry.add(workspaceRoot, { activate: true });
+      await workspaceRegistry.add(workspaceRoot);
       const workspaces = await workspaceRegistry.list(workspaceRoot);
       return { activePath: workspaceRoot, workspaces: workspaces.filter((item) => item.available || item.active) };
     });
@@ -351,7 +355,7 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
 
   app.post('/api/workspaces', async (req, res) => {
     await resourceResponse(res, async () => {
-      await workspaceRegistry.add(workspaceRoot, { activate: true });
+      await workspaceRegistry.add(workspaceRoot);
       const registered = await workspaceRegistry.add(req.body?.path);
       const { entry, initialization } = await switchWorkspace(registered.id);
       return { workspace: entry, createdSample: initialization.createdSample };
@@ -879,6 +883,19 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
     }
   });
 
+  // Local MCP bridge uses the same active workspace and revision engine as the UI.
+  app.use('/api/mcp', (req, res, next) => {
+    if (req.headers.origin) return res.status(403).json({ error: 'MCP bridge does not accept browser origins' });
+    if (!/^127\.0\.0\.1(?::\d+)?$/.test(req.headers.host || '')) return res.status(403).json({ error: 'Loopback host required' });
+    next();
+  });
+  app.get('/api/mcp/requests', async (req, res) => {
+    await resourceResponse(res, () => getMcpRequests(workspaceRoot, req.query.file));
+  });
+  app.post('/api/mcp/revise', async (req, res) => {
+    await resourceResponse(res, () => submitMcpRevision(workspaceRoot, req.body));
+  });
+
   app.post('/api/documents/sync', async (req, res) => {
     const { file } = req.body || {};
     if (typeof file !== 'string' || !file) return res.status(400).json({ error: 'file is required' });
@@ -1172,6 +1189,10 @@ export function createApp(initialWorkspaceRoot = DEFAULT_WORKSPACE, options = {}
       await deleteRevision(workspaceRoot, req.params.id);
       return { ok: true };
     });
+  });
+
+  app.get('/api/project-tree', async (req, res) => {
+    await resourceResponse(res, () => listProjectDirectory(workspaceRoot, req.query.directory || ''));
   });
 
   app.get('/api/files', async (_req, res) => {

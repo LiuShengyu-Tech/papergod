@@ -46,9 +46,11 @@
     "papergod": "node src/cli.js --resume",
     "build:web": "vite build --config frontend/vite.config.js",
     "prepack": "npm run build:web",
-    "test": "node --test tests/api.test.js"
+    "test": "node --test tests/api.test.js tests/mcp.test.js tests/external-sync.test.js tests/translation.test.js tests/workspace-persistence.test.js tests/activity-status.test.js tests/intent-highlights.test.js",
+    "mcp": "node src/mcp.js"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-web-links": "^0.12.0",
     "@xterm/xterm": "^6.0.0",
@@ -61,7 +63,8 @@
     "pdfjs-dist": "^4.8.69",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "tailwind-merge": "^3.6.0"
+    "tailwind-merge": "^3.6.0",
+    "zod": "^3.25.76"
   },
   "engines": {
     "node": ">=18.0.0"

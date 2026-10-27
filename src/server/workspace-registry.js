@@ -98,7 +98,7 @@ export function createWorkspaceRegistry({ file = DEFAULT_WORKSPACE_REGISTRY_FILE
     return { ...entry };
   }
 
-  async function getActive() {
+  async function getActive({ strict = false } = {}) {
     const registry = await readRegistry(file);
     if (!registry.activePath) return null;
     try {
@@ -107,7 +107,8 @@ export function createWorkspaceRegistry({ file = DEFAULT_WORKSPACE_REGISTRY_FILE
       return entry
         ? { ...entry, path: canonical, name: basename(canonical) || canonical }
         : { id: workspaceId(canonical), name: basename(canonical) || canonical, path: canonical };
-    } catch {
+    } catch (error) {
+      if (strict) throw Object.assign(new Error(`The last selected workspace is unavailable: ${registry.activePath}. Restore access or explicitly select another workspace with --workspace.`), { code: 'WORKSPACE_UNAVAILABLE', cause: error });
       return null;
     }
   }

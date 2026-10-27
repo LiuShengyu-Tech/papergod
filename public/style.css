@@ -95,7 +95,20 @@ body {
   margin-bottom: 0;
 }
 
-#navigator-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; margin: 0 4px 12px; padding: 3px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-input); }
+#navigator-tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px; margin: 0 4px 12px; padding: 3px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-input); }
+.project-files-hint { color: var(--text-dim); font-size: 11px; line-height: 1.6; padding: 0 8px 12px; }
+.external-sync-conflict { flex: none; padding: 12px; background: #fff3cd; color: #664d03; font-size: 12px; line-height: 1.6; border-bottom: 1px solid #e9c96d; }
+.external-sync-conflict span { display: block; }
+.external-sync-control { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; font-size: 11px; color: var(--text-dim); }
+.external-sync-control button { cursor: pointer; white-space: nowrap; background: var(--bg-panel); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 4px 8px; }
+.external-sync-conflict button { margin: 6px 8px 0 0; padding: 4px 8px; border: 1px solid #b89b50; border-radius: 4px; cursor: pointer; background: white; color: #664d03; }
+#project-file-tree { font-size: 12px; overflow-wrap: anywhere; padding: 0 4px; }
+#project-file-tree summary { cursor: pointer; padding: 7px 4px; border-radius: 5px; }
+.project-folder-children { margin-left: 11px; border-left: 1px solid var(--border); padding-left: 7px; }
+.project-file-row { display: block; width: 100%; text-align: left; font: inherit; color: var(--text-dim); border: 0; background: transparent; border-radius: 5px; padding: 7px 8px; overflow-wrap: anywhere; }
+button.project-file-row { cursor: pointer; color: var(--text); }
+button.project-file-row:hover, #project-file-tree summary:hover { background: var(--bg-input); }
+.project-file-row.active { background: var(--bg-input); color: var(--accent); font-weight: 700; }
 #navigator-tabs button { border: 0; border-radius: 5px; padding: 7px; color: var(--text-dim); background: transparent; font-size: 10px; font-weight: 700; cursor: pointer; }
 #navigator-tabs button.active { color: var(--text); background: var(--bg-panel); box-shadow: 0 1px 3px rgba(0,0,0,.12); }
 .navigator-panel { min-height: 0; overflow: auto; }
@@ -705,6 +718,8 @@ body {
 .agent-activity-dot { width: 6px; height: 6px; border-radius: 50%; background: #71717a; }
 .agent-activity.running .agent-activity-dot { background: var(--accent); animation: activity-pulse 1.2s ease-in-out infinite; }
 .agent-activity.complete .agent-activity-dot { background: var(--success); }
+.agent-activity.incomplete .agent-activity-dot { background: #b7791f; }
+.agent-activity-result.warning { color: #996515; background: color-mix(in srgb, #b7791f 9%, transparent); }
 .agent-activity.error .agent-activity-dot { background: var(--error); }
 @keyframes activity-pulse { 50% { opacity: .35; } }
 #agent-activity-panel { padding: 0 11px 8px; }
@@ -747,7 +762,9 @@ body {
 .sentence-reader-overview h3 { margin: 0; font-size: 13px; }
 #sentence-reader-paragraph-count, .sentence-reader-chart-unit { font-size: 11px; color: var(--text-dim); margin: 8px 0; }
 #sentence-reader-bars { list-style: none; margin: 4px 0 0; padding: 0; overflow-y: auto; min-height: 0; }
-.sentence-reader-bar-row { display: grid; grid-template-columns: 28px minmax(0, 1fr) 30px; align-items: center; gap: 7px; padding: 9px 6px; border-radius: 6px; font-size: 11px; font-variant-numeric: tabular-nums; }
+.sentence-reader-bar-row { display: grid; width: 100%; border: 0; background: transparent; color: inherit; font-family: inherit; text-align: left; cursor: pointer; grid-template-columns: 28px minmax(0, 1fr) 30px; align-items: center; gap: 7px; padding: 9px 6px; border-radius: 6px; font-size: 11px; font-variant-numeric: tabular-nums; }
+.sentence-reader-bar-row:hover { background: var(--bg-hover, #f1f5f9); }
+.sentence-reader-bar-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .sentence-reader-bar-row[aria-current="true"] { background: #e8f0ff; color: #1d4ed8; font-weight: 700; }
 .sentence-reader-bar-track { height: 12px; background: #e9edf2; border-radius: 3px; overflow: hidden; }
 .sentence-reader-bar-fill { display: block; height: 100%; background: #a9b9d0; border-radius: 3px; }
@@ -1514,3 +1531,14 @@ body {
 #agent-config-overlay .compact-dialog-body { grid-template-columns: minmax(210px, .8fr) minmax(320px, 1.2fr); }
 #agent-provider-list .provider-card-details { font-size: 11px; line-height: 1.6; text-transform: none; }
 @media (max-width: 680px) { #agent-config-overlay .compact-dialog-body { grid-template-columns: 1fr; } }
+#translation-settings { margin: auto; max-height: calc(100vh - 32px); overflow: auto; width: min(500px, calc(100vw - 32px)); padding: 24px; border: 1px solid var(--border); border-radius: 12px; color: var(--text); background: var(--bg-panel, white); }
+#translation-settings::backdrop { background: #0007; }
+#translation-settings header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+#translation-settings h2 { font-size: 18px; }
+#translation-settings label { display: block; margin: 16px 0 6px; }
+#translation-settings input, #translation-settings select { box-sizing: border-box; width: 100%; padding: 8px; background: var(--bg-input, white); color: var(--text); border: 1px solid var(--border); border-radius: 6px; }
+#translation-settings p { margin: 12px 0; line-height: 1.6; font-size: 13px; overflow-wrap: anywhere; }
+.translation-actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
+.translation-actions button, #translation-settings header button { padding: 6px 10px; color: var(--text); background: var(--bg-input, white); border: 1px solid var(--border); border-radius: 6px; cursor: pointer; }
+.translation-actions button:disabled { opacity: .5; cursor: wait; }
+#reader-translation-result { white-space: pre-wrap; line-height: 1.8; padding: 12px; border-left: 3px solid #3b82f6; background: var(--bg-input, #f3f6fa); max-height: 220px; overflow: auto; }

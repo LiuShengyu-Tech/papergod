@@ -48,6 +48,37 @@ npm run papergod
 
 The CLI initializes `main.tex` when the workspace contains no TeX files and stores Papergod metadata in `.papergod/project.json`. Agent choices are `mock`, `codex`, `claude-code`, `opencode`, and `pi`. External providers require an installed and authenticated CLI; Papergod invokes them non-interactively with structured output, timeouts, output limits, and analysis-only permissions.
 
+### Control from Codex with MCP
+
+Start PaperGod normally (`npm run papergod`), then register the local stdio bridge:
+
+```bash
+codex mcp add papergod -- node /absolute/path/to/papergod/src/mcp.js
+```
+
+The bridge connects to the running app at `http://127.0.0.1:3000`; set the
+`PAPERGOD_URL` environment variable for a different local port. It follows the
+app's active workspace. It does not start another writing agent or need an API key.
+Reload the client's MCP connections (or start a new session) if its tool list was
+loaded before registration.
+
+Ask Codex: “Read my PaperGod requests and revise the paper to address them.”
+`papergod_requests` lists files and pending opinions; pass a file to get its source,
+document prompts, writing libraries and snapshot. `papergod_revise` accepts exact
+before/after edits with UTF-16 source offsets and optional request IDs. By default
+it creates a plan in Review & Revise. With `apply: true`, authorized edits are
+applied atomically and only linked requests are resolved. Change history supports
+rollback, which reopens linked requests. Unsolved requests remain pending.
+
+Save edits in the browser before using MCP. Open pages check for external revisions
+every two seconds while visible and catch up when refocused. They synchronize the
+intent queue, clean editor buffers, outline and history, then compile the main paper
+without saving the browser buffer. Unsaved conflicting drafts are preserved with a
+download/load-external-version banner; saving is blocked until the conflict is handled.
+Reload an already-open page once after installing this update. Stale snapshots, workspace
+changes, overlapping edits and unknown new citation keys are rejected. The bridge
+only connects to IPv4 loopback, and its HTTP endpoints reject browser origins.
+
 ### Multiple paper workspaces
 
 Open **Tools → Workspaces** to register an existing local folder and switch papers without restarting the server. A folder may be a normal directory or a repository created with `git clone`; Papergod does not take over Git credentials or change the repository workflow, so commit and push with Git as usual. The browser reloads after a successful switch to discard stale PDF and editor state.

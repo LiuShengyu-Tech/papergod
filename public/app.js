@@ -1,8 +1,11 @@
 import * as pdfjsLib from '/vendor/pdfjs-dist/build/pdf.mjs';
 import { getLocale, setLocale, t, translateDom } from '/i18n.js';
+import { initTranslation } from '/translation.js';
+let updateReaderTranslation = () => {};
 import { buildOrderedSentenceMappings, sentenceMappingAt } from '/pdf-sentence-mapping.js';
 import { maskLatexNonTextArguments, readableSentenceTokens } from '/latex-readable.js';
 import { connectionSteps } from '/agent-connection.js';
+import { sourceSyncDecision, revisionFingerprint } from '/external-sync.js';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = '/vendor/pdfjs-dist/build/pdf.worker.mjs';
 
@@ -11,6 +14,16 @@ let currentFile = 'main.tex';
 // The file whose content is actually in the editor; null until a load succeeds,
 // so a failed load can never be saved back as an empty file.
 let loadedFile = null;
+let savedEditorSource = null;
+let externalSyncBusy = false;
+let externalSyncKey = '';
+let externalRevisionStamp = null;
+let externalAnnotationStamp = '';
+let externalNeedsCompile = false;
+let externalConflictFile = null;
+let externalWorkspace = null;
+const expandedProjectFolders = new Set();
+let projectFileNavigationBusy = false;
 // { entryFile, saved, files } from /api/entry.
 let entryState = { entryFile: null, saved: false, files: [] };
 let suggestions = [];
@@ -825,6 +838,16 @@ function dismissPdfSelection() {
   pdfMenuPoint = null;
 }
 
+// Removing a request dismisses its reading feedback as well as the list entry.
+// Clear the remembered changes too, so PDF resize/re-render cannot resurrect them.
+function clearRemovedIntentHighlights() {
+  dismissPdfSelection();
+  recentChangedSentenceIds.clear();
+  document.querySelectorAll('.pdf-recent-highlight').forEach(item => item.remove());
+  document.getElementById('pdf-preview').dataset.recentChangedSentences = '0';
+  window.getSelection()?.removeAllRanges();
+}
+
 function openPdfEditMenu() {
   const menu = document.getElementById('pdf-edit-menu');
   if (pdfMenuPoint) positionPdfMenu(menu, pdfMenuPoint);
@@ -1166,9 +1189,16 @@ function renderSentenceReaderOverview() {
   const chart = document.getElementById('sentence-reader-bars');
   chart.innerHTML = sentences.map((candidate, index) => {
     const label = t('reader.barLabel', { sentence: index + 1, words: counts[index] });
-    return '<li class="sentence-reader-bar-row"' + (index === current ? ' aria-current="true"' : '') + ' aria-label="' + escapeHtml(label) + '" title="' + escapeHtml(label) + '">' +
-      '<span>' + (index + 1) + '</span><span class="sentence-reader-bar-track" aria-hidden="true"><span class="sentence-reader-bar-fill" style="width:' + (counts[index] / maximum * 100) + '%"></span></span><span class="sentence-reader-bar-value">' + counts[index] + '</span></li>';
+    return '<li><button type="button" class="sentence-reader-bar-row" data-reader-sentence="' + sentenceReaderItems.indexOf(candidate) + '"' + (index === current ? ' aria-current="true"' : '') + ' aria-label="' + escapeHtml(label) + '" title="' + escapeHtml(label) + '">' +
+      '<span>' + (index + 1) + '</span><span class="sentence-reader-bar-track" aria-hidden="true"><span class="sentence-reader-bar-fill" style="width:' + (counts[index] / maximum * 100) + '%"></span></span><span class="sentence-reader-bar-value">' + counts[index] + '</span></button></li>';
   }).join('');
+  chart.querySelectorAll('[data-reader-sentence]').forEach(button => button.addEventListener('click', () => {
+    const index = Number(button.dataset.readerSentence);
+    if (index === sentenceReaderIndex) return;
+    sentenceReaderIndex = index;
+    renderSentenceReader();
+    chart.querySelector('[aria-current="true"]')?.focus({ preventScroll: true });
+  }));
   const active = chart.querySelector('[aria-current="true"]');
   if (active) chart.scrollTop = Math.max(0, active.offsetTop - chart.offsetTop - chart.clientHeight / 2 + active.offsetHeight / 2);
 }
@@ -1178,6 +1208,7 @@ function renderSentenceReader() {
   if (!item) return;
   sentenceReaderWord = null;
   const readable = readableSentenceTokens(item.sentence.text);
+  updateReaderTranslation(readable.text);
   const container = document.getElementById('sentence-reader-text');
   let cursor = 0;
   container.innerHTML = readable.tokens.map((token, index) => {
@@ -1339,6 +1370,7 @@ async function loadModificationIntents() {
     const res = await fetch('/api/annotations?documentId=' + encodeURIComponent(currentDocument.id));
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Modification intents could not be loaded');
+    if (modificationIntents.some(intent => !data.annotations.some(item => item.id === intent.id))) clearRemovedIntentHighlights();
     modificationIntents = data.annotations
       .filter((item) => item.status === 'open' && item.source?.actor?.startsWith('pdf-intent:'))
       .map((item) => new ModificationIntent(item));
@@ -1365,6 +1397,7 @@ async function deleteModificationIntent(id) {
     const res = await fetch('/api/annotations/' + encodeURIComponent(id), { method: 'DELETE' });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Modification intent could not be removed');
+    clearRemovedIntentHighlights();
     await loadModificationIntents();
     showStatus('Modification intent removed', 'success');
   } catch (error) { showStatus(error.message, 'error'); }
@@ -1779,6 +1812,7 @@ async function rollbackChangeHistoryEntry(entry) {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Could not restore the previous version');
     editor.setValue(data.content);
+    savedEditorSource = data.content;
     lastAiRevisionId = null;
     lastAiIntentIds = [];
     await syncStructure({ silent: true });
@@ -1797,6 +1831,7 @@ async function restoreChangeHistoryEntry(entry) {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Could not restore this version');
     editor.setValue(data.content);
+    savedEditorSource = data.content;
     lastAiRevisionId = null;
     lastAiIntentIds = [];
     await syncStructure({ silent: true });
@@ -1931,6 +1966,13 @@ const AGENT_ACTIVITY_STAGE_ORDER = ['prepare', 'run', 'apply', 'compile'];
 const AGENT_ACTIVITY_STAGE_KEYS = { prepare: 'activity.preparing', run: 'activity.running', apply: 'activity.applying', compile: 'activity.compiling', done: 'activity.complete' };
 
 function renderAgentActivityLog() {
+  const external = document.getElementById('agent-activity').dataset.source === 'external';
+  const title = document.getElementById('agent-activity-details-title');
+  title.removeAttribute('data-i18n');
+  title.textContent = external ? t('sync.activityTitle') : t('activity.detailsTitle');
+  const meta = document.getElementById('agent-activity-details-meta');
+  meta.removeAttribute('data-i18n');
+  meta.textContent = `${document.getElementById('agent-activity-label').textContent} · ${document.getElementById('agent-activity-subtitle').textContent} · ${document.getElementById('agent-activity-elapsed').textContent}`;
   const system = agentActivitySystemLog.map((item) => `Papergod · ${item}`).join('\n');
   const terminal = agentActivityTerminalLog.trim();
   const text = [system, terminal && `\n${t('activity.cliOutput')}\n${terminal}`].filter(Boolean).join('\n') || t('activity.waiting');
@@ -1956,10 +1998,12 @@ function closeAgentActivityDetails() {
 
 async function pollAgentActivity() {
   if (!agentActivityId) return;
+  const requestedId = agentActivityId;
   try {
     const res = await fetch(`/api/agent/activity/${encodeURIComponent(agentActivityId)}`);
     if (!res.ok) return;
     const activity = await res.json();
+    if (agentActivityId !== requestedId) return;
     agentActivityTerminalLog = activity.output || '';
     renderAgentActivityLog();
   } catch {}
@@ -1990,6 +2034,8 @@ function refreshSentenceReaderLocale() {
 function openAgentActivity({ provider, scope, prompt }) {
   const activity = document.getElementById('agent-activity');
   activity.className = 'agent-activity running';
+  activity.dataset.source = 'local';
+  delete activity.dataset.resultLabel;
   document.getElementById('agent-activity-subtitle').textContent = `${provider} · ${scope}`;
   document.getElementById('agent-activity-result').classList.add('hidden');
   document.getElementById('agent-activity-result').textContent = '';
@@ -2008,22 +2054,33 @@ function openAgentActivity({ provider, scope, prompt }) {
   setAgentActivityStage('prepare');
 }
 
-function finishAgentActivity(message, { error = false, revisionId = null, intentIds = [] } = {}) {
+function finishAgentActivity(message, { error = false, revisionId = null, intentIds = [], outcome = 'complete', completedThrough = 'compile' } = {}) {
+  const stoppedStage = agentActivityStage;
   clearInterval(agentActivityTimer);
   clearInterval(agentActivityPoll);
   agentActivityTimer = null;
   agentActivityPoll = null;
   pollAgentActivity();
   agentActivityController = null;
-  setAgentActivityStage(error ? '' : 'done');
-  document.getElementById('agent-activity').className = `agent-activity ${error ? 'error' : 'complete'}`;
+  const finalState = error ? 'error' : outcome;
+  const completedIndex = error ? AGENT_ACTIVITY_STAGE_ORDER.indexOf(stoppedStage) - 1 : AGENT_ACTIVITY_STAGE_ORDER.indexOf(completedThrough);
+  agentActivityStage = error ? '' : 'done';
+  document.querySelectorAll('#agent-activity-stages li').forEach(item => {
+    const index = AGENT_ACTIVITY_STAGE_ORDER.indexOf(item.dataset.stage);
+    item.classList.remove('active');
+    item.classList.toggle('complete', index <= completedIndex);
+  });
+  document.getElementById('agent-activity-label').textContent = t(error ? 'activity.failed' : `activity.${outcome}`);
+  document.getElementById('agent-activity').dataset.resultLabel = error ? 'activity.failed' : `activity.${outcome}`;
+  document.getElementById('agent-activity').className = `agent-activity ${finalState}`;
   const result = document.getElementById('agent-activity-result');
   result.textContent = message;
-  result.className = `agent-activity-result ${error ? 'error' : 'success'}`;
+  result.className = `agent-activity-result ${error ? 'error' : outcome === 'incomplete' ? 'warning' : outcome === 'noChanges' ? '' : 'success'}`;
   document.getElementById('agent-activity-cancel').classList.add('hidden');
   lastAiRevisionId = revisionId;
   lastAiIntentIds = revisionId ? [...intentIds] : [];
   document.getElementById('agent-activity-undo').classList.toggle('hidden', !revisionId);
+  renderAgentActivityLog();
 }
 
 async function undoLastAiRevision() {
@@ -2035,6 +2092,7 @@ async function undoLastAiRevision() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Could not undo the AI revision');
     editor.setValue(data.content);
+    savedEditorSource = data.content;
     if (lastAiIntentIds.length) {
       await Promise.all(lastAiIntentIds.map((id) => fetch('/api/annotations/' + encodeURIComponent(id), {
         method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'open' }),
@@ -3061,6 +3119,7 @@ function renderParagraphDraft() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Paragraph insertion failed');
       editor.setValue(data.content);
+      savedEditorSource = data.content;
       pendingParagraphDraft = null; renderParagraphDraft();
       await syncStructure({ silent: true });
       showStatus('Paragraph inserted with a recovery point', 'success');
@@ -3308,6 +3367,7 @@ async function applyRevisionPlan(revisionId) {
     const data = await res.json();
     if (!res.ok) throw new Error(reviewApiError(data, 'Revision apply failed'));
     editor.setValue(data.content);
+    savedEditorSource = data.content;
     await syncStructure({ silent: true });
     await loadReviewWorkspace();
     showStatus('Accepted changes applied; recovery point created', 'success');
@@ -3322,6 +3382,7 @@ async function rollbackRevisionPlan(revisionId) {
     const data = await res.json();
     if (!res.ok) throw new Error(reviewApiError(data, 'Rollback failed'));
     editor.setValue(data.content);
+    savedEditorSource = data.content;
     await syncStructure({ silent: true });
     await loadReviewWorkspace();
     showStatus('Revision rolled back safely', 'success');
@@ -3697,6 +3758,211 @@ async function downloadWorkflowExport() {
   } catch (error) { showStatus(error.message, 'error'); }
 }
 
+function showExternalConflict() {
+  const banner = document.getElementById('external-sync-conflict');
+  banner.classList.remove('hidden');
+  banner.querySelector('span').textContent = t('sync.conflict');
+}
+
+function initExternalSync() {
+  const syncControl = document.createElement('div');
+  syncControl.className = 'external-sync-control';
+  const status = document.createElement('span');
+  status.id = 'external-sync-status'; status.textContent = t('sync.connecting');
+  const syncButton = document.createElement('button');
+  syncButton.type = 'button'; syncButton.textContent = t('sync.now');
+  syncButton.addEventListener('click', pollExternalChanges);
+  syncControl.append(status, syncButton);
+  document.getElementById('agent-activity').after(syncControl);
+  const banner = document.createElement('div');
+  banner.id = 'external-sync-conflict';
+  banner.className = 'external-sync-conflict hidden';
+  banner.setAttribute('role', 'status');
+  const message = document.createElement('span');
+  const download = document.createElement('button');
+  download.type = 'button'; download.textContent = t('sync.download');
+  download.addEventListener('click', () => {
+    const url = URL.createObjectURL(new Blob([editor.getValue()], { type: 'text/plain;charset=utf-8' }));
+    const link = document.createElement('a'); link.href = url;
+    link.download = currentFile.split('/').pop().replace(/\.tex$/i, '-local-draft.tex'); link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  });
+  const reload = document.createElement('button');
+  reload.type = 'button'; reload.textContent = t('sync.load');
+  reload.addEventListener('click', async () => {
+    if (!confirm(t('sync.confirm'))) return;
+    if (await loadFile(currentFile, { preservePreview: true })) {
+      externalNeedsCompile = true;
+      await pollExternalChanges();
+    }
+  });
+  banner.append(message, download, reload);
+  document.getElementById('editor-panel').prepend(banner);
+  const timer = setInterval(pollExternalChanges, 2000);
+  window.addEventListener('pagehide', () => clearInterval(timer), { once: true });
+  window.addEventListener('focus', pollExternalChanges);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) pollExternalChanges(); });
+}
+
+async function pollExternalChanges() {
+  if (externalSyncBusy || document.hidden || !loadedFile || !currentDocument || compileInFlight || projectFileNavigationBusy
+    || document.getElementById('agent-activity').classList.contains('running')) return;
+  externalSyncBusy = true;
+  const file = loadedFile;
+  const documentId = currentDocument.id;
+  try {
+    const responses = await Promise.all(['/api/project', '/api/files/' + encodeURIComponent(file)]
+      .map(path => fetch(path, { cache: 'no-store', signal: AbortSignal.timeout(10000) })));
+    if (responses.some(response => !response.ok)) throw new Error('Sync request failed');
+    const [{ project }, remote] = await Promise.all(responses.map(response => response.json()));
+    if (file !== loadedFile || documentId !== currentDocument?.id || projectFileNavigationBusy
+      || document.getElementById('agent-activity').classList.contains('running')) return;
+    if ((externalWorkspace !== null && project.project.id !== externalWorkspace) || !project.documents.some(item => item.id === documentId)) {
+      showStatus(t('sync.workspaceChanged'), 'error'); return;
+    }
+    externalWorkspace = project.project.id;
+    const key = project.project.id + ':' + file;
+    if (externalSyncKey !== key) {
+      const sameWorkspace = externalSyncKey.startsWith(project.project.id + ':');
+      externalSyncKey = key; externalAnnotationStamp = '';
+      if (!sameWorkspace) externalRevisionStamp = null;
+    }
+    const stamp = revisionFingerprint(project.revisions);
+    const firstSnapshot = externalRevisionStamp === null;
+    const revisionsChanged = externalRevisionStamp !== null && stamp !== externalRevisionStamp;
+    externalRevisionStamp = stamp;
+    const latestExternal = [...project.revisions].filter(item => item.actor === 'mcp' || item.summary === 'Revision submitted by an external MCP client.')
+      .filter(item => ['applied', 'rolled-back'].includes(item.status))
+      .sort((a, b) => (b.rolledBackAt || b.appliedAt || '').localeCompare(a.rolledBackAt || a.appliedAt || ''))[0];
+    if (firstSnapshot && latestExternal) externalNeedsCompile = true;
+    const annotations = project.annotations.filter(item => item.documentId === documentId);
+    const annotationStamp = JSON.stringify(annotations);
+    // Preserve an instruction textarea while the user is typing in it.
+    if (annotationStamp !== externalAnnotationStamp && !document.activeElement?.closest('#modification-intent-list')) {
+      if (modificationIntents.some(intent => !annotations.some(item => item.id === intent.id))) clearRemovedIntentHighlights();
+      modificationIntents = annotations.filter(item => item.status === 'open' && item.source?.actor?.startsWith('pdf-intent:')).map(item => new ModificationIntent(item));
+      renderModificationIntents(); schedulePromptContextPreview();
+      externalAnnotationStamp = annotationStamp;
+    }
+    const decision = sourceSyncDecision(savedEditorSource, editor.getValue(), remote.content);
+    if (decision === 'conflict') {
+      externalConflictFile = file; externalNeedsCompile = true; showExternalConflict();
+    } else {
+      externalConflictFile = null;
+      document.getElementById('external-sync-conflict').classList.add('hidden');
+      if (decision === 'replace') {
+        const scroll = editor.getScrollInfo(); const cursor = editor.getCursor();
+        editor.setValue(remote.content); savedEditorSource = remote.content;
+        editor.setCursor(cursor); editor.scrollTo(scroll.left, scroll.top);
+        suggestions = []; renderSuggestions(); externalNeedsCompile = true;
+        await syncStructure({ silent: true });
+      } else if (decision === 'acknowledge') savedEditorSource = remote.content;
+    }
+    if (revisionsChanged) externalNeedsCompile = true;
+    if (revisionsChanged || decision === 'replace' || decision === 'conflict') await loadRecentChangeHistory({ silent: true });
+    if (externalNeedsCompile && !externalConflictFile && file === loadedFile && editor.getValue() === savedEditorSource) {
+      externalNeedsCompile = false;
+      clearInterval(agentActivityTimer); clearInterval(agentActivityPoll);
+      agentActivityTimer = null; agentActivityPoll = null; agentActivityId = null;
+      agentActivityTerminalLog = '';
+      agentActivitySystemLog = [t('sync.externalOutputNote')];
+      if (latestExternal) {
+        agentActivitySystemLog.push(`${latestExternal.rolledBackAt || latestExternal.appliedAt} · ${latestExternal.title} · ${latestExternal.status}`);
+        agentActivitySystemLog.push(`${latestExternal.file || file} · ${latestExternal.changes.length} changes · ${latestExternal.annotationIds.length} linked requests`);
+      }
+      document.getElementById('agent-activity').dataset.source = 'external';
+      document.getElementById('agent-activity').className = 'agent-activity running';
+      document.getElementById('agent-activity-subtitle').textContent = 'MCP / external revision';
+      document.getElementById('agent-activity-result').classList.add('hidden');
+      document.getElementById('agent-activity-undo').classList.add('hidden');
+      const started = Date.now();
+      document.getElementById('agent-activity-elapsed').textContent = '0s';
+      agentActivityTimer = setInterval(() => {
+        document.getElementById('agent-activity-elapsed').textContent = `${Math.round((Date.now() - started) / 1000)}s`;
+        renderAgentActivityLog();
+      }, 500);
+      setAgentActivityStage('apply', t('sync.sourceUpdated'));
+      await syncStructure({ silent: true });
+      setAgentActivityStage('compile', t('sync.rebuilding'));
+      // Never save a stale browser buffer as part of an external refresh.
+      const compiled = latexEngineAvailable && await compileFile({ silent: true, save: false, preserveView: true });
+      document.getElementById('agent-activity-subtitle').textContent = 'MCP / external revision';
+      const latest = changeHistoryEntries.find(item => item.matchesCurrent && item.status === 'applied');
+      const message = t(compiled ? 'sync.complete' : 'sync.compilePending');
+      agentActivitySystemLog.push(message);
+      finishAgentActivity(message, { revisionId: latest?.id || null, outcome: compiled ? 'complete' : 'incomplete', completedThrough: compiled ? 'compile' : 'apply' });
+      await loadRecentChangeHistory({ silent: true });
+    }
+    document.getElementById('external-sync-status').textContent = t('sync.checked') + ' ' + new Date().toLocaleTimeString();
+  } catch {
+    // Keep the previous snapshot and recover after temporary disconnection.
+    document.getElementById('external-sync-status').textContent = t('sync.retrying');
+    if (document.getElementById('agent-activity').dataset.source === 'external' && document.getElementById('agent-activity').classList.contains('running')) {
+      finishAgentActivity(t('sync.retrying'), { error: true });
+    }
+  } finally { externalSyncBusy = false; }
+}
+
+async function loadProjectFileTree() {
+  const container = document.getElementById('project-file-tree');
+  container.replaceChildren();
+  await renderProjectDirectory('', container);
+}
+
+async function renderProjectDirectory(directory, container) {
+  container.textContent = t('files.loading');
+  try {
+    const response = await fetch('/api/project-tree?directory=' + encodeURIComponent(directory));
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || t('files.error'));
+    container.replaceChildren();
+    if (!data.entries.length) { container.textContent = t('files.empty'); return; }
+    for (const entry of data.entries) {
+      if (entry.type === 'directory') {
+        const folder = document.createElement('details');
+        const label = document.createElement('summary');
+        label.textContent = entry.name;
+        label.title = entry.path;
+        const children = document.createElement('div');
+        children.className = 'project-folder-children';
+        folder.append(label, children);
+        let populated = false;
+        folder.addEventListener('toggle', async () => {
+          if (folder.open) {
+            expandedProjectFolders.add(entry.path);
+            if (!populated) { populated = true; await renderProjectDirectory(entry.path, children); }
+          } else expandedProjectFolders.delete(entry.path);
+        });
+        container.append(folder);
+        folder.open = expandedProjectFolders.has(entry.path);
+      } else {
+        const editable = entry.name.toLowerCase().endsWith('.tex');
+        const item = document.createElement(editable ? 'button' : 'div');
+        item.className = 'project-file-row';
+        item.textContent = entry.name;
+        item.title = entry.path + (editable ? '' : ' — ' + t('files.viewOnly'));
+        item.dataset.projectFile = entry.path;
+        item.classList.toggle('active', entry.path === currentFile);
+        if (editable) {
+          item.type = 'button';
+          item.addEventListener('click', async () => {
+            if (projectFileNavigationBusy) return;
+            projectFileNavigationBusy = true;
+            try {
+              if (entry.path !== loadedFile) {
+                if (loadedFile && editor.getValue() !== savedEditorSource && !await saveFile({ sync: false })) return;
+                if (!await loadFile(entry.path, { preservePreview: true })) return;
+              }
+              setWorkspaceView('source', { user: true });
+            } finally { projectFileNavigationBusy = false; }
+          });
+        }
+        container.append(item);
+      }
+    }
+  } catch (error) { container.textContent = t('files.error') + ': ' + error.message; }
+}
+
 async function loadFileTree() {
   try {
     const res = await fetch('/api/files');
@@ -3722,6 +3988,9 @@ async function loadFile(name, { preservePreview = false } = {}) {
     loadedFile = name;
     if (!preservePreview) resetCompiledPreview();
     editor.setValue(data.content);
+    savedEditorSource = data.content;
+    externalConflictFile = null;
+    document.getElementById('external-sync-conflict')?.classList.add('hidden');
     suggestions = [];
     lastLibraryUsage = null;
     pendingParagraphDraft = null;
@@ -3732,6 +4001,7 @@ async function loadFile(name, { preservePreview = false } = {}) {
     document.querySelectorAll('#file-tree li').forEach(li => {
       li.classList.toggle('active', li.dataset.file === name);
     });
+    document.querySelectorAll('[data-project-file]').forEach(item => item.classList.toggle('active', item.dataset.projectFile === name));
     await syncStructure({ silent: true });
     await loadModificationIntents();
     if (latexEngineAvailable && !preservePreview) await compileFile({ silent: true });
@@ -3744,18 +4014,34 @@ async function loadFile(name, { preservePreview = false } = {}) {
 }
 
 async function saveFile({ sync = true } = {}) {
+  if (externalConflictFile === loadedFile && loadedFile) {
+    showExternalConflict(); showStatus(t('sync.conflict'), 'error'); return false;
+  }
   if (!loadedFile || loadedFile !== currentFile) {
     showStatus(t('entry.saveBlocked'), 'error');
     return false;
   }
+  const savingFile = loadedFile;
+  const savingBaseline = savedEditorSource;
   try {
     const content = editor.getValue();
-    const res = await fetch('/api/files/' + encodeURIComponent(currentFile), {
+    // Catch conflicts even before the next background poll.
+    const latestResponse = await fetch('/api/files/' + encodeURIComponent(savingFile), { cache: 'no-store' });
+    if (!latestResponse.ok) throw new Error('Could not check the saved source');
+    const latest = await latestResponse.json();
+    if (loadedFile !== savingFile) return false;
+    if (savingBaseline !== null && latest.content !== savingBaseline && latest.content !== content) {
+      externalConflictFile = loadedFile; showExternalConflict();
+      showStatus(t('sync.conflict'), 'error'); return false;
+    }
+    const res = await fetch('/api/files/' + encodeURIComponent(savingFile), {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content }),
     });
     if (!res.ok) throw new Error('Save failed');
+    if (loadedFile !== savingFile) return true;
+    savedEditorSource = content;
     if (sync) await syncStructure({ silent: true });
     showStatus('Saved', 'success');
     return true;
@@ -4714,10 +5000,10 @@ function initCompileMenu() {
   });
 }
 
-async function compileFile({ silent = false, clean = false } = {}) {
+async function compileFile({ silent = false, clean = false, save = true, preserveView = false } = {}) {
   if (clean && compileInFlight) return false;
   setCompileBusy(true);
-  if (!await saveFile()) {
+  if (save && !await saveFile()) {
     setCompileBusy(false);
     return false;
   }
@@ -4732,7 +5018,7 @@ async function compileFile({ silent = false, clean = false } = {}) {
     if (data.ok) {
       hideCompileError({ clear: true });
       const changedCount = recordSuccessfulCompile(editor.getValue());
-      showCompiledPdf(data.pdf);
+      await showCompiledPdf(data.pdf, { switchView: !preserveView });
       if (clean) showStatus(t('compileMenu.cleanDone', { steps: (data.steps || [data.engine]).join(' → ') }), 'success');
       else if (!silent) showStatus('Compiled (' + data.engine + ')' + (changedCount ? ` · ${changedCount} changed sentence${changedCount === 1 ? '' : 's'} highlighted` : ''), 'success');
       return true;
@@ -4802,12 +5088,12 @@ async function askAgent(composedPrompt = null, isComposed = Boolean(composedProm
     }
     lastLibraryUsage = data.library || null;
     renderLibraryUsage();
-    document.getElementById('ai-prompt').value = '';
+    if (!unresolvedTasks.length) document.getElementById('ai-prompt').value = '';
     schedulePromptContextPreview();
     if (suggestions.length === 0) {
       renderSuggestions();
-      showStatus('No changes proposed', '');
-      finishAgentActivity(data.summary || 'The Agent completed without proposing source changes.');
+      showStatus(t(unresolvedTasks.length ? 'activity.incomplete' : 'activity.noChanges'), '');
+      finishAgentActivity(data.summary || 'The Agent returned without proposing source changes.', { outcome: unresolvedTasks.length ? 'incomplete' : 'noChanges', completedThrough: 'run' });
       return;
     }
     setAgentActivityStage('apply', `Applying ${suggestions.length} proposed change${suggestions.length === 1 ? '' : 's'} as one atomic revision…`);
@@ -4821,6 +5107,7 @@ async function askAgent(composedPrompt = null, isComposed = Boolean(composedProm
     if (!applyResponse.ok) throw new Error(applied.error || 'AI revision could not be applied');
     const appliedIntentIds = [...new Set((applied.revision?.changes || []).map((change) => change.taskId).filter((taskId) => intentIds.includes(taskId)))];
     editor.setValue(applied.content);
+    savedEditorSource = applied.content;
     suggestions = [];
     renderSuggestions();
     await syncStructure({ silent: true });
@@ -4833,9 +5120,10 @@ async function askAgent(composedPrompt = null, isComposed = Boolean(composedProm
       catch (error) { intentResolutionNote = ` ${error.message}`; }
     }
     if (unresolvedTasks.length) intentResolutionNote += ` ${unresolvedTasks.length} task${unresolvedTasks.length === 1 ? '' : 's'} remain open.`;
-    finishAgentActivity(`${appliedCount} change${appliedCount === 1 ? '' : 's'} applied${compiled ? ' and the PDF was rebuilt' : '; PDF compilation needs attention'}.${intentResolutionNote}`, { revisionId: applied.revision?.id || null, intentIds: appliedIntentIds, unresolvedTaskIds: unresolvedTasks.map((item) => item.taskId) });
+    const needsAttention = !compiled || unresolvedTasks.length > 0 || Boolean(intentResolutionNote);
+    finishAgentActivity(`${appliedCount} change${appliedCount === 1 ? '' : 's'} applied${compiled ? ' and the PDF was rebuilt' : '; PDF compilation needs attention'}.${intentResolutionNote}`, { revisionId: applied.revision?.id || null, intentIds: appliedIntentIds, outcome: needsAttention ? 'incomplete' : 'complete', completedThrough: compiled ? 'compile' : 'apply' });
     await loadRecentChangeHistory({ silent: true });
-    showStatus(t('history.saved', { count: appliedCount }), 'success');
+    showStatus(needsAttention ? t('activity.incomplete') : t('history.saved', { count: appliedCount }), needsAttention ? '' : 'success');
   } catch (error) {
     if (error.code === 'AGENT_AUTH_REQUIRED') reflectAgentRunConnection({ provider: currentProvider, ok: false, code: error.code, error: error.message });
     const message = error.name === 'AbortError' ? 'AI task cancelled.' : error.message || 'Agent request failed';
@@ -4895,6 +5183,7 @@ async function acceptSuggestion(id) {
     const data = await res.json();
     if (data.ok) {
       editor.setValue(data.content);
+      savedEditorSource = data.content;
       await syncStructure({ silent: true });
       showStatus('Suggestion applied', 'success');
     } else {
@@ -5003,6 +5292,7 @@ async function insertLiteratureReviewDraft() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Insert failed');
     editor.setValue(data.content);
+    savedEditorSource = data.content;
     await syncStructure({ silent: true });
     setReferencesNote('Review paragraph inserted into the paper', 'success');
     pendingLiteratureReview = null;
@@ -5978,6 +6268,7 @@ function init() {
   initSplitDivider();
   initPdfAutoFit();
   initEditorSettings();
+  updateReaderTranslation = initTranslation();
   initThemeToggle();
   initEditorScheme();
   document.getElementById('sync-pdf-to-code').addEventListener('click', syncPdfToCursor);
@@ -5996,7 +6287,9 @@ function init() {
     refreshSentenceReaderLocale();
     if (agentProviders.length) { renderQuickAgentSelector(); renderAgentConfiguration(); }
     if (changeHistoryEntries.length) { renderChangeHistoryList(); renderChangeHistoryDetail(); }
-    if (agentActivityStage) setAgentActivityStage(agentActivityStage);
+    const resultLabel = document.getElementById('agent-activity').dataset.resultLabel;
+    if (resultLabel) document.getElementById('agent-activity-label').textContent = t(resultLabel);
+    else if (agentActivityStage) setAgentActivityStage(agentActivityStage);
     else renderAgentActivityLog();
     renderVersionInfo();
     if (orchestrations.length) {
@@ -6006,14 +6299,16 @@ function init() {
     }
   });
   const setNavigatorTab = (tab) => {
-    const outline = tab === 'outline';
-    document.getElementById('navigator-outline-panel').classList.toggle('hidden', !outline);
-    document.getElementById('navigator-tools-panel').classList.toggle('hidden', outline);
-    document.getElementById('navigator-outline-tab').classList.toggle('active', outline);
-    document.getElementById('navigator-tools-tab').classList.toggle('active', !outline);
-    document.getElementById('navigator-outline-tab').setAttribute('aria-selected', String(outline));
-    document.getElementById('navigator-tools-tab').setAttribute('aria-selected', String(!outline));
+    for (const name of ['outline', 'files', 'tools']) {
+      const active = name === tab;
+      document.getElementById(`navigator-${name}-panel`).classList.toggle('hidden', !active);
+      document.getElementById(`navigator-${name}-tab`).classList.toggle('active', active);
+      document.getElementById(`navigator-${name}-tab`).setAttribute('aria-selected', String(active));
+    }
+    if (tab === 'files') loadProjectFileTree();
   };
+  document.getElementById('navigator-files-tab').addEventListener('click', () => setNavigatorTab('files'));
+  document.getElementById('refresh-project-files').addEventListener('click', loadProjectFileTree);
   document.getElementById('navigator-outline-tab').addEventListener('click', () => setNavigatorTab('outline'));
   document.getElementById('navigator-tools-tab').addEventListener('click', () => setNavigatorTab('tools'));
   document.getElementById('version-status').addEventListener('click', openVersionDialog);
@@ -6494,6 +6789,7 @@ function init() {
   initEntryPicker();
   initOutlineDepthPicker();
   initCompileErrorPanel();
+  initExternalSync();
   loadEngineStatus().then(openEntryFile);
   loadVersionInfo();
   loadConfig();

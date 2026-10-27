@@ -374,6 +374,9 @@ export async function applyRevision(workspaceRoot, revisionId) {
     const safe = sanitizePath(document.file, workspaceRoot);
     if (!safe) throw problem('Access denied', 403);
     const original = await readFile(safe, 'utf-8');
+    if (revision.expectedSourceHash && hash(original) !== revision.expectedSourceHash) {
+      throw problem('Source changed since the MCP snapshot; read requests again', 409, 'STALE_CHANGE');
+    }
     const accepted = revision.changes.filter((item) => item.status === 'accepted');
     if (!accepted.length) throw problem('No accepted changes to apply');
     const sorted = validateAcceptedChanges(original, accepted);

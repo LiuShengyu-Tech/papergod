@@ -37,7 +37,12 @@ function EntryFilePicker() {
 function Navigator() {
   return (
     <aside id="sidebar">
-      <div id="navigator-tabs" role="tablist" aria-label="Paper navigation"><button id="navigator-outline-tab" className="active" type="button" role="tab" aria-selected="true" data-i18n="nav.outline">Outline</button><button id="navigator-tools-tab" type="button" role="tab" aria-selected="false" data-i18n="nav.tools">Tools</button></div>
+      <div id="navigator-tabs" role="tablist" aria-label="Paper navigation"><button id="navigator-outline-tab" className="active" type="button" role="tab" aria-selected="true" aria-controls="navigator-outline-panel" data-i18n="nav.outline">Outline</button><button id="navigator-files-tab" type="button" role="tab" aria-selected="false" aria-controls="navigator-files-panel" data-i18n="nav.files">Files</button><button id="navigator-tools-tab" type="button" role="tab" aria-selected="false" aria-controls="navigator-tools-panel" data-i18n="nav.tools">Tools</button></div>
+      <section id="navigator-files-panel" className="navigator-panel hidden" role="tabpanel" aria-labelledby="navigator-files-tab">
+        <div className="sidebar-heading"><h3 data-i18n="files.title">Project files</h3><Button id="refresh-project-files" variant="ghost" size="icon" title="Refresh files" aria-label="Refresh files"><RefreshCw size={14} /></Button></div>
+        <p className="project-files-hint" data-i18n="files.hint">Open folders to browse. Select a .tex file to edit.</p>
+        <div id="project-file-tree" />
+      </section>
       <section id="navigator-outline-panel" className="navigator-panel" role="tabpanel">
         <div className="sidebar-heading">
           <h3 data-i18n="nav.paperOutline">Paper outline</h3>
@@ -70,6 +75,7 @@ function Navigator() {
           <button id="tool-orchestration" type="button"><Network size={13} /><span data-i18n="tools.orchestration">Agent orchestration</span></button>
           <button id="tool-analysis" type="button"><BarChart3 size={13} /><span data-i18n="tools.analysis">Paragraph analysis</span></button>
           <button id="tool-agent-config" type="button"><Settings size={13} /><span data-i18n="tools.agentConfig">Agent configuration</span></button>
+          <button id="tool-translation-settings" type="button"><Settings size={13} /><span data-i18n="tools.translationSettings">Translation settings</span></button>
         </div>
         <div className="tool-group">
           <div className="tool-group-title" data-i18n="tools.group.document">Document</div>
